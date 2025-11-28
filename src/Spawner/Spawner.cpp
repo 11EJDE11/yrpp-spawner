@@ -297,7 +297,15 @@ bool Spawner::StartScenario(const char* pScenarioName)
 			pSession->GameMode = GameMode::Skirmish;
 	}
 
-	Game::InitRandom();
+	// Skip InitRandom if we're replaying a file
+	// It is already called earlier by the game, and we have saved those values in the recording
+	// so let's not replace it. Possibly we don't need to call this here at all? Or do saved games need it?
+	// 
+	// we should just ignore the InitRandom in phobos actually?
+	if (!sizeof(Spawner::Config->PlaybackPath))
+	{
+		Game::InitRandom();
+	}
 
 	// StartScenario
 	if (SessionClass::IsCampaign())
