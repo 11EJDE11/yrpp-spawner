@@ -49,6 +49,8 @@
     <ClCompile Include="$(ThisDir)\src\Misc\SavedGamesInSubdir.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\SkipScoreScreen.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\VideoMode.cpp" />
+    <!-- Replay -->
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.cpp" />
     <!-- Spawner -->
     <ClCompile Include="$(ThisDir)\src\Spawner\CustomMixes.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\NetHack.cpp" />
@@ -80,6 +82,8 @@
     <ClInclude Include="$(ThisDir)\src\CnCNetYR\Ra2Mode.h" />
     <!-- Misc -->
     <ClInclude Include="$(ThisDir)\src\UI\Dialogs.h" />
+    <!-- Replay -->
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.h" />
     <!-- Spawner -->
     <ClInclude Include="$(ThisDir)\src\Spawner\NetHack.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\ProtocolZero.h" />

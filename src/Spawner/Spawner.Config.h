@@ -104,6 +104,13 @@ public:
 	int AutoSaveInterval;
 	int NextAutoSaveNumber;
 
+	// Replay Options
+	bool EnableReplayRecording;
+	char ReplayFile[MAX_PATH];
+	bool ReplayShroudEnabled;
+	bool ReplayLockedViewport;
+	bool ReplaySelectUnits;
+
 	// Scenario Options
 	int  Seed;
 	int  TechLevel;
@@ -178,6 +185,11 @@ public:
 		, AutoSaveCount { 5 }
 		, AutoSaveInterval { 7200 }
 		, NextAutoSaveNumber { 0 }
+		, EnableReplayRecording { true }
+		, ReplayFile { "" }
+		, ReplayShroudEnabled { false }
+		, ReplayLockedViewport { true }
+		, ReplaySelectUnits { true }
 
 		// Scenario Options
 		, Seed { 0 }
