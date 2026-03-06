@@ -22,6 +22,7 @@
 #include "NetHack.h"
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
+#include <Replay/ReplaySystem.h>
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
 
@@ -46,6 +47,14 @@ std::unique_ptr<SpawnerConfig> Spawner::Config = nullptr;
 bool Spawner::DoSave = false;
 int Spawner::NextAutoSaveFrame = -1;
 int Spawner::NextAutoSaveNumber = 0;
+
+namespace
+{
+bool IsReplayPlaybackMode()
+{
+	return ReplaySystem::IsPlaybackRequested();
+}
+}
 
 void Spawner::Init()
 {
@@ -188,6 +197,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 	const auto pSession = &SessionClass::Instance;
 	const auto pGameModeOptions = &GameModeOptionsClass::Instance;
+	const bool isReplayPlayback = IsReplayPlaybackMode();
 
 	strcpy_s(Game::ScenarioName, 0x200, pScenarioName);
 	pSession->ReadScenarioDescriptions();
@@ -329,6 +339,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 	else /* if (SessionClass::IsMultiplayer()) */
 	{
 		Spawner::InitNetwork();
+
 		bool result = Config->LoadSaveGame
 			? Spawner::LoadSavedGame(Config->SaveGameName)
 			: ScenarioClass::StartScenario(pScenarioName, 0, -1);
@@ -341,7 +352,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		if (Config->LoadSaveGame && !Spawner::Reconcile_Players())
 			return false;
 
-		if (!pSession->CreateConnections())
+		if (!isReplayPlayback && !pSession->CreateConnections())
 			return false;
 
 		// Ares does not support MultiEngineer switching in multiplayer, however
@@ -363,6 +374,12 @@ bool Spawner::StartScenario(const char* pScenarioName)
 			Game::ChatMask[5] = false;
 			Game::ChatMask[6] = false;
 			Game::ChatMask[7] = false;
+		}
+
+		if (isReplayPlayback && !Spawner::Config->IsCampaign && HouseClass::CurrentPlayer)
+		{
+			//Game::ObserverMode = true;
+			//HouseClass::CurrentPlayer->MakeObserver(); //<--causes issues
 		}
 
 		return true;
@@ -389,6 +406,7 @@ bool Spawner::LoadSavedGame(const char* saveGameName)
 void Spawner::InitNetwork()
 {
 	const auto pSpawnerConfig = Spawner::GetConfig();
+	const bool isReplayPlayback = IsReplayPlaybackMode();
 
 	Tunnel::Id = htons((u_short)pSpawnerConfig->TunnelId);
 	Tunnel::Ip = inet_addr(pSpawnerConfig->TunnelIp);
@@ -408,7 +426,7 @@ void Spawner::InitNetwork()
 	Game::Network::PlanetWestwoodStartTime = time(NULL);
 	Game::Network::GameStockKeepingUnit = 0x2901;
 
-	ProtocolZero::Enable = (pSpawnerConfig->Protocol == 0);
+	ProtocolZero::Enable = !isReplayPlayback && (pSpawnerConfig->Protocol == 0);
 	if (ProtocolZero::Enable)
 	{
 		Game::Network::FrameSendRate = 2;
@@ -425,12 +443,14 @@ void Spawner::InitNetwork()
 	}
 	else
 	{
-		Game::Network::FrameSendRate = pSpawnerConfig->FrameSendRate;
+		Game::Network::FrameSendRate = isReplayPlayback ? 1 : pSpawnerConfig->FrameSendRate;
 	}
 
-	Game::Network::MaxAhead = pSpawnerConfig->MaxAhead == -1
-		? Game::Network::FrameSendRate * 6
-		: pSpawnerConfig->MaxAhead;
+	Game::Network::MaxAhead = isReplayPlayback
+		? 1
+		: pSpawnerConfig->MaxAhead == -1
+			? Game::Network::FrameSendRate * 6
+			: pSpawnerConfig->MaxAhead;
 
 	Game::Network::MaxMaxAhead      = 0;
 	Game::Network::ProtocolVersion  = 2;
