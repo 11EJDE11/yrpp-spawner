@@ -546,6 +546,13 @@ void ApplyPlaybackInitialState()
 		memcpy(ScenarioClass::Instance->Random.Table, gReplay.PlaybackHeader.RandomizerTable, sizeof(gReplay.PlaybackHeader.RandomizerTable));
 		ScenarioClass::Instance->UniqueID = gReplay.PlaybackHeader.UniqueIDCounter;
 	}
+
+	// SessionClass::Resume sets WaitingForPlayersAutoHideFrame = CurrentFrame + 3, which
+	// triggers SessionClass_HideWaitingForPlayersScreen ~3 frames later. In observer/replay
+	// mode the "waiting for players" panel object at 0x0087F770 is never initialized, so
+	// the call to FUN_0054f720(ECX=[0x0087F770]) crashes at *(ECX+0x318). Zero out the
+	// timer so MainLoop never invokes HideWaitingForPlayersScreen during playback.
+	//*reinterpret_cast<int*>(0x00B07784u) = 0;
 }
 
 // Timing events aren't needed as we skip any networking stuff in playback.
@@ -1159,6 +1166,576 @@ DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0x5)
 
 	return 0;
 }
+//
+//namespace
+//{
+//	constexpr int ReplayProbeFrameThreshold = 95;
+//
+//	using NoArgBoolFn = bool(__cdecl*)();
+//	using NoArgVoidFn = void(__cdecl*)();
+//
+//	void LogMainLoopProbe(const char* probeName, REGISTERS* R)
+//	{
+//		if (Unsorted::CurrentFrame > ReplayProbeFrameThreshold)
+//		{
+//			Debug::Log("[Replay][Probe] frame=%d origin=%06X %s\n",
+//				Unsorted::CurrentFrame, R->Origin(), probeName);
+//		}
+//	}
+//}
+//
+//// Run_Game_Scenarios loop probes around MainLoop / ShowSpecialDialog / ProcessPendingSessionExitState_Thunk.
+//DEFINE_HOOK(0x48CE6D, RunGameScenarios_MainLoopProbe_InitSpecialDialogReset, 0x6)
+//{
+//	LogMainLoopProbe("RunGameScenarios.InitSpecialDialogReset", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x48CE73, RunGameScenarios_MainLoopProbe_InitUnderParMessageFlag, 0x6)
+//{
+//	LogMainLoopProbe("RunGameScenarios.InitUnderParMessageFlag", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x48CE79, RunGameScenarios_MainLoopProbe_LoadSessionModeContext, 0x5)
+//{
+//	LogMainLoopProbe("RunGameScenarios.LoadSessionModeContext", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x48CE7E, RunGameScenarios_MainLoopProbe_SetDialogGateFlag, 0x7)
+//{
+//	LogMainLoopProbe("RunGameScenarios.SetDialogGateFlag", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x48CE93, RunGameScenarios_MainLoopProbe_ProcessPendingExit_BeforeDialog, 0x5)
+//{
+//	enum { Continue = 0x48CE98 };
+//
+//	LogMainLoopProbe("RunGameScenarios.ProcessPendingExit.BeforeDialog", R);
+//
+//	const auto processPendingExitThunk = reinterpret_cast<NoArgBoolFn>(0x0055CFD0);
+//	R->EAX(static_cast<DWORD>(processPendingExitThunk() ? 1u : 0u));
+//	return Continue;
+//}
+//
+//DEFINE_HOOK(0x48CE9C, RunGameScenarios_MainLoopProbe_ShowSpecialDialogCall, 0x5)
+//{
+//	enum { Continue = 0x48CEA1 };
+//
+//	LogMainLoopProbe("RunGameScenarios.ShowSpecialDialog", R);
+//
+//	const auto showSpecialDialog = reinterpret_cast<NoArgVoidFn>(0x0048C8B0);
+//	showSpecialDialog();
+//	return Continue;
+//}
+//
+//DEFINE_HOOK(0x48CEA1, RunGameScenarios_MainLoopProbe_ProcessPendingExit_AfterDialog, 0x5)
+//{
+//	enum { Continue = 0x48CEA6 };
+//
+//	LogMainLoopProbe("RunGameScenarios.ProcessPendingExit.AfterDialog", R);
+//
+//	const auto processPendingExitThunk = reinterpret_cast<NoArgBoolFn>(0x0055CFD0);
+//	R->EAX(static_cast<DWORD>(processPendingExitThunk() ? 1u : 0u));
+//	return Continue;
+//}
+
+//DEFINE_HOOK(0x48CEAF, RunGameScenarios_MainLoopProbe_PreScenarioResume, 0x5)
+//{
+//	LogMainLoopProbe("RunGameScenarios.PreScenarioResume", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x48CEBF, RunGameScenarios_MainLoopProbe_ClearAttractFlag, 0x6)
+//{
+//	LogMainLoopProbe("RunGameScenarios.ClearAttractFlag", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x48CEC7, RunGameScenarios_MainLoopProbe_ClearLoopStateFlag, 0x6)
+//{
+//	LogMainLoopProbe("RunGameScenarios.ClearLoopStateFlag", R);
+//	return 0;
+//}
+//
+//
+//DEFINE_HOOK(0x55D88E, MainLoop_Probe_ReadInputActiveFlag, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.ReadInputActiveFlag", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D8C9, MainLoop_Probe_ReadCurrentFrame, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.ReadCurrentFrame", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D8F7, MainLoop_Probe_ReadRecordPlaybackFlags, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.ReadRecordPlaybackFlags", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55DA42, MainLoop_Probe_CheckPlaybackBit, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.CheckPlaybackBit", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D3BB, MainLoop_Probe_SyncDelay_ReadCurrentFrame, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.SyncDelay.ReadCurrentFrame", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D440, MainLoop_Probe_ModeDispatch_ReadSessionModeA, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.ModeDispatch.ReadSessionModeA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D597, MainLoop_Probe_ModeDispatch_ReadSessionModeB, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.ModeDispatch.ReadSessionModeB", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D7C2, MainLoop_Probe_RenderGate_ReadSessionMode, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.RenderGate.ReadSessionMode", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D821, MainLoop_Probe_ReadSessionObject, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.ReadSessionObject", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D859, MainLoop_Probe_ReadIsActiveFlag, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.ReadIsActiveFlag", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D903, MainLoop_Probe_ClearPendingInputByte, 0x7)
+//{
+//	LogMainLoopProbe("MainLoop.ClearPendingInputByte", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D925, MainLoop_Probe_QueueAI_ReadEngineContext, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.QueueAI.ReadEngineContext", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D940, MainLoop_Probe_QueueAI_SetEventContextA, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.QueueAI.SetEventContextA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D975, MainLoop_Probe_QueueAI_ReadEventListA, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.QueueAI.ReadEventListA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55DA48, MainLoop_Probe_PlaybackReset_ClearRecordPtrA, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.PlaybackReset.ClearRecordPtrA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55DA4E, MainLoop_Probe_PlaybackReset_ClearRecordPtrB, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.PlaybackReset.ClearRecordPtrB", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55DB1B, MainLoop_Probe_DoListLoop_SetGuardFlagA, 0x7)
+//{
+//	LogMainLoopProbe("MainLoop.DoListLoop.SetGuardFlagA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55DB75, MainLoop_Probe_DoListLoop_ClearGuardFlag, 0x7)
+//{
+//	LogMainLoopProbe("MainLoop.DoListLoop.ClearGuardFlag", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55DBB9, MainLoop_Probe_EndPhase_LoadGScreen, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.EndPhase.LoadGScreen", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dbc3, MainLoop_LayerSort, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LayerSort", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dbcd, MainLoop_AfterLayerSort, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.AfterLayerSort", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dc09, MainLoop_1, 0x2)
+//{
+//	LogMainLoopProbe("MainLoop.1", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dc99, MainLoop_4, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.4", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dca3, MainLoop_5, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.5", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dcec, MainLoop_9, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.9", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dd01, MainLoop_10, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.10", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dd2a, MainLoop_11, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.11", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dd47, MainLoop_12, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.12", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055dd64, MainLoop_13, 0x7)
+//{
+//	LogMainLoopProbe("MainLoop.13", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055deb6, MainLoop_14, 0x7)
+//{
+//	LogMainLoopProbe("MainLoop.14", R);
+//	return 0;
+//}
+//
+//
+//DEFINE_HOOK(0x0055dda0, MainLoop_16, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.16", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x0055de13, MainLoop_17, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.17", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x0055de2b, MainLoop_18, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.18", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x0055de4f, MainLoop_19, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.19", R);
+//	return 0;
+//}
+//
+//
+//DEFINE_HOOK(0x0055de73, MainLoop_20, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.20", R);
+//	return 0;
+//}
+//
+////DEFINE_HOOK(0x0055de81, MainLoop_21, 0x6)
+////{
+////	LogMainLoopProbe("MainLoop.21", R);
+////	Unsorted::CurrentFrame = Unsorted::CurrentFrame + 1;
+////	return 0x0055de9f;
+////}
+//
+//DEFINE_HOOK(0x0055e171, MainLoop_22, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.22", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x0055de89, MainLoop_23, 0x2)
+//{
+//	LogMainLoopProbe("MainLoop.23", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x00725c71, MainLoop_24, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.24", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055de8f, MainLoop_25, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.25", R);
+//	return 0;
+//}
+//DEFINE_HOOK(0x0055de8d, MainLoop_26, 0x2)
+//{
+//	LogMainLoopProbe("MainLoop.26", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D360, MainLoop_Probe_Entry_ReadIsActiveByte, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.Entry.ReadIsActiveByte", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D37C, MainLoop_Probe_Entry_SetInMainLoopFlag, 0x7)
+//{
+//	LogMainLoopProbe("MainLoop.Entry.SetInMainLoopFlag", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D387, MainLoop_Probe_SleepGate_LoadSleepProc, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.SleepGate.LoadSleepProc", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D38D, MainLoop_Probe_SleepGate_LoadSessionMode, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.SleepGate.LoadSessionMode", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D3CA, MainLoop_Probe_PreSessionUpdate_LoadSessionCtx, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.PreSessionUpdate.LoadSessionCtx", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D3DA, MainLoop_Probe_PreSessionUpdate_SaveTickValue, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.PreSessionUpdate.SaveTickValue", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D3EF, MainLoop_Probe_SpecialDialog_CheckFlag, 0x7)
+//{
+//	LogMainLoopProbe("MainLoop.SpecialDialog.CheckFlag", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D401, MainLoop_Probe_SpecialDialog_LoadDialogStateA, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.SpecialDialog.LoadDialogStateA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D410, MainLoop_Probe_SpecialDialog_LoadDialogStateB, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.SpecialDialog.LoadDialogStateB", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D456, MainLoop_Probe_ModeDispatch_CheckGameType, 0x7)
+//{
+//	LogMainLoopProbe("MainLoop.ModeDispatch.CheckGameType", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D463, MainLoop_Probe_ModeDispatch_CheckReplayFlags, 0x7)
+//{
+//	LogMainLoopProbe("MainLoop.ModeDispatch.CheckReplayFlags", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D47B, MainLoop_Probe_ModeDispatch_SaveDelayA, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.ModeDispatch.SaveDelayA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D486, MainLoop_Probe_ModeDispatch_SaveDelayB, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.ModeDispatch.SaveDelayB", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D491, MainLoop_Probe_DelayCalc_LoadDelayDivisor, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.DelayCalc.LoadDelayDivisor", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D4A4, MainLoop_Probe_DelayCalc_SetDefaultDivisor, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.DelayCalc.SetDefaultDivisor", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D4E0, MainLoop_Probe_DelayCalc_SaveMinDelay, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.DelayCalc.SaveMinDelay", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D50E, MainLoop_Probe_DelayCalc_SaveDelayStart, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.DelayCalc.SaveDelayStart", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D51C, MainLoop_Probe_DelayCalc_SetScaleConstant, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.DelayCalc.SetScaleConstant", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D528, MainLoop_Probe_DelayCalc_SaveDelayWindow, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.DelayCalc.SaveDelayWindow", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D56D, MainLoop_Probe_DelayClamp_LoadBaseline, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.DelayClamp.LoadBaseline", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D59C, MainLoop_Probe_LatencyPhase_LoadPeerDelayBaseline, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.LoadPeerDelayBaseline", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D5A7, MainLoop_Probe_LatencyPhase_StoreFrameDelayAccumulator, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.StoreFrameDelayAccumulator", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D5BC, MainLoop_Probe_LatencyPhase_InitPlayerScanList, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.InitPlayerScanList", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D5D0, MainLoop_Probe_LatencyPhase_LoadPlayerDelayTableBase, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.LoadPlayerDelayTableBase", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D5DD, MainLoop_Probe_LatencyPhase_AdvancePlayerScanCursor, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.AdvancePlayerScanCursor", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D606, MainLoop_Probe_LatencyPhase_LoadDelayWindowStartA, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.LoadDelayWindowStartA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D60B, MainLoop_Probe_LatencyPhase_LoadDelayWindowSpanA, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.LoadDelayWindowSpanA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D618, MainLoop_Probe_LatencyPhase_ReadDelayTimerSourceA, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.ReadDelayTimerSourceA", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D681, MainLoop_Probe_LatencyPhase_LoadDelayWindowStartB, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.LoadDelayWindowStartB", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D686, MainLoop_Probe_LatencyPhase_LoadDelayWindowSpanB, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.LoadDelayWindowSpanB", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D690, MainLoop_Probe_LatencyPhase_ReadDelayTimerSourceB, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.ReadDelayTimerSourceB", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D6FD, MainLoop_Probe_LatencyPhase_LoadDelayWindowStartC, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.LoadDelayWindowStartC", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D702, MainLoop_Probe_LatencyPhase_LoadDelayWindowSpanC, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.LoadDelayWindowSpanC", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D70C, MainLoop_Probe_LatencyPhase_ReadDelayTimerSourceC, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.LatencyPhase.ReadDelayTimerSourceC", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D79E, MainLoop_Probe_RenderState_LoadScenarioSpeed, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.RenderState.LoadScenarioSpeed", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D7B1, MainLoop_Probe_RenderState_StoreRenderTickStart, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.RenderState.StoreRenderTickStart", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D7B6, MainLoop_Probe_RenderState_StoreRenderTickEnd, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.RenderState.StoreRenderTickEnd", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D7BC, MainLoop_Probe_RenderState_StoreRenderDelayBudget, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.RenderState.StoreRenderDelayBudget", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55D7D4, MainLoop_Probe_RenderState_LoadSessionRenderState, 0x6)
+//{
+//	LogMainLoopProbe("MainLoop.RenderState.LoadSessionRenderState", R);
+//	return 0;
+//}
+//
+//DEFINE_HOOK(0x55DECF, MainLoop_Probe_EarlyExit_ReturnTruePath, 0x5)
+//{
+//	LogMainLoopProbe("MainLoop.EarlyExit.ReturnTruePath", R);
+//	return 0;
+//}
 
 // Record/Restore the frame state. Doing it a little earlier than the game's normal path for replays
 // This way we avoid the SpecialDialog skip. If you do change this, make sure to test if playback
@@ -1270,8 +1847,33 @@ DEFINE_HOOK(0x0069AFEB, WaitForPlayers_ReplayMarkOthersLoaded, 0x6)
 	return 0;
 }
 
+// SessionClass::Resume (0x69BAF1) calls ShowWaitingForPlayersScreen then sets
+// WaitingForPlayersAutoHideFrame = CurrentFrame + 3. In observer/replay mode the
+// "waiting for players" panel object ([0x0087F770]) is null, so both Show and Hide crash.
+// Skip the entire block when playback is active.
+//DEFINE_HOOK(0x69BB01, SessionClass_Resume_SkipWaitingForPlayersPanel, 0x5)
+//{
+//	enum { Skip = 0x69BB15 };
+//	return ReplaySystem::IsPlaybackActive() ? Skip : 0;
+//}
+//
+//// SyncDelay_Start (0x55E160) synchronises frame timing. In multiplayer mode it runs an
+//// NFT (network frame timing) busy-wait loop that calls Call_Back() and TacticalClass
+//// vtable functions. In observer/replay mode these calls crash once NFTTimer_Accumulated
+//// goes non-zero (typically around frame 100). Skip directly to the FrameTimer delay path
+//// (0x55E2B4) used by Campaign/Skirmish, which is safe in observer mode.
+//DEFINE_HOOK(0x0055e160, SyncDelay_SkipNFTLoopInPlayback, 0x6)
+//{
+//	enum { FrameTimerPath = 0x55E2B4 };
+//	return ReplaySystem::IsPlaybackActive() ? FrameTimerPath : 0;
+//}
 
 //DEFINE_HOOK(0x006c6f50, Send_Statistics_Override, 0x5)
 //{
 //	return 0x006c87c2;
+//}
+//DEFINE_HOOK(0x0055e1bc, SyncDelay_SkipNFTLoopInPlayback, 0x6)
+//{
+//	enum { FrameTimerPath = 0x55E2B4 };
+//	return ReplaySystem::IsPlaybackActive() ? FrameTimerPath : 0;
 //}
