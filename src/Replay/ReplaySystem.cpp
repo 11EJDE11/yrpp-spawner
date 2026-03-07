@@ -720,7 +720,7 @@ void RecordFrameState()
 	frameState.FrameNumber = Unsorted::CurrentFrame;
 
 	if (TacticalClass::Instance)
-		frameState.TacticalPos = TacticalClass::Instance->TacticalPos;
+		frameState.TacticalPos = TacticalClass::Instance->TacticalCoord1;
 	else
 		frameState.TacticalPos = { 0, 0 };
 
@@ -921,7 +921,23 @@ void RestoreFrameState()
 		&& gReplay.LockViewport
 		&& TacticalClass::Instance)
 	{
-		TacticalClass::Instance->TacticalPos = frameRecord.TacticalPos;
+		// Mirror the built-in replay viewport restore (sub_6D6000): set both
+		// TacticalCoord1/2 (the canonical viewport center), recalculate
+		// TacticalPos and the visible-cell list, and flag a full redraw.
+		// Just writing TacticalPos alone is insufficient because
+		// TacticalClass::Update overwrites it from TacticalCoord1 every
+		// frame, and TacticalClass::Draw checks Redrawing/TacticalCoord1
+		// to decide whether a full repaint is needed.
+		auto* tc = TacticalClass::Instance;
+		tc->TacticalCoord1 = frameRecord.TacticalPos;
+		tc->TacticalCoord2 = frameRecord.TacticalPos;
+
+		// sub_6D8B30: recalculates TacticalPos (top-left) and visible area.
+		static auto RecalcViewport
+			= reinterpret_cast<void(__thiscall*)(TacticalClass*)>(0x6D8B30);
+		RecalcViewport(tc);
+
+		tc->Redrawing = true;
 	}
 
 	if ((frameRecord.Flags & FrameRecordFlag_Selection) != 0u)
