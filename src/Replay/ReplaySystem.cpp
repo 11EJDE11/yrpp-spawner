@@ -177,6 +177,14 @@ int GetReplayFPSFromGameSpeed(int gameSpeed)
 
 void ApplyReplayTimingFromCurrentGameSpeed()
 {
+	if (gReplay.Playback && gReplay.HasPlaybackHeader)
+	{
+		// Keep simulation speed locked to the replay's recorded speed.
+		const int recordedGameSpeed = std::clamp(static_cast<int>(gReplay.PlaybackHeader.RecordedGameSpeed), 0, 6);
+		GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
+		GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
+	}
+
 	const int speedIndex = (gReplay.Playback && gReplay.PlaybackSpeedIndex >= 0)
 		? gReplay.PlaybackSpeedIndex
 		: GameOptionsClass::Instance.GameSpeed;
@@ -625,11 +633,26 @@ bool IsTimingEvent(EventType eventType)
 	}
 }
 
-// Skip OPTIONS event. If we recorded this, then the options menu would open
-// during playback if the user in the recording opened it.
+// Skip OPTIONS while recording so playback doesn't reopen menus from
+// the original session.
 bool IsReplayableGameplayEvent(const EventClass& event)
 {
 	return event.Type != EventType::Options && !IsTimingEvent(event.Type);
+}
+
+// Allow these to remain in DoList during playback so local controls work.
+bool IsLocalPlaybackControlEvent(const EventClass& event)
+{
+	switch (event.Type)
+	{
+	case EventType::Options:
+	case EventType::Exit:
+	case EventType::GameSpeed:
+	case EventType::SaveGame:
+		return true;
+	default:
+		return false;
+	}
 }
 
 template <typename Predicate>
@@ -672,10 +695,32 @@ void RemoveReplayGameplayEventsFromDoList()
 	if (!gReplay.Playback)
 		return;
 
+	const auto currentFrame = static_cast<unsigned int>(Unsorted::CurrentFrame);
+	bool playbackSpeedChanged = false;
+
+	// Treat local GameSpeed events as replay playback-speed changes.
+	for (int i = 0; i < EventClass::DoList.Count; ++i)
+	{
+		const auto& event = EventClass::DoList[i];
+		if (event.Frame == currentFrame && event.Type == EventType::GameSpeed)
+		{
+			const int requestedSpeed = std::clamp(event.GameSpeed.GameSpeed, 0, 6);
+			if (requestedSpeed != gReplay.PlaybackSpeedIndex)
+			{
+				gReplay.PlaybackSpeedIndex = requestedSpeed;
+				playbackSpeedChanged = true;
+			}
+		}
+	}
+
+	if (playbackSpeedChanged)
+		ApplyReplayTimingFromCurrentGameSpeed();
+
 	RemoveDoListEvents([](const EventClass& event)
 	{
 		return event.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame)
-			&& IsReplayableGameplayEvent(event);
+			&& IsReplayableGameplayEvent(event)
+			&& !IsLocalPlaybackControlEvent(event);
 	});
 }
 
