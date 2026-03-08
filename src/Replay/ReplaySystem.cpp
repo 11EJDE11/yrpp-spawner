@@ -116,7 +116,6 @@ struct ReplayRuntimeState
 	bool Playback = false;
 	bool RunPlayback = true;
 	bool InitRandomHandled = false;
-	bool HeaderPrepared = false;
 	bool PlayersMarkedLoaded = false;
 
 	bool ShroudEnabled = false;
@@ -1142,7 +1141,6 @@ void StartReplayRecording()
 		StopReplaySystem();
 		return;
 	}
-	gReplay.HeaderPrepared = true;
 
 	if (!OpenRecordingReplayStream())
 	{
@@ -1212,11 +1210,9 @@ void ReplaySystem::OnGameStartReset()
 {
 	StopReplaySystem();
 	gReplay.InitRandomHandled = false;
-	gReplay.HeaderPrepared = false;
 	gReplay.PlaybackPath[0] = '\0';
 }
 
-// Todo: merge the two InitRandom hooks.
 DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
 {
 	if (gReplay.InitRandomHandled)
@@ -1252,25 +1248,6 @@ DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
 
 	R->EAX(Game::Seed);
 	return 0x52FDF9;
-}
-
-DEFINE_HOOK(0x52FE43, InitRandom_AfterInit_SaveState, 0x5)
-{
-	if (gReplay.HeaderPrepared)
-		return 0;
-
-	const auto* pConfig = GetConfig();
-	if (!pConfig || ReplaySystem::IsPlaybackRequested() || !pConfig->EnableReplayRecording)
-		return 0;
-
-	if (!ScenarioClass::Instance)
-		return 0;
-
-	gReplay.HeaderPrepared = WriteInitialReplayFile();
-	if (!gReplay.HeaderPrepared)
-		Debug::Log("[Replay] Failed to prepare replay header file.\n");
-
-	return 0;
 }
 
 DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0x5)
