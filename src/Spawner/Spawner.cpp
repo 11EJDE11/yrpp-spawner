@@ -378,8 +378,8 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 		if (isReplayPlayback && !Spawner::Config->IsCampaign && HouseClass::CurrentPlayer)
 		{
-			//Game::ObserverMode = true;
-			//HouseClass::CurrentPlayer->MakeObserver(); //<--causes issues
+			Game::ObserverMode = true;
+			HouseClass::CurrentPlayer->MakeObserver();
 		}
 
 		return true;
