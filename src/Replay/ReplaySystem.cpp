@@ -24,8 +24,11 @@
 #include <Ext/INIClass/Body.h>
 
 #include <EventClass.h>
+#include <GameModeOptionsClass.h>
+#include <GameOptionsClass.h>
 #include <MapClass.h>
 #include <ProgressScreenClass.h>
+#include <SessionClass.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -70,6 +73,7 @@ struct ReplayHeader
 
 	uint32_t SpawnIniSize;
 	uint32_t SpawnMapSize;
+	uint32_t RecordedGameSpeed;
 };
 
 struct FrameStateRecord
@@ -118,6 +122,7 @@ struct ReplayRuntimeState
 	bool ShroudEnabled = false;
 	bool LockViewport = true;
 	bool SelectUnits = true;
+	int PlaybackSpeedIndex = -1;
 
 	int ExpectedEventsThisFrame = 0;
 
@@ -148,6 +153,38 @@ void ApplyPlaybackInitialState();
 const SpawnerConfig* GetConfig()
 {
 	return Spawner::GetConfig();
+}
+
+bool IsReplayGameSpeedIndexValid(uint32_t gameSpeedIndex)
+{
+	return gameSpeedIndex <= 6u;
+}
+
+int GetReplayFPSFromGameSpeed(int gameSpeed)
+{
+	gameSpeed = std::clamp(gameSpeed, 0, 6);
+
+	// Vanilla mapping used by Queue_AI_Multiplayer:
+	// 0 -> 60, 1 -> 45, 2+ -> 60 / gameSpeed.
+	if (gameSpeed <= 0)
+		return 60;
+
+	if (gameSpeed == 1)
+		return 45;
+
+	return std::max(1, 60 / gameSpeed);
+}
+
+void ApplyReplayTimingFromCurrentGameSpeed()
+{
+	const int speedIndex = (gReplay.Playback && gReplay.PlaybackSpeedIndex >= 0)
+		? gReplay.PlaybackSpeedIndex
+		: GameOptionsClass::Instance.GameSpeed;
+	const int requestedFPS = GetReplayFPSFromGameSpeed(speedIndex);
+
+	// RequestedFPS controls local pacing. Keep SessionClass::DesiredFrameRate
+	// owned by the game simulation to avoid altering deterministic logic.
+	Game::Network::RequestedFPS = requestedFPS;
 }
 
 bool WriteRawToHandle(HANDLE file, const void* data, size_t size)
@@ -356,6 +393,7 @@ ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
 
 	header.SpawnIniSize = spawnIniSize;
 	header.SpawnMapSize = spawnMapSize;
+	header.RecordedGameSpeed = static_cast<uint32_t>(std::clamp(GameOptionsClass::Instance.GameSpeed, 0, 6));
 	return header;
 }
 
@@ -407,7 +445,15 @@ bool WriteInitialReplayFile()
 bool IsReplayHeaderValid(const ReplayHeader& header)
 {
 	return header.Magic == REPLAY_MAGIC
-		&& header.Version == REPLAY_VERSION;
+		&& header.Version == REPLAY_VERSION
+		&& IsReplayGameSpeedIndexValid(header.RecordedGameSpeed);
+}
+
+bool ReadReplayHeaderFromHandle(HANDLE file, ReplayHeader& outHeader)
+{
+	outHeader = {};
+	return ReadRawFromHandle(file, &outHeader, sizeof(outHeader))
+		&& IsReplayHeaderValid(outHeader);
 }
 
 bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader)
@@ -425,7 +471,7 @@ bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader)
 	if (file == INVALID_HANDLE_VALUE)
 		return false;
 
-	const bool ok = ReadRawFromHandle(file, &outHeader, sizeof(outHeader)) && IsReplayHeaderValid(outHeader);
+	const bool ok = ReadReplayHeaderFromHandle(file, outHeader);
 	CloseHandle(file);
 	return ok;
 }
@@ -492,7 +538,7 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 		return false;
 
 	ReplayHeader header {};
-	if (!ReadRaw(&header, sizeof(header)) || !IsReplayHeaderValid(header))
+	if (!ReadReplayHeaderFromHandle(gReplay.ReplayFile, header))
 	{
 		CloseReplayFile();
 		return false;
@@ -512,6 +558,7 @@ void ResetRuntimeFlagsForScenario()
 	gReplay.Recording = false;
 	gReplay.Playback = false;
 	gReplay.RunPlayback = true;
+	gReplay.PlaybackSpeedIndex = -1;
 	gReplay.ExpectedEventsThisFrame = 0;
 	gReplay.PlayersMarkedLoaded = false;
 	gReplay.PendingFrameStates.clear();
@@ -555,8 +602,8 @@ void ApplyPlaybackInitialState()
 	//*reinterpret_cast<int*>(0x00B07784u) = 0;
 }
 
-// Timing events aren't needed as we skip any networking stuff in playback.
-// Event 48 is from the spawner's Protocol Zero timing.
+// Timing events are transport/noise for replay playback.
+// Event 0x30+ is from the spawner's Protocol Zero timing extension.
 bool IsTimingEvent(EventType eventType)
 {
 	const auto type = static_cast<unsigned char>(eventType);
@@ -1067,6 +1114,27 @@ void StartReplayPlayback(const char* replayPath)
 	ResetRuntimeFlagsForScenario();
 	gReplay.Playback = true;
 	gReplay.RunPlayback = true;
+
+	gReplay.PlaybackSpeedIndex = std::clamp(GameOptionsClass::Instance.GameSpeed, 0, 6);
+
+	int recordedGameSpeed = gReplay.PlaybackSpeedIndex;
+	if (!gReplay.HasPlaybackHeader)
+	{
+		ReplayHeader header {};
+		if (ReadReplayHeaderFromPath(replayPath, header))
+		{
+			gReplay.PlaybackHeader = header;
+			gReplay.HasPlaybackHeader = true;
+		}
+	}
+
+	if (gReplay.HasPlaybackHeader)
+		recordedGameSpeed = std::clamp(static_cast<int>(gReplay.PlaybackHeader.RecordedGameSpeed), 0, 6);
+
+	GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
+	GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
+
+	ApplyReplayTimingFromCurrentGameSpeed();
 
 	const auto* pConfig = GetConfig();
 	gReplay.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
@@ -1765,6 +1833,7 @@ DEFINE_HOOK(0x0055d878, MainLoop_RecordPlaybackFrameState, 0x6)
 
 	if (gReplay.Playback && gReplay.RunPlayback)
 	{
+		ApplyReplayTimingFromCurrentGameSpeed();
 		RestoreFrameState();
 	}
 
