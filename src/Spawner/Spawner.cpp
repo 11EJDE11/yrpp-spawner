@@ -22,6 +22,7 @@
 #include "NetHack.h"
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
+#include "Replay.h"
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
 
@@ -297,6 +298,11 @@ bool Spawner::StartScenario(const char* pScenarioName)
 			pSession->GameMode = GameMode::Skirmish;
 	}
 
+	if (Config->IsReplayPlayback)
+		Replay::SetupPlayback();
+	else if (Config->EnableReplayRecording)
+		Replay::PrepareRecording();
+
 	Game::InitRandom();
 
 	// StartScenario
@@ -318,13 +324,21 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		if (Spawner::Config->CustomMissionID != 0) // after parsing
 			ScenarioClass::Instance->EndOfGame = true;
 
+		if (result && Config->EnableReplayRecording)
+			Replay::StartRecording();
+
 		return result;
 	}
 	else if (SessionClass::IsSkirmish())
 	{
-		return Config->LoadSaveGame
+		bool result = Config->LoadSaveGame
 			? Spawner::LoadSavedGame(Config->SaveGameName)
 			: ScenarioClass::StartScenario(pScenarioName, 0, -1);
+
+		if (result && Config->EnableReplayRecording)
+			Replay::StartRecording();
+
+		return result;
 	}
 	else /* if (SessionClass::IsMultiplayer()) */
 	{
@@ -341,8 +355,16 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		if (Config->LoadSaveGame && !Spawner::Reconcile_Players())
 			return false;
 
-		if (!pSession->CreateConnections())
-			return false;
+		// Skip connection setup during replay playback — no actual network peers,
+		// and creating+tearing down connections causes an access violation on exit.
+		if (!Config->IsReplayPlayback)
+		{
+			if (!pSession->CreateConnections())
+				return false;
+		}
+
+		if (Config->EnableReplayRecording)
+			Replay::StartRecording();
 
 		// Ares does not support MultiEngineer switching in multiplayer, however
 		// we can disable it simply by setting EngineerCaptureLevel to 1 - Belonit

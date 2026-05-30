@@ -57,6 +57,7 @@
     <ClCompile Include="$(ThisDir)\src\Spawner\ProtocolZero.LatencyLevel.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\QuickMatch.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\RandomMap.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Spawner\Replay.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\Spawner.Config.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\Spawner.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\Spawner.Hook.cpp" />

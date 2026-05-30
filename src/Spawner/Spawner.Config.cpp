@@ -119,6 +119,13 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		DefeatedBecomesObserver  = pINI->ReadBool(pSettingsSection, "DefeatedBecomesObserver", DefeatedBecomesObserver);
 		Observer_ShowAIOnSidebar = pINI->ReadBool(pSettingsSection, "Observer.ShowAIOnSidebar", Observer_ShowAIOnSidebar);
 	}
+
+	// Replay Options
+	{
+		EnableReplayRecording = pINI->ReadBool(pSettingsSection, "EnableReplayRecording", EnableReplayRecording);
+		IsReplayPlayback      = pINI->ReadBool(pSettingsSection, "IsReplayPlayback", IsReplayPlayback);
+		/* ReplayDataDir */     pINI->ReadString(pSettingsSection, "ReplayDataDir", ReplayDataDir, ReplayDataDir, sizeof(ReplayDataDir));
+	}
 }
 
 const char* PlayerSectionArray[8] = {

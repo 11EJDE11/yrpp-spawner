@@ -148,6 +148,11 @@ public:
 	bool DefeatedBecomesObserver;
 	bool Observer_ShowAIOnSidebar;
 
+	// Replay Options
+	bool EnableReplayRecording;
+	bool IsReplayPlayback;
+	char ReplayDataDir[MAX_PATH];
+
 	SpawnerConfig() // default values
 		// Game Mode Options
 		: MPModeIndex { 1 }
@@ -242,6 +247,11 @@ public:
 		, ContinueWithoutHumans { false }
 		, DefeatedBecomesObserver { false }
 		, Observer_ShowAIOnSidebar { false }
+
+		// Replay Options
+		, EnableReplayRecording { false }
+		, IsReplayPlayback { false }
+		, ReplayDataDir { "" }
 	{ }
 
 	void LoadFromINIFile(CCINIClass* pINI);
