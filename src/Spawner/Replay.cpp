@@ -50,11 +50,12 @@
 using RecordingValuesFunc = char(__thiscall*)(void*);
 static auto Save_Recording_Values = reinterpret_cast<RecordingValuesFunc>(0x5318C0);
 
+
 namespace
 {
 bool PlaybackActive = false;
 // Playback frame hooks run continuously; these latches keep one-shot fixes and diagnostics from repeating.
-bool PlaybackShroudRevealed = false;
+bool PlaybackSpectatorEnabled = false;
 bool PlaybackQueueAILogged = false;
 bool PlaybackFrameOptionsLogged = false;
 bool PlaybackOutListLogged = false;
@@ -86,14 +87,25 @@ const SpawnerConfig* GetReplayConfig()
 		: nullptr;
 }
 
-void RevealPlaybackShroud()
+void EnableSpectatorView()
 {
 	const auto pConfig = GetReplayConfig();
-	if (!Replay::IsPlaybackActive() || !pConfig || !pConfig->ReplayRevealShroud || PlaybackShroudRevealed)
+	if (!Replay::IsPlaybackActive() || !pConfig || !pConfig->ReplaySpectator || PlaybackSpectatorEnabled)
 		return;
 
-	// Playback loads us as a normal player, so without this the client reveal option would still be limited by that player's shroud.
-	Debug::Log("[Spawner] Replay: revealing playback shroud at frame %d\n", Unsorted::CurrentFrame);
+	// Playback loads us as a normal player. Making that player the Observer flips
+	// HouseClass::IsCurrentPlayerObserver(), which the Observers.Visibility hooks key off to
+	// reveal cloaked/disguised units, radar blips and pips. MakeObserver only sets
+	// HouseClass::Observer = CurrentPlayer; it does NOT change CurrentPlayer, so the private
+	// anti-cheat's PlayerPtr-mirror check is not tripped (only the frame-100 observer check,
+	// which is gated on Session.Play). Reveal the shroud too so the whole map is visible.
+	Debug::Log("[Spawner] Replay: enabling spectator view at frame %d\n", Unsorted::CurrentFrame);
+
+	if (HouseClass::CurrentPlayer)
+	{
+		Game::ObserverMode = true;
+		HouseClass::CurrentPlayer->MakeObserver();
+	}
 
 	for (const auto pHouse : HouseClass::Array)
 	{
@@ -102,7 +114,7 @@ void RevealPlaybackShroud()
 	}
 
 	MapClass::Instance.MarkNeedsRedraw(0);
-	PlaybackShroudRevealed = true;
+	PlaybackSpectatorEnabled = true;
 }
 
 void ApplyPlaybackTiming()
@@ -158,7 +170,7 @@ void Replay::PrepareRecording()
 {
 	// Recording uses the native menu path correctly; clear playback-only state so prior playback runs cannot leak into recording.
 	PlaybackActive = false;
-	PlaybackShroudRevealed = false;
+	PlaybackSpectatorEnabled = false;
 	PlaybackQueueAILogged = false;
 	PlaybackFrameOptionsLogged = false;
 	PlaybackOutListLogged = false;
@@ -170,7 +182,7 @@ void Replay::StartRecording()
 {
 	// This path writes a recording, not a playback session; clear playback latches before using the game's native recorder.
 	PlaybackActive = false;
-	PlaybackShroudRevealed = false;
+	PlaybackSpectatorEnabled = false;
 	PlaybackQueueAILogged = false;
 	PlaybackFrameOptionsLogged = false;
 	PlaybackOutListLogged = false;
@@ -215,8 +227,8 @@ void Replay::SetupPlayback()
 		Debug::Log("[Spawner] Replay: failed to open events.dat for playback: %s\n", eventsPath);
 		// Without events.dat there is no native playback stream to drive Queue_AI, so disable playback-only frame work.
 		PlaybackActive = false;
-		PlaybackShroudRevealed = false;
-		PlaybackQueueAILogged = false;
+		PlaybackSpectatorEnabled = false;
+			PlaybackQueueAILogged = false;
 		PlaybackFrameOptionsLogged = false;
 		PlaybackOutListLogged = false;
 		return;
@@ -237,7 +249,7 @@ void Replay::SetupPlayback()
 	// Tell Queue_AI to read events from RecordFile instead of accepting player input.
 	SessionClass::Instance.Play = 1;
 	PlaybackActive = true;
-	PlaybackShroudRevealed = false;
+	PlaybackSpectatorEnabled = false;
 	PlaybackQueueAILogged = false;
 	PlaybackFrameOptionsLogged = false;
 	PlaybackOutListLogged = false;
@@ -287,10 +299,17 @@ void Replay::ApplyPlaybackOptions()
 		Patch::Apply_RAW(0x55DB6F, { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 });
 	}
 
-	Debug::Log("[Spawner] Replay: playback options applied (Speed=%d, FPS=%d, RevealShroud=%d, LockViewport=%d, SelectUnits=%d)\n",
+	// SidebarClass::Activate is a no-op during network-game playback (guard jz at 0x6A7D82), which
+	// blocks Fill_In_Data's initial Activate(1) at scenario start so the sidebar is never set up and
+	// shows as a black area. Make the jump unconditional so the sidebar activates and draws normally
+	// during playback (player sidebar in player mode, spectator stats sidebar in spectator mode).
+	Debug::Log("[Spawner] Replay: enabling sidebar activation during playback\n");
+	Patch::Apply_RAW(0x6A7D82, { 0xEB });
+
+	Debug::Log("[Spawner] Replay: playback options applied (Speed=%d, FPS=%d, Spectator=%d, LockViewport=%d, SelectUnits=%d)\n",
 		std::clamp(pConfig->GameSpeed, 0, 6),
 		Game::Network::RequestedFPS,
-		pConfig->ReplayRevealShroud,
+		pConfig->ReplaySpectator,
 		pConfig->ReplayLockedViewport,
 		pConfig->ReplaySelectUnits);
 }
@@ -308,15 +327,15 @@ void Replay::ApplyPlaybackFrameOptions()
 	if (!PlaybackFrameOptionsLogged)
 	{
 		const auto pConfig = GetReplayConfig();
-		Debug::Log("[Spawner] Replay: per-frame playback options reached at frame %d (Speed=%d, FPS=%d, RevealShroud=%d)\n",
+		Debug::Log("[Spawner] Replay: per-frame playback options reached at frame %d (Speed=%d, FPS=%d, Spectator=%d)\n",
 			Unsorted::CurrentFrame,
 			pConfig ? std::clamp(pConfig->GameSpeed, 0, 6) : -1,
 			Game::Network::RequestedFPS,
-			pConfig ? pConfig->ReplayRevealShroud : -1);
+			pConfig ? pConfig->ReplaySpectator : -1);
 		PlaybackFrameOptionsLogged = true;
 	}
 
-	RevealPlaybackShroud();
+	EnableSpectatorView();
 }
 
 // Native playback treats Escape as ending playback; use it as the local options hotkey instead.

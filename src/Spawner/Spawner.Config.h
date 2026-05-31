@@ -153,7 +153,7 @@ public:
 	bool IsReplayPlayback;
 	char ReplayDataDir[MAX_PATH];
 	// Default to native playback behavior unless the client explicitly asks for local presentation changes.
-	bool ReplayRevealShroud;
+	bool ReplaySpectator;    // Reveal shroud + see cloaked/disguised units (makes local player the Observer).
 	bool ReplayLockedViewport;
 	bool ReplaySelectUnits;
 
@@ -256,7 +256,7 @@ public:
 		, EnableReplayRecording { false }
 		, IsReplayPlayback { false }
 		, ReplayDataDir { "" }
-		, ReplayRevealShroud { false }
+		, ReplaySpectator { false }
 		, ReplayLockedViewport { true }
 		, ReplaySelectUnits { true }
 	{ }
