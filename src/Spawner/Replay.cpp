@@ -24,6 +24,7 @@
 #include <SessionClass.h>
 #include <Unsorted.h>
 #include <Utilities/Debug.h>
+#include <Utilities/Macro.h>
 
 #include <Windows.h>
 #include <cstdio>
@@ -42,14 +43,31 @@
 using RecordingValuesFunc = char(__thiscall*)(void*);
 static auto Save_Recording_Values = reinterpret_cast<RecordingValuesFunc>(0x5318C0);
 
+namespace
+{
+bool PlaybackActive = false;
+
+bool IsNativePlaybackReading()
+{
+	return (static_cast<unsigned int>(Game::RecordingFlag) & static_cast<unsigned int>(RecordFlag::Read)) != 0u;
+}
+}
+
+bool Replay::IsPlaybackActive()
+{
+	return PlaybackActive && IsNativePlaybackReading();
+}
+
 void Replay::PrepareRecording()
 {
+	PlaybackActive = false;
 	SessionClass::Instance.Record = 1;
 	Debug::Log("[Spawner] Replay: recording prepared\n");
 }
 
 void Replay::StartRecording()
 {
+	PlaybackActive = false;
 	auto& recordFile = SessionClass::Instance.RecordFile;
 
 	if (!recordFile.Open(FileAccessMode::Write))
@@ -89,6 +107,7 @@ void Replay::SetupPlayback()
 	if (!recordFile.Open(FileAccessMode::Read))
 	{
 		Debug::Log("[Spawner] Replay: failed to open events.dat for playback: %s\n", eventsPath);
+		PlaybackActive = false;
 		return;
 	}
 
@@ -106,6 +125,7 @@ void Replay::SetupPlayback()
 
 	// Tell Queue_AI to read events from RecordFile instead of accepting player input.
 	SessionClass::Instance.Play = 1;
+	PlaybackActive = true;
 
 	// TrapPrintCRC defaults to 0, which makes the playback path's check
 	// "if (frame >= TrapPrintCRC)" fire immediately at frame 0, dumping CRCs
@@ -114,4 +134,37 @@ void Replay::SetupPlayback()
 	TrapPrintCRC = 0x7FFFFFFF;
 
 	Debug::Log("[Spawner] Replay: playback set up from %s (Seed=%08x)\n", eventsPath, recordedSeed);
+}
+
+// Native playback treats Escape as ending playback; use it as the local options hotkey instead.
+DEFINE_HOOK(0x647299, QueueAI_Playback_EscapeShowsOptions, 0x6)
+{
+	if (Replay::IsPlaybackActive() && (R->EAX() & 0xFFFF) == VK_ESCAPE)
+	{
+		Game::SpecialDialog = 1;
+		return 0x6472FC;
+	}
+
+	return 0;
+}
+
+// Native playback ignores queued exit events, so close playback immediately from the menu.
+DEFINE_HOOK(0x6471A0, QueueExit_ReplayPlayback_ExitLocally, 0x8)
+{
+	if (Replay::IsPlaybackActive())
+	{
+		Game::IsActive = false;
+		R->EAX(1);
+		return 0x647253;
+	}
+
+	return 0;
+}
+
+// Keep modal dialogs visible by preventing playback's main loop render from running under them.
+DEFINE_HOOK(0x623145, OwnerDrawLoop_ReplayPlayback_NoMainLoop, 0x5)
+{
+	return Replay::IsPlaybackActive()
+		? 0x62315A
+		: 0;
 }

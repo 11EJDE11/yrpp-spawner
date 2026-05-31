@@ -22,6 +22,8 @@
 class Replay
 {
 public:
+	static bool IsPlaybackActive();
+
 	// Enable recording mode (set Session.Record flag). Call before Game::InitRandom().
 	static void PrepareRecording();
 
