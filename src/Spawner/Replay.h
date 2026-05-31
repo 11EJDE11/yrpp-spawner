@@ -32,4 +32,10 @@ public:
 
 	// Open events.dat, read recorded Seed, seek past header. Call before Game::InitRandom().
 	static void SetupPlayback();
+
+	// Apply playback patches before scenario startup so private SelfCRC accepts them as the expected .text state.
+	static void ApplyPlaybackOptions();
+
+	// Enforce playback-only options each frame and discard local input events before native playback executes recorded events.
+	static void ApplyPlaybackFrameOptions();
 };

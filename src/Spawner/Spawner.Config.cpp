@@ -125,6 +125,10 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		EnableReplayRecording = pINI->ReadBool(pSettingsSection, "EnableReplayRecording", EnableReplayRecording);
 		IsReplayPlayback      = pINI->ReadBool(pSettingsSection, "IsReplayPlayback", IsReplayPlayback);
 		/* ReplayDataDir */     pINI->ReadString(pSettingsSection, "ReplayDataDir", ReplayDataDir, ReplayDataDir, sizeof(ReplayDataDir));
+		// These playback-only options are local presentation choices, so they come from spawn.ini instead of the recorded game options.
+		ReplayRevealShroud   = pINI->ReadBool(pSettingsSection, "ReplayRevealShroud", ReplayRevealShroud);
+		ReplayLockedViewport = pINI->ReadBool(pSettingsSection, "ReplayLockedViewport", ReplayLockedViewport);
+		ReplaySelectUnits    = pINI->ReadBool(pSettingsSection, "ReplaySelectUnits", ReplaySelectUnits);
 	}
 }
 

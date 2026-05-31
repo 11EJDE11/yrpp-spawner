@@ -21,12 +21,19 @@
 #include "Spawner.h"
 
 #include <CCFileClass.h>
+#include <EventClass.h>
+#include <GameModeOptionsClass.h>
+#include <GameOptionsClass.h>
+#include <HouseClass.h>
+#include <MapClass.h>
 #include <SessionClass.h>
 #include <Unsorted.h>
 #include <Utilities/Debug.h>
 #include <Utilities/Macro.h>
+#include <Utilities/Patch.h>
 
 #include <Windows.h>
+#include <algorithm>
 #include <cstdio>
 
 // The game's native function that writes BuildLevel/Seed/ScenarioName/Whom/Special/Options
@@ -46,10 +53,99 @@ static auto Save_Recording_Values = reinterpret_cast<RecordingValuesFunc>(0x5318
 namespace
 {
 bool PlaybackActive = false;
+// Playback frame hooks run continuously; these latches keep one-shot fixes and diagnostics from repeating.
+bool PlaybackShroudRevealed = false;
+bool PlaybackQueueAILogged = false;
+bool PlaybackFrameOptionsLogged = false;
+bool PlaybackOutListLogged = false;
 
 bool IsNativePlaybackReading()
 {
 	return (static_cast<unsigned int>(Game::RecordingFlag) & static_cast<unsigned int>(RecordFlag::Read)) != 0u;
+}
+
+int GetReplayFPSFromGameSpeed(int gameSpeed)
+{
+	// Native playback bypasses RequestedFPS, which made the client's speed option ineffective; map it to the FPS value Main_Loop will use.
+	gameSpeed = std::clamp(gameSpeed, 0, 6);
+
+	if (gameSpeed <= 0)
+		return 60;
+
+	if (gameSpeed == 1)
+		return 45;
+
+	return std::max(1, 60 / gameSpeed);
+}
+
+const SpawnerConfig* GetReplayConfig()
+{
+	const auto pConfig = Spawner::GetConfig();
+	return pConfig && pConfig->IsReplayPlayback
+		? pConfig
+		: nullptr;
+}
+
+void RevealPlaybackShroud()
+{
+	const auto pConfig = GetReplayConfig();
+	if (!Replay::IsPlaybackActive() || !pConfig || !pConfig->ReplayRevealShroud || PlaybackShroudRevealed)
+		return;
+
+	// Playback loads us as a normal player, so without this the client reveal option would still be limited by that player's shroud.
+	Debug::Log("[Spawner] Replay: revealing playback shroud at frame %d\n", Unsorted::CurrentFrame);
+
+	for (const auto pHouse : HouseClass::Array)
+	{
+		if (pHouse)
+			MapClass::Instance.Reveal(pHouse);
+	}
+
+	MapClass::Instance.MarkNeedsRedraw(0);
+	PlaybackShroudRevealed = true;
+}
+
+void ApplyPlaybackTiming()
+{
+	const auto pConfig = GetReplayConfig();
+	if (!PlaybackActive || !pConfig)
+		return;
+
+	// The replay header restores recorded game options over spawn.ini, so reapply the client's playback speed after that restore.
+	const int playbackSpeed = std::clamp(pConfig->GameSpeed, 0, 6);
+	GameOptionsClass::Instance.GameSpeed = playbackSpeed;
+	GameModeOptionsClass::Instance.GameSpeed = playbackSpeed;
+	Game::Network::RequestedFPS = GetReplayFPSFromGameSpeed(playbackSpeed);
+}
+
+void ClearLocalPlaybackEvents()
+{
+	if (!PlaybackActive)
+		return;
+
+	const int outListCount = EventClass::OutList.Count;
+	if (outListCount <= 0)
+		return;
+
+	// Local input is needed for an unlocked viewport, but gameplay events from that input would corrupt playback; discard them before Queue_AI.
+	if (!PlaybackOutListLogged)
+	{
+		Debug::Log("[Spawner] Replay: clearing local playback OutList events (first count=%d)\n", outListCount);
+		PlaybackOutListLogged = true;
+	}
+
+	EventClass::OutList.Init();
+}
+
+void ApplyLocalPlaybackControls()
+{
+	const auto pConfig = GetReplayConfig();
+	if (!Replay::IsPlaybackActive() || !pConfig || pConfig->ReplayLockedViewport)
+		return;
+
+	// Native playback treats Escape as replay control, so handle it locally once input is re-enabled for viewport movement.
+	if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0)
+		Game::SpecialDialog = 1;
 }
 }
 
@@ -60,14 +156,24 @@ bool Replay::IsPlaybackActive()
 
 void Replay::PrepareRecording()
 {
+	// Recording uses the native menu path correctly; clear playback-only state so prior playback runs cannot leak into recording.
 	PlaybackActive = false;
+	PlaybackShroudRevealed = false;
+	PlaybackQueueAILogged = false;
+	PlaybackFrameOptionsLogged = false;
+	PlaybackOutListLogged = false;
 	SessionClass::Instance.Record = 1;
 	Debug::Log("[Spawner] Replay: recording prepared\n");
 }
 
 void Replay::StartRecording()
 {
+	// This path writes a recording, not a playback session; clear playback latches before using the game's native recorder.
 	PlaybackActive = false;
+	PlaybackShroudRevealed = false;
+	PlaybackQueueAILogged = false;
+	PlaybackFrameOptionsLogged = false;
+	PlaybackOutListLogged = false;
 	auto& recordFile = SessionClass::Instance.RecordFile;
 
 	if (!recordFile.Open(FileAccessMode::Write))
@@ -107,7 +213,12 @@ void Replay::SetupPlayback()
 	if (!recordFile.Open(FileAccessMode::Read))
 	{
 		Debug::Log("[Spawner] Replay: failed to open events.dat for playback: %s\n", eventsPath);
+		// Without events.dat there is no native playback stream to drive Queue_AI, so disable playback-only frame work.
 		PlaybackActive = false;
+		PlaybackShroudRevealed = false;
+		PlaybackQueueAILogged = false;
+		PlaybackFrameOptionsLogged = false;
+		PlaybackOutListLogged = false;
 		return;
 	}
 
@@ -126,6 +237,10 @@ void Replay::SetupPlayback()
 	// Tell Queue_AI to read events from RecordFile instead of accepting player input.
 	SessionClass::Instance.Play = 1;
 	PlaybackActive = true;
+	PlaybackShroudRevealed = false;
+	PlaybackQueueAILogged = false;
+	PlaybackFrameOptionsLogged = false;
+	PlaybackOutListLogged = false;
 
 	// TrapPrintCRC defaults to 0, which makes the playback path's check
 	// "if (frame >= TrapPrintCRC)" fire immediately at frame 0, dumping CRCs
@@ -136,9 +251,84 @@ void Replay::SetupPlayback()
 	Debug::Log("[Spawner] Replay: playback set up from %s (Seed=%08x)\n", eventsPath, recordedSeed);
 }
 
+void Replay::ApplyPlaybackOptions()
+{
+	const auto pConfig = GetReplayConfig();
+	if (!PlaybackActive || !pConfig)
+		return;
+
+	// Private SelfCRC checks .text after startup; apply replay code patches before its baseline so playback options do not trip the guard.
+	ApplyPlaybackTiming();
+
+	// Native playback bypasses DesiredFrameRate/RequestedFPS; force it through normal pacing.
+	Debug::Log("[Spawner] Replay: patching native playback timing to use RequestedFPS\n");
+	Patch::Apply_RAW(0x55D46A, { 0xEB });
+
+	if (!pConfig->ReplayLockedViewport)
+	{
+		// Playback skips GScreen/keyboard input, which prevents panning; allow that input only when the client unlocks the viewport.
+		Debug::Log("[Spawner] Replay: allowing local input for unlocked viewport\n");
+		Patch::Apply_RAW(0x55D881, { 0x90, 0x90 });
+
+		// The viewport record must still be read, but applying Set_View_Point would override the user's unlocked viewport position.
+		Debug::Log("[Spawner] Replay: patching out native recorded viewport restore\n");
+		Patch::Apply_RAW(0x55DA7E, { 0x83, 0xC4, 0x04, 0x90, 0x90 });
+
+		// Tactical::AI early-returns during playback, so Scroll_Map updates never reach the displayed tactical coord; let AI commit them.
+		Debug::Log("[Spawner] Replay: patching out native tactical view freeze for unlocked viewport\n");
+		Patch::Apply_RAW(0x6D2550, { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 });
+	}
+
+	if (!pConfig->ReplaySelectUnits)
+	{
+		// Selection records must still be read to keep the stream aligned, but the client can choose not to mirror recorded selections.
+		Debug::Log("[Spawner] Replay: patching out native recorded selection restore\n");
+		Patch::Apply_RAW(0x55DB0E, { 0x90, 0x90, 0x90, 0x90, 0x90 });
+		Patch::Apply_RAW(0x55DB6F, { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 });
+	}
+
+	Debug::Log("[Spawner] Replay: playback options applied (Speed=%d, FPS=%d, RevealShroud=%d, LockViewport=%d, SelectUnits=%d)\n",
+		std::clamp(pConfig->GameSpeed, 0, 6),
+		Game::Network::RequestedFPS,
+		pConfig->ReplayRevealShroud,
+		pConfig->ReplayLockedViewport,
+		pConfig->ReplaySelectUnits);
+}
+
+void Replay::ApplyPlaybackFrameOptions()
+{
+	if (!Replay::IsPlaybackActive())
+		return;
+
+	// Playback keeps restoring or bypassing local options, so enforce the client's playback-only choices each frame.
+	ApplyPlaybackTiming();
+	ApplyLocalPlaybackControls();
+	ClearLocalPlaybackEvents();
+
+	if (!PlaybackFrameOptionsLogged)
+	{
+		const auto pConfig = GetReplayConfig();
+		Debug::Log("[Spawner] Replay: per-frame playback options reached at frame %d (Speed=%d, FPS=%d, RevealShroud=%d)\n",
+			Unsorted::CurrentFrame,
+			pConfig ? std::clamp(pConfig->GameSpeed, 0, 6) : -1,
+			Game::Network::RequestedFPS,
+			pConfig ? pConfig->ReplayRevealShroud : -1);
+		PlaybackFrameOptionsLogged = true;
+	}
+
+	RevealPlaybackShroud();
+}
+
 // Native playback treats Escape as ending playback; use it as the local options hotkey instead.
 DEFINE_HOOK(0x647299, QueueAI_Playback_EscapeShowsOptions, 0x6)
 {
+	if (Replay::IsPlaybackActive() && !PlaybackQueueAILogged)
+	{
+		// This confirms Queue_AI reached the native playback reader that consumes the recorded event stream.
+		Debug::Log("[Spawner] Replay: Queue_AI playback path reached at frame %d\n", Unsorted::CurrentFrame);
+		PlaybackQueueAILogged = true;
+	}
+
 	if (Replay::IsPlaybackActive() && (R->EAX() & 0xFFFF) == VK_ESCAPE)
 	{
 		Game::SpecialDialog = 1;

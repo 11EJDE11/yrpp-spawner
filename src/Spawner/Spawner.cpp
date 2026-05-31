@@ -299,7 +299,11 @@ bool Spawner::StartScenario(const char* pScenarioName)
 	}
 
 	if (Config->IsReplayPlayback)
+	{
 		Replay::SetupPlayback();
+		// Private SelfCRC records its .text baseline during StartScenario, so apply replay patches before that point.
+		Replay::ApplyPlaybackOptions();
+	}
 	else if (Config->EnableReplayRecording)
 		Replay::PrepareRecording();
 

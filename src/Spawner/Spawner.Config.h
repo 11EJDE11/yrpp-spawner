@@ -152,6 +152,10 @@ public:
 	bool EnableReplayRecording;
 	bool IsReplayPlayback;
 	char ReplayDataDir[MAX_PATH];
+	// Default to native playback behavior unless the client explicitly asks for local presentation changes.
+	bool ReplayRevealShroud;
+	bool ReplayLockedViewport;
+	bool ReplaySelectUnits;
 
 	SpawnerConfig() // default values
 		// Game Mode Options
@@ -252,6 +256,9 @@ public:
 		, EnableReplayRecording { false }
 		, IsReplayPlayback { false }
 		, ReplayDataDir { "" }
+		, ReplayRevealShroud { false }
+		, ReplayLockedViewport { true }
+		, ReplaySelectUnits { true }
 	{ }
 
 	void LoadFromINIFile(CCINIClass* pINI);

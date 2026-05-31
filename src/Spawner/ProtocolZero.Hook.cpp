@@ -19,6 +19,7 @@
 
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
+#include "Replay.h"
 #include "Spawner.h"
 
 #include <Ext/Event/Body.h>
@@ -29,6 +30,9 @@
 
 DEFINE_HOOK(0x55DDA0, MainLoop_AfterRender__ProtocolZero, 0x5)
 {
+	// Unlocked replay input can queue local events, but Queue_AI playback must only execute recorded events; clear them here before Queue_AI runs.
+	Replay::ApplyPlaybackFrameOptions();
+
 	if (ProtocolZero::Enable)
 		ProtocolZero::SendResponseTime2();
 
