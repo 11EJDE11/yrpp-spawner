@@ -429,8 +429,14 @@ DEFINE_HOOK(0x6471A0, QueueExit_ReplayPlayback_ExitLocally, 0x8)
 	return 0;
 }
 
-// Keep modal dialogs visible by preventing playback's main loop render from running under them.
-DEFINE_HOOK(0x623145, OwnerDrawLoop_ReplayPlayback_NoMainLoop, 0x5)
+// Keep modal dialogs (the in-game options menu) visible during playback by taking OwnerDraw_Loop's
+// Call_Back branch (0x62315A) instead of letting it run Main_Loop underneath, which would advance the
+// replay behind the dialog. We must NOT hook the `call InMainLoop_55CBF0` at 0x623145: returning 0 there
+// makes Syringe re-execute that stolen *relative* call from its trampoline without fixing up the
+// displacement, so it calls a garbage address and crashes (e.g. when this fires for a recording, which
+// keeps the native Main_Loop path). Hook the position-independent `mov eax, SystemResponseMessages`
+// just before it instead, so the non-playback path can safely fall through to the native code.
+DEFINE_HOOK(0x62313C, OwnerDrawLoop_ReplayPlayback_NoMainLoop, 0x5)
 {
 	return Replay::IsPlaybackActive()
 		? 0x62315A
