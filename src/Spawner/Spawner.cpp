@@ -309,7 +309,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		if (!Replay::SetupPlayback())
 			return false;
 
-		// Private SelfCRC records its .text baseline during StartScenario, so apply replay patches before that point.
+		// Apply replay code patches before ScenarioClass::StartScenario, so the patched code is in place before the scenario runs.
 		Replay::ApplyPlaybackOptions();
 	}
 	else if (recordReplay)
@@ -463,7 +463,14 @@ void Spawner::InitNetwork()
 	}
 	else
 	{
-		Game::Network::FrameSendRate = isReplayPlayback ? 1 : pSpawnerConfig->FrameSendRate;
+		// Native playback reads the recorded event batches on the same send-frame cadence the recording
+		// wrote them with (Queue_AI gates reads on Frame % FrameSendRate, exactly as Queue_AI_Multiplayer
+		// gated the writes). That cadence is the recording's FrameSendRate, which is 2 for ProtocolZero
+		// games. Using any other rate here desyncs the read from the file, so the first batch is consumed
+		// a frame early and every event then looks like it arrived "too late". Match the recording instead.
+		Game::Network::FrameSendRate = isReplayPlayback
+			? (pSpawnerConfig->Protocol == 0 ? 2 : pSpawnerConfig->FrameSendRate)
+			: pSpawnerConfig->FrameSendRate;
 	}
 
 	if (isReplayPlayback)

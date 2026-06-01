@@ -20,6 +20,8 @@
 #include "Replay.h"
 #include "Spawner.h"
 
+#include <Ext/Event/Body.h>
+
 #include <CCFileClass.h>
 #include <EventClass.h>
 #include <GameModeOptionsClass.h>
@@ -75,6 +77,25 @@ bool IsNativePlaybackReading()
 	return (static_cast<unsigned int>(Game::RecordingFlag) & static_cast<unsigned int>(RecordFlag::Read)) != 0u;
 }
 
+// Network/timing bookkeeping events that only existed to synchronise live peers. Offline playback has
+// no peers, so none of these should run; the recorded gameplay events already carry the frame they
+// execute on. (ResponseTime2 is ProtocolZero's extension event, whose type byte sits past the native range.)
+bool IsNonGameplayPlaybackEvent(EventType type)
+{
+	switch (type)
+	{
+	case EventType::Empty:
+	case EventType::FrameSync:
+	case EventType::ResponseTime:
+	case EventType::ProcessTime:
+	case EventType::MegaFrameInfo:
+	case EventType::PacketTiming:
+		return true;
+	default:
+		return static_cast<unsigned char>(type) == static_cast<unsigned char>(EventTypeExt::ResponseTime2);
+	}
+}
+
 int GetReplayFPSFromGameSpeed(int gameSpeed)
 {
 	// Native playback bypasses RequestedFPS, which made the client's speed option ineffective; map it to the FPS value Main_Loop will use.
@@ -106,9 +127,9 @@ void EnableSpectatorView()
 	// Playback loads us as a normal player. Making that player the Observer flips
 	// HouseClass::IsCurrentPlayerObserver(), which the Observers.Visibility hooks key off to
 	// reveal cloaked/disguised units, radar blips and pips. MakeObserver only sets
-	// HouseClass::Observer = CurrentPlayer; it does NOT change CurrentPlayer, so the private
-	// anti-cheat's PlayerPtr-mirror check is not tripped (only the frame-100 observer check,
-	// which is gated on Session.Play). Reveal the shroud too so the whole map is visible.
+	// HouseClass::Observer = CurrentPlayer; it deliberately does NOT reassign CurrentPlayer,
+	// so the rest of the game still treats us as the same house. Reveal the shroud too so the
+	// whole map is visible.
 	Debug::Log("[Spawner] Replay: enabling spectator view at frame %d\n", Unsorted::CurrentFrame);
 
 	if (HouseClass::CurrentPlayer)
@@ -127,20 +148,31 @@ void EnableSpectatorView()
 	PlaybackSpectatorEnabled = true;
 }
 
-void ApplyPlaybackTiming()
+void InitPlaybackSpeed()
 {
 	const auto pConfig = GetReplayConfig();
 	if (!PlaybackActive || !pConfig)
 		return;
 
-	// The replay header restores recorded game options over spawn.ini, so reapply the client's playback speed after that restore.
-	const int playbackSpeed = std::clamp(pConfig->GameSpeed, 0, 6);
-	GameOptionsClass::Instance.GameSpeed = playbackSpeed;
-	GameModeOptionsClass::Instance.GameSpeed = playbackSpeed;
-	Game::Network::RequestedFPS = GetReplayFPSFromGameSpeed(playbackSpeed);
+	// Load_Recording_Values restored the recorded OptionsClass (including GameSpeed) over spawn.ini,
+	// so set the speed the replay should start at here. From now on the live GameSpeed is authoritative,
+	// so the viewer can change it through the in-game options menu (see ProcessLocalPlaybackEvents).
+	GameOptionsClass::Instance.GameSpeed = std::clamp(pConfig->GameSpeed, 0, 6);
+	Game::Network::RequestedFPS = GetReplayFPSFromGameSpeed(GameOptionsClass::Instance.GameSpeed);
 }
 
-void ClearLocalPlaybackEvents()
+void ApplyPlaybackTiming()
+{
+	if (!PlaybackActive)
+		return;
+
+	// Native playback runs uncapped and ignores RequestedFPS; the 0x55D46A patch instead routes playback
+	// through the RequestedFPS pacing path. Track the live GameSpeed every frame so a speed the viewer
+	// picks in the options menu takes effect immediately, instead of pinning it to one fixed value.
+	Game::Network::RequestedFPS = GetReplayFPSFromGameSpeed(std::clamp(GameOptionsClass::Instance.GameSpeed, 0, 6));
+}
+
+void ProcessLocalPlaybackEvents()
 {
 	if (!PlaybackActive)
 		return;
@@ -149,10 +181,21 @@ void ClearLocalPlaybackEvents()
 	if (outListCount <= 0)
 		return;
 
-	// Local input is needed for an unlocked viewport, but gameplay events from that input would corrupt playback; discard them before Queue_AI.
+	// Queue_AI's playback path drives the simulation entirely from the recorded event stream and never
+	// executes OutList, so local input queued during an unlocked-viewport session must be discarded or it
+	// would pile up (and, if it ever reached the simulation, desync playback). The in-game options menu is
+	// the one exception: during a network session it queues the viewer's speed change as a GameSpeed event
+	// instead of applying it directly, so honor that event locally before discarding the rest.
+	for (int i = 0; i < outListCount; ++i)
+	{
+		const auto& event = EventClass::OutList[i];
+		if (event.Type == EventType::GameSpeed)
+			GameOptionsClass::Instance.GameSpeed = std::clamp(event.GameSpeed.GameSpeed, 0, 6);
+	}
+
 	if (!PlaybackOutListLogged)
 	{
-		Debug::Log("[Spawner] Replay: clearing local playback OutList events (first count=%d)\n", outListCount);
+		Debug::Log("[Spawner] Replay: discarding local playback OutList events (first count=%d)\n", outListCount);
 		PlaybackOutListLogged = true;
 	}
 
@@ -284,8 +327,8 @@ void Replay::ApplyPlaybackOptions()
 	if (!PlaybackActive || !pConfig)
 		return;
 
-	// Private SelfCRC checks .text after startup; apply replay code patches before its baseline so playback options do not trip the guard.
-	ApplyPlaybackTiming();
+	// Pick the speed the replay starts at; from here the viewer can change it via the options menu.
+	InitPlaybackSpeed();
 
 	// Native playback bypasses DesiredFrameRate/RequestedFPS; force it through normal pacing.
 	Debug::Log("[Spawner] Replay: patching native playback timing to use RequestedFPS\n");
@@ -334,17 +377,18 @@ void Replay::ApplyPlaybackFrameOptions()
 	if (!Replay::IsPlaybackActive())
 		return;
 
-	// Playback keeps restoring or bypassing local options, so enforce the client's playback-only choices each frame.
+	// Playback restores or bypasses some local options each frame. Handle queued local events first
+	// (this may pick up a viewer speed change), then re-sync timing to the resulting live GameSpeed.
+	ProcessLocalPlaybackEvents();
 	ApplyPlaybackTiming();
 	ApplyLocalPlaybackControls();
-	ClearLocalPlaybackEvents();
 
 	if (!PlaybackFrameOptionsLogged)
 	{
 		const auto pConfig = GetReplayConfig();
 		Debug::Log("[Spawner] Replay: per-frame playback options reached at frame %d (Speed=%d, FPS=%d, Spectator=%d)\n",
 			Unsorted::CurrentFrame,
-			pConfig ? std::clamp(pConfig->GameSpeed, 0, 6) : -1,
+			std::clamp(GameOptionsClass::Instance.GameSpeed, 0, 6),
 			Game::Network::RequestedFPS,
 			pConfig ? pConfig->ReplaySpectator : -1);
 		PlaybackFrameOptionsLogged = true;
@@ -392,3 +436,55 @@ DEFINE_HOOK(0x623145, OwnerDrawLoop_ReplayPlayback_NoMainLoop, 0x5)
 		? 0x62315A
 		: 0;
 }
+
+// Scenario_Load_Wait blocks a network game until every player reports it has finished loading.
+// During playback there are no connected peers, so the recorded players never report in: the wait
+// would stall for its full timeout and then "drop" them. The native code already skips this wait for
+// campaign/skirmish; treat playback the same and report "everyone loaded" immediately.
+// EAX holds Session.Type here (loaded just before the patched jz); 0 == campaign, the native early-out.
+DEFINE_HOOK(0x684384, ScenarioLoadWait_SkipDuringPlayback, 0x6)
+{
+	if (R->EAX() == 0 || Replay::IsPlaybackActive())
+		return 0x68460A; // success epilogue: mov al,1; restore frame; retn
+
+	return 0x68438A; // not campaign/playback: fall through to the skirmish check
+}
+
+// Drop network/timing events from the DoList during playback, before Execute_DoList walks it.
+// Replaying offline, these events have no peers to sync with and must not run: executed late they fall
+// into the network "Packet received too late!" path (which calls through the null ConnManClass pointer
+// and crashes), and ProtocolZero's ResponseTime2 isn't even a native event type so dispatching it jumps
+// through the event jumptable into garbage. Marking them executed makes Execute_DoList skip them and
+// Clean_DoList drop them. Gameplay events (and GameSpeed) are left to run on their recorded frames.
+//
+// The one timing event we must not ignore is Timing: it carries the FrameSendRate the recording switched
+// to (ProtocolZero raises it as latency worsens). The native read gates batches on Frame % FrameSendRate,
+// so playback has to track that same cadence or the file read drifts and starts decoding gameplay events
+// out of garbage. So apply its FrameSendRate, but still skip the event itself - letting it run would also
+// overwrite RequestedFPS and fight the viewer's chosen playback speed.
+//
+// Hooked at the instruction that loads the loop count, so the marking happens before the first iteration.
+DEFINE_HOOK(0x64C38D, ExecuteDoList_DropTimingEventsDuringPlayback, 0x6)
+{
+	if (Replay::IsPlaybackActive())
+	{
+		auto& doList = EventClass::DoList;
+		for (int i = 0; i < doList.Count; ++i)
+		{
+			auto& event = doList[i];
+
+			if (event.Type == EventType::Timing)
+			{
+				Game::Network::FrameSendRate = std::max(1, static_cast<int>(event.Timing.FrameSendRate));
+				event.IsExecuted = true;
+			}
+			else if (IsNonGameplayPlaybackEvent(event.Type))
+			{
+				event.IsExecuted = true;
+			}
+		}
+	}
+
+	return 0;
+}
+

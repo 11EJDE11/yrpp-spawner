@@ -33,9 +33,9 @@ public:
 	// Open events.dat and restore the recorded header. Call before Game::InitRandom().
 	static bool SetupPlayback();
 
-	// Apply playback patches before scenario startup so private SelfCRC accepts them as the expected .text state.
+	// Apply playback code patches before scenario startup, so the patched code is in place before the game runs.
 	static void ApplyPlaybackOptions();
 
-	// Enforce playback-only options each frame and discard local input events before native playback executes recorded events.
+	// Keep playback timing/spectator state in sync and discard local input events each frame, before native playback executes the recorded events.
 	static void ApplyPlaybackFrameOptions();
 };
