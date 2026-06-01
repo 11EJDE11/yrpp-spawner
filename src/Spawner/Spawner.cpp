@@ -298,13 +298,21 @@ bool Spawner::StartScenario(const char* pScenarioName)
 			pSession->GameMode = GameMode::Skirmish;
 	}
 
-	if (Config->IsReplayPlayback)
+	const bool isReplayPlayback = Config->IsReplayPlayback;
+	const bool recordReplay = Config->EnableReplayRecording && !isReplayPlayback;
+
+	if (Config->EnableReplayRecording && isReplayPlayback)
+		Debug::Log("[Spawner] Replay: recording disabled because playback is active\n");
+
+	if (isReplayPlayback)
 	{
-		Replay::SetupPlayback();
+		if (!Replay::SetupPlayback())
+			return false;
+
 		// Private SelfCRC records its .text baseline during StartScenario, so apply replay patches before that point.
 		Replay::ApplyPlaybackOptions();
 	}
-	else if (Config->EnableReplayRecording)
+	else if (recordReplay)
 		Replay::PrepareRecording();
 
 	Game::InitRandom();
@@ -328,7 +336,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		if (Spawner::Config->CustomMissionID != 0) // after parsing
 			ScenarioClass::Instance->EndOfGame = true;
 
-		if (result && Config->EnableReplayRecording)
+		if (result && recordReplay)
 			Replay::StartRecording();
 
 		return result;
@@ -339,7 +347,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 			? Spawner::LoadSavedGame(Config->SaveGameName)
 			: ScenarioClass::StartScenario(pScenarioName, 0, -1);
 
-		if (result && Config->EnableReplayRecording)
+		if (result && recordReplay)
 			Replay::StartRecording();
 
 		return result;
@@ -361,13 +369,13 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 		// Skip connection setup during replay playback — no actual network peers,
 		// and creating+tearing down connections causes an access violation on exit.
-		if (!Config->IsReplayPlayback)
+		if (!isReplayPlayback)
 		{
 			if (!pSession->CreateConnections())
 				return false;
 		}
 
-		if (Config->EnableReplayRecording)
+		if (recordReplay)
 			Replay::StartRecording();
 
 		// Ares does not support MultiEngineer switching in multiplayer, however
@@ -415,6 +423,7 @@ bool Spawner::LoadSavedGame(const char* saveGameName)
 void Spawner::InitNetwork()
 {
 	const auto pSpawnerConfig = Spawner::GetConfig();
+	const bool isReplayPlayback = pSpawnerConfig->IsReplayPlayback;
 
 	Tunnel::Id = htons((u_short)pSpawnerConfig->TunnelId);
 	Tunnel::Ip = inet_addr(pSpawnerConfig->TunnelIp);
@@ -434,7 +443,10 @@ void Spawner::InitNetwork()
 	Game::Network::PlanetWestwoodStartTime = time(NULL);
 	Game::Network::GameStockKeepingUnit = 0x2901;
 
-	ProtocolZero::Enable = (pSpawnerConfig->Protocol == 0);
+	// Native replay playback reads all synced events from RecordFile, so keep
+	// ProtocolZero and network pacing from adding local traffic or overriding the
+	// replay speed selected by the client.
+	ProtocolZero::Enable = !isReplayPlayback && (pSpawnerConfig->Protocol == 0);
 	if (ProtocolZero::Enable)
 	{
 		Game::Network::FrameSendRate = 2;
@@ -451,17 +463,21 @@ void Spawner::InitNetwork()
 	}
 	else
 	{
-		Game::Network::FrameSendRate = pSpawnerConfig->FrameSendRate;
+		Game::Network::FrameSendRate = isReplayPlayback ? 1 : pSpawnerConfig->FrameSendRate;
 	}
 
-	Game::Network::MaxAhead = pSpawnerConfig->MaxAhead == -1
-		? Game::Network::FrameSendRate * 6
-		: pSpawnerConfig->MaxAhead;
+	if (isReplayPlayback)
+		Game::Network::MaxAhead = 1;
+	else
+		Game::Network::MaxAhead = pSpawnerConfig->MaxAhead == -1
+			? Game::Network::FrameSendRate * 6
+			: pSpawnerConfig->MaxAhead;
 
 	Game::Network::MaxMaxAhead      = 0;
 	Game::Network::ProtocolVersion  = 2;
 	Game::Network::LatencyFudge     = 0;
-	Game::Network::RequestedFPS     = 60;
+	if (!isReplayPlayback)
+		Game::Network::RequestedFPS = 60;
 	Game::Network::Tournament       = pSpawnerConfig->Tournament;
 	Game::Network::WOLGameID        = pSpawnerConfig->WOLGameID;
 	Game::Network::ReconnectTimeout = pSpawnerConfig->ReconnectTimeout;

@@ -30,8 +30,8 @@ public:
 	// Open RECORD.BIN and write the recording header. Call after scenario starts successfully.
 	static void StartRecording();
 
-	// Open events.dat, read recorded Seed, seek past header. Call before Game::InitRandom().
-	static void SetupPlayback();
+	// Open events.dat and restore the recorded header. Call before Game::InitRandom().
+	static bool SetupPlayback();
 
 	// Apply playback patches before scenario startup so private SelfCRC accepts them as the expected .text state.
 	static void ApplyPlaybackOptions();

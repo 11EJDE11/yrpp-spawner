@@ -36,8 +36,8 @@
 #include <algorithm>
 #include <cstdio>
 
-// The game's native function that writes BuildLevel/Seed/ScenarioName/Whom/Special/Options
-// to the open RecordFile. Same format as Save_Recording_Values (0x5318C0).
+// Native replay header helpers. They write/read BuildLevel/Seed/ScenarioName/Whom/Special/Options
+// to/from the open RecordFile.
 // RecordFile header layout (464 bytes total):
 //   offset 0:   BuildLevel  (4)
 //   offset 4:   Seed        (4)
@@ -49,6 +49,7 @@
 //   offset 464: event stream begins
 using RecordingValuesFunc = char(__thiscall*)(void*);
 static auto Save_Recording_Values = reinterpret_cast<RecordingValuesFunc>(0x5318C0);
+static auto Load_Recording_Values = reinterpret_cast<RecordingValuesFunc>(0x531960);
 
 
 namespace
@@ -59,6 +60,15 @@ bool PlaybackSpectatorEnabled = false;
 bool PlaybackQueueAILogged = false;
 bool PlaybackFrameOptionsLogged = false;
 bool PlaybackOutListLogged = false;
+
+void ResetPlaybackState()
+{
+	PlaybackActive = false;
+	PlaybackSpectatorEnabled = false;
+	PlaybackQueueAILogged = false;
+	PlaybackFrameOptionsLogged = false;
+	PlaybackOutListLogged = false;
+}
 
 bool IsNativePlaybackReading()
 {
@@ -169,23 +179,22 @@ bool Replay::IsPlaybackActive()
 void Replay::PrepareRecording()
 {
 	// Recording uses the native menu path correctly; clear playback-only state so prior playback runs cannot leak into recording.
-	PlaybackActive = false;
-	PlaybackSpectatorEnabled = false;
-	PlaybackQueueAILogged = false;
-	PlaybackFrameOptionsLogged = false;
-	PlaybackOutListLogged = false;
+	ResetPlaybackState();
 	SessionClass::Instance.Record = 1;
 	Debug::Log("[Spawner] Replay: recording prepared\n");
 }
 
 void Replay::StartRecording()
 {
+	if (const auto pConfig = Spawner::GetConfig(); pConfig && pConfig->IsReplayPlayback)
+	{
+		Debug::Log("[Spawner] Replay: recording skipped because playback is active\n");
+		SessionClass::Instance.Record = 0;
+		return;
+	}
+
 	// This path writes a recording, not a playback session; clear playback latches before using the game's native recorder.
-	PlaybackActive = false;
-	PlaybackSpectatorEnabled = false;
-	PlaybackQueueAILogged = false;
-	PlaybackFrameOptionsLogged = false;
-	PlaybackOutListLogged = false;
+	ResetPlaybackState();
 	auto& recordFile = SessionClass::Instance.RecordFile;
 
 	if (!recordFile.Open(FileAccessMode::Write))
@@ -210,14 +219,26 @@ void Replay::StartRecording()
 	Debug::Log("[Spawner] Replay: recording started (RECORD.BIN open)\n");
 }
 
-void Replay::SetupPlayback()
+bool Replay::SetupPlayback()
 {
 	auto pConfig = Spawner::GetConfig();
+	ResetPlaybackState();
+
+	if (!pConfig || !pConfig->ReplayDataDir[0])
+	{
+		Debug::Log("[Spawner] Replay: failed to set up playback because ReplayDataDir is empty\n");
+		return false;
+	}
 
 	char eventsPath[MAX_PATH];
 	size_t dirLen = strlen(pConfig->ReplayDataDir);
 	bool hasTrailingSlash = dirLen > 0 && (pConfig->ReplayDataDir[dirLen - 1] == '\\' || pConfig->ReplayDataDir[dirLen - 1] == '/');
-	snprintf(eventsPath, sizeof(eventsPath), hasTrailingSlash ? "%sevents.dat" : "%s\\events.dat", pConfig->ReplayDataDir);
+	const int written = snprintf(eventsPath, sizeof(eventsPath), hasTrailingSlash ? "%sevents.dat" : "%s\\events.dat", pConfig->ReplayDataDir);
+	if (written < 0 || written >= static_cast<int>(sizeof(eventsPath)))
+	{
+		Debug::Log("[Spawner] Replay: failed to set up playback because ReplayDataDir is too long: %s\n", pConfig->ReplayDataDir);
+		return false;
+	}
 
 	auto& recordFile = SessionClass::Instance.RecordFile;
 	recordFile.SetFileName(eventsPath);
@@ -225,34 +246,27 @@ void Replay::SetupPlayback()
 	if (!recordFile.Open(FileAccessMode::Read))
 	{
 		Debug::Log("[Spawner] Replay: failed to open events.dat for playback: %s\n", eventsPath);
-		// Without events.dat there is no native playback stream to drive Queue_AI, so disable playback-only frame work.
-		PlaybackActive = false;
-		PlaybackSpectatorEnabled = false;
-			PlaybackQueueAILogged = false;
-		PlaybackFrameOptionsLogged = false;
-		PlaybackOutListLogged = false;
-		return;
+		return false;
 	}
 
-	// Read BuildLevel (discard) and Seed from the header, then seek to the event stream.
-	int buildLevel = 0;
-	int recordedSeed = 0;
-	recordFile.ReadBytes(&buildLevel, sizeof(buildLevel));
-	recordFile.ReadBytes(&recordedSeed, sizeof(recordedSeed));
+	const int recordFileSize = recordFile.GetFileSize();
+	if (recordFileSize < 464)
+	{
+		Debug::Log("[Spawner] Replay: failed to set up playback because events.dat is too small (%d bytes): %s\n",
+			recordFileSize,
+			eventsPath);
+		recordFile.Close();
+		return false;
+	}
 
-	// Override the seed set from spawn.ini so Init_Random restores the recorded RNG state.
-	Game::Seed = recordedSeed;
-
-	// Seek past the rest of the header (464 bytes total; already read 8).
-	recordFile.Seek(456, FileSeekMode::Current);
+	// Restore the same header the native replay menu path restores: RNG seed, scenario metadata,
+	// owning house/special flags, and recorded game options. This leaves RecordFile at the
+	// event stream so Queue_AI can consume the recorded event batches.
+	Load_Recording_Values(&recordFile);
 
 	// Tell Queue_AI to read events from RecordFile instead of accepting player input.
 	SessionClass::Instance.Play = 1;
 	PlaybackActive = true;
-	PlaybackSpectatorEnabled = false;
-	PlaybackQueueAILogged = false;
-	PlaybackFrameOptionsLogged = false;
-	PlaybackOutListLogged = false;
 
 	// TrapPrintCRC defaults to 0, which makes the playback path's check
 	// "if (frame >= TrapPrintCRC)" fire immediately at frame 0, dumping CRCs
@@ -260,7 +274,8 @@ void Replay::SetupPlayback()
 	auto& TrapPrintCRC = *reinterpret_cast<int*>(0xa8e30cu);
 	TrapPrintCRC = 0x7FFFFFFF;
 
-	Debug::Log("[Spawner] Replay: playback set up from %s (Seed=%08x)\n", eventsPath, recordedSeed);
+	Debug::Log("[Spawner] Replay: playback set up from %s (Seed=%08x)\n", eventsPath, Game::Seed);
+	return true;
 }
 
 void Replay::ApplyPlaybackOptions()
