@@ -17,6 +17,7 @@
   <!-- Compiled files -->
   <ItemGroup>
     <!-- Root -->
+    <ClCompile Include="src\Misc\Bugfixes.Desyncs.cpp" />
     <ClCompile Include="src\UI\Dialogs.cpp" />
     <ClCompile Include="src\UI\Hooks.cpp" />
     <ResourceCompile Include="$(ThisDir)\src\version.rc" />
@@ -92,6 +93,5 @@
     <ClInclude Include="$(ThisDir)\src\Utilities\Macro.h" />
     <ClInclude Include="$(ThisDir)\src\Utilities\Patch.h" />
   </ItemGroup>
-  <Import Project="$(PrivateDir)\SpawnerPrivate.props"
-          Condition="$(Configuration.Contains('Hardened'))"/>
+  <Import Project="$(PrivateDir)\SpawnerPrivate.props" Condition="$(Configuration.Contains('Hardened'))" />
 </Project>
