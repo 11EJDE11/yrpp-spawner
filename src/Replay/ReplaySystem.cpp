@@ -31,6 +31,7 @@
 #include <SessionClass.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -264,6 +265,86 @@ bool ReadRequiredFile(const char* fileName, std::vector<char>& content)
 	return true;
 }
 
+void SanitizeSpawnIniForReplay(std::vector<char>& spawnIni)
+{
+	static constexpr const char* AddressKeys[] = { "Ip", "IPv6", "LanIP" };
+	static constexpr const char* BlankedAddress = "0.0.0.0";
+
+	const auto equalsIgnoreCase = [](const char* a, size_t aLen, const char* b)
+	{
+		const size_t bLen = strlen(b);
+		if (aLen != bLen)
+			return false;
+
+		for (size_t i = 0; i < aLen; ++i)
+		{
+			if (tolower(static_cast<unsigned char>(a[i])) != tolower(static_cast<unsigned char>(b[i])))
+				return false;
+		}
+
+		return true;
+	};
+
+	const size_t size = spawnIni.size();
+	const char* const base = spawnIni.data();
+
+	std::vector<char> sanitized;
+	sanitized.reserve(size);
+
+	size_t lineStart = 0;
+	while (true)
+	{
+		size_t lineEnd = lineStart;
+		while (lineEnd < size && base[lineEnd] != '\n')
+			++lineEnd;
+
+		// A trailing '\r' belongs to the line ending, so exclude it from the content we inspect
+		// and copy it back verbatim afterwards.
+		size_t contentEnd = lineEnd;
+		if (contentEnd > lineStart && base[contentEnd - 1] == '\r')
+			--contentEnd;
+
+		// Find 'key=value' and trim whitespace around the key.
+		size_t separator = lineStart;
+		while (separator < contentEnd && base[separator] != '=')
+			++separator;
+
+		bool blanked = false;
+		if (separator < contentEnd)
+		{
+			size_t keyStart = lineStart;
+			size_t keyEnd = separator;
+			while (keyStart < keyEnd && isspace(static_cast<unsigned char>(base[keyStart])))
+				++keyStart;
+			while (keyEnd > keyStart && isspace(static_cast<unsigned char>(base[keyEnd - 1])))
+				--keyEnd;
+
+			for (const char* addressKey : AddressKeys)
+			{
+				if (equalsIgnoreCase(base + keyStart, keyEnd - keyStart, addressKey))
+				{
+					sanitized.insert(sanitized.end(), base + lineStart, base + separator + 1);
+					sanitized.insert(sanitized.end(), BlankedAddress, BlankedAddress + strlen(BlankedAddress));
+					sanitized.insert(sanitized.end(), base + contentEnd, base + lineEnd);
+					blanked = true;
+					break;
+				}
+			}
+		}
+
+		if (!blanked)
+			sanitized.insert(sanitized.end(), base + lineStart, base + lineEnd);
+
+		if (lineEnd >= size)
+			break;
+
+		sanitized.push_back('\n');
+		lineStart = lineEnd + 1;
+	}
+
+	spawnIni.swap(sanitized);
+}
+
 bool TryReadStringFromSpawnIni(const char* key, char* outBuffer, size_t outBufferSize)
 {
 	if (!key || !outBuffer || outBufferSize == 0)
@@ -414,6 +495,9 @@ bool WriteInitialReplayFile()
 		Debug::Log("[Replay] Required file spawn.ini was not found or could not be read.\n");
 		return false;
 	}
+
+	// Must happen before the header is built - SpawnIniSize has to describe what actually gets written.
+	SanitizeSpawnIniForReplay(spawnIni);
 
 	if (!ReadRequiredFile("spawnmap.ini", spawnMap))
 	{

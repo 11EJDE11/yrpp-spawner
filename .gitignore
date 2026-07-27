@@ -11,6 +11,7 @@ DevBuild-CnCNetYR/**
 DevBuild-CnCNetYR-Hardened/**
 Debug-CnCNetYR/**
 Debug-CnCNetYR-Hardened/**
+*-QM/**
 
 .vs/**
 .vscode/**

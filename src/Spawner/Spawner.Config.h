@@ -185,7 +185,7 @@ public:
 		, AutoSaveCount { 5 }
 		, AutoSaveInterval { 7200 }
 		, NextAutoSaveNumber { 0 }
-		, EnableReplayRecording { true }
+		, EnableReplayRecording { false }
 		, ReplayFile { "" }
 		, ReplayShroudEnabled { false }
 		, ReplayLockedViewport { true }

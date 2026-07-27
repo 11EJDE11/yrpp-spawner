@@ -18,6 +18,10 @@ Building manually
    - barebones: run the corresponding `scripts/build_*.bat`.
 4. Upon build completion the resulting `CnCNet-Spawner.dll` and `CnCNet-Spawner.pdb` would be placed in the subfolder identical to the name of the build config executed.
 
+To build the Quick Match replay beta variant, run `scripts/build_qm.bat <config>` (or one of the `scripts/build_qm_*.bat` shortcuts), which is equivalent to passing `/property:SpawnerVariant=QM` to MSBuild. This builds the same sources but emits `CnCNet-QM-Spawner.dll` into a `<config>-QM` subfolder, so it can be shipped next to the regular spawner and the Quick Match client can be pointed back at `CnCNet-Spawner.dll` at any time without a client update.
+
+The config shipped to Quick Match players is `Release-CnCNetYR-Hardened` (`scripts/build_qm_release_cncnet_yr_hardened.bat`), since that is the one containing the anti-cheat code. The variant is orthogonal to the build config, so it can be combined with any of them.
+
 Please note that you can build the hardened version only if you have access to it's source code. It is though automatically built and made available to download on pull requests, releases and nightly builds via GitHub Actions.
 
 Credits
