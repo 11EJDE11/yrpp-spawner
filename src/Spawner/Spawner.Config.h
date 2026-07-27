@@ -110,6 +110,10 @@ public:
 	bool ReplayShroudEnabled;
 	bool ReplayLockedViewport;
 	bool ReplaySelectUnits;
+	// Watch playback as an observer: reveals the whole map and makes cloaked/disguised units,
+	// radar blips and pips visible. Off by default so playback stays from the recorded player's
+	// point of view, which is what most viewers expect.
+	bool ReplaySpectator;
 
 	// Scenario Options
 	int  Seed;
@@ -190,6 +194,7 @@ public:
 		, ReplayShroudEnabled { false }
 		, ReplayLockedViewport { true }
 		, ReplaySelectUnits { true }
+		, ReplaySpectator { false }
 
 		// Scenario Options
 		, Seed { 0 }

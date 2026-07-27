@@ -21,6 +21,7 @@
 
 #include <Spawner/Spawner.h>
 #include <Utilities/Debug.h>
+#include <Ext/Event/Body.h>
 #include <Ext/INIClass/Body.h>
 
 #include <EventClass.h>
@@ -32,7 +33,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -122,6 +122,7 @@ struct ReplayRuntimeState
 	bool ShroudEnabled = false;
 	bool LockViewport = true;
 	bool SelectUnits = true;
+	bool SpectatorView = false;
 	int PlaybackSpeedIndex = -1;
 
 	int ExpectedEventsThisFrame = 0;
@@ -649,6 +650,7 @@ void ResetRuntimeFlagsForScenario()
 	gReplay.Recording = false;
 	gReplay.Playback = false;
 	gReplay.RunPlayback = true;
+	gReplay.SpectatorView = false;
 	gReplay.PlaybackSpeedIndex = -1;
 	gReplay.ExpectedEventsThisFrame = 0;
 	gReplay.PlayersMarkedLoaded = false;
@@ -685,24 +687,24 @@ void ApplyPlaybackInitialState()
 		ScenarioClass::Instance->UniqueID = gReplay.PlaybackHeader.UniqueIDCounter;
 	}
 
-	// SessionClass::Resume sets WaitingForPlayersAutoHideFrame = CurrentFrame + 3, which
-	// triggers SessionClass_HideWaitingForPlayersScreen ~3 frames later. In observer/replay
-	// mode the "waiting for players" panel object at 0x0087F770 is never initialized, so
-	// the call to FUN_0054f720(ECX=[0x0087F770]) crashes at *(ECX+0x318). Zero out the
-	// timer so MainLoop never invokes HideWaitingForPlayersScreen during playback.
-	//*reinterpret_cast<int*>(0x00B07784u) = 0;
+	// If HideWaitingForPlayersScreen ever crashes during playback, the cause is the panel at
+	// 0x0087F770 being uninitialised in replay mode; zeroing the auto-hide timer at 0x00B07784
+	// stops MainLoop reaching it. Not needed since players are marked loaded up front.
 }
 
-// Timing events are transport/noise for replay playback.
-// Event 0x30+ is from the spawner's Protocol Zero timing extension.
+// Network and timing bookkeeping that only meant something to live peers. These are still recorded
+// (they carry the latency and process-time data), they just must not be replayed.
 bool IsTimingEvent(EventType eventType)
 {
-	const auto type = static_cast<unsigned char>(eventType);
-	if (type >= 0x30 && type <= 0x3F)
+	// Spawner extension events, currently just ProtocolZero's ResponseTime2. Asking EventExt rather
+	// than testing a 0x30-0x3F range means a future extension event is covered automatically, and
+	// that Ares' events at 0x60/0x61 are not swept up by accident.
+	if (EventExt::IsValidType(static_cast<EventTypeExt>(eventType)))
 		return true;
 
 	switch (eventType)
 	{
+	case EventType::Empty:
 	case EventType::ResponseTime:
 	case EventType::FrameInfo:
 	case EventType::Timing:
@@ -716,8 +718,9 @@ bool IsTimingEvent(EventType eventType)
 	}
 }
 
-// Skip OPTIONS while recording so playback doesn't reopen menus from
-// the original session.
+// What actually drives the simulation, and so the only thing playback injects. Timing and network
+// events have nothing to sync with offline, and OPTIONS would reopen menus from the original
+// session; both are read past instead.
 bool IsReplayableGameplayEvent(const EventClass& event)
 {
 	return event.Type != EventType::Options && !IsTimingEvent(event.Type);
@@ -1096,13 +1099,9 @@ void RestoreFrameState()
 		&& gReplay.LockViewport
 		&& TacticalClass::Instance)
 	{
-		// Mirror the built-in replay viewport restore (sub_6D6000): set both
-		// TacticalCoord1/2 (the canonical viewport center), recalculate
-		// TacticalPos and the visible-cell list, and flag a full redraw.
-		// Just writing TacticalPos alone is insufficient because
-		// TacticalClass::Update overwrites it from TacticalCoord1 every
-		// frame, and TacticalClass::Draw checks Redrawing/TacticalCoord1
-		// to decide whether a full repaint is needed.
+		// Mirrors the built-in replay viewport restore (sub_6D6000). Writing TacticalPos alone is
+		// not enough: TacticalClass::Update overwrites it from TacticalCoord1 every frame, and
+		// Draw keys off Redrawing/TacticalCoord1 to decide on a full repaint.
 		auto* tc = TacticalClass::Instance;
 		tc->TacticalCoord1 = frameRecord.TacticalPos;
 		tc->TacticalCoord2 = frameRecord.TacticalPos;
@@ -1124,7 +1123,10 @@ void RestoreFrameState()
 	if (!gReplay.RunPlayback)
 		return;
 
-	if (!gReplay.ShroudEnabled && Unsorted::CurrentFrame == 0)
+	// Reveal the whole map when the viewer asked for no shroud, and always for a spectator - an
+	// observer is meant to see everything. Observer mode itself is set during load in
+	// Spawner::StartGame, which is early enough for the sidebar to be built for it.
+	if ((!gReplay.ShroudEnabled || gReplay.SpectatorView) && Unsorted::CurrentFrame == 0)
 	{
 		for (const auto pHouse : HouseClass::Array)
 		{
@@ -1134,6 +1136,9 @@ void RestoreFrameState()
 	}
 }
 
+// Records every event on this frame, including the timing ones that are never replayed - they carry
+// the per-player latency and process-time data, which makes a replay useful for working out who was
+// lagging. Playback decides what to skip, since that is the only place it matters.
 void RecordEventsForCurrentFrame()
 {
 	const int doListCount = EventClass::DoList.Count;
@@ -1142,11 +1147,8 @@ void RecordEventsForCurrentFrame()
 	for (int i = 0; i < doListCount; ++i)
 	{
 		const auto& event = EventClass::DoList[i];
-		if (event.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame)
-			&& IsReplayableGameplayEvent(event))
-		{
+		if (event.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame))
 			++eventsThisFrame;
-		}
 	}
 
 	FlushPendingRecordedFramesThrough(Unsorted::CurrentFrame, eventsThisFrame);
@@ -1156,8 +1158,7 @@ void RecordEventsForCurrentFrame()
 	for (int i = 0; i < doListCount; ++i)
 	{
 		const auto& event = EventClass::DoList[i];
-		if (event.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame)
-			&& IsReplayableGameplayEvent(event))
+		if (event.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame))
 		{
 			if (!WriteRaw(&event, sizeof(EventClass)))
 			{
@@ -1189,6 +1190,11 @@ void PlaybackFrameEvents()
 			StopReplaySystem();
 			return;
 		}
+
+		// Every event on the frame was recorded, so the whole batch has to be read to keep the
+		// stream aligned - but only the ones that drive the simulation get injected.
+		if (!IsReplayableGameplayEvent(*replayEvent))
+			continue;
 
 		replayEvent->IsExecuted = false;
 		if (!EventClass::DoList.Add(*replayEvent))
@@ -1267,6 +1273,7 @@ void StartReplayPlayback(const char* replayPath)
 	gReplay.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
 	gReplay.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
 	gReplay.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
+	gReplay.SpectatorView = pConfig ? pConfig->ReplaySpectator : false;
 
 	strncpy_s(gReplay.PlaybackPath, sizeof(gReplay.PlaybackPath), replayPath, _TRUNCATE);
 
