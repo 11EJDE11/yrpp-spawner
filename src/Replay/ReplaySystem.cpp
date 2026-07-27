@@ -41,7 +41,7 @@
 
 constexpr uint32_t REPLAY_MAGIC = 0x4A455259u;
 constexpr uint32_t REPLAY_VERSION = 1;
-constexpr int REPLAY_FLUSH_INTERVAL_FRAMES = 300;
+constexpr uint64_t REPLAY_FLUSH_INTERVAL_BYTES = 15ull * 1024 * 1024;
 constexpr const char* DEFAULT_RECORDING_PATH = "replay.dat";
 
 enum FrameRecordFlags : uint32_t
@@ -126,6 +126,7 @@ struct ReplayRuntimeState
 	int PlaybackSpeedIndex = -1;
 
 	int ExpectedEventsThisFrame = 0;
+	uint64_t BytesSinceFlush = 0;
 
 	HANDLE ReplayFile = INVALID_HANDLE_VALUE;
 
@@ -218,7 +219,17 @@ bool ReadRawFromHandle(HANDLE file, void* buffer, size_t size)
 
 bool WriteRaw(const void* data, size_t size)
 {
-	return WriteRawToHandle(gReplay.ReplayFile, data, size);
+	if (!WriteRawToHandle(gReplay.ReplayFile, data, size))
+		return false;
+
+	gReplay.BytesSinceFlush += size;
+	if (gReplay.BytesSinceFlush >= REPLAY_FLUSH_INTERVAL_BYTES)
+	{
+		FlushFileBuffers(gReplay.ReplayFile);
+		gReplay.BytesSinceFlush = 0;
+	}
+
+	return true;
 }
 
 bool ReadRaw(void* buffer, size_t size)
@@ -653,6 +664,7 @@ void ResetRuntimeFlagsForScenario()
 	gReplay.SpectatorView = false;
 	gReplay.PlaybackSpeedIndex = -1;
 	gReplay.ExpectedEventsThisFrame = 0;
+	gReplay.BytesSinceFlush = 0;
 	gReplay.PlayersMarkedLoaded = false;
 	gReplay.PendingFrameStates.clear();
 	gReplay.HasPlaybackHeader = false;
@@ -1380,14 +1392,6 @@ DEFINE_HOOK(0x0055d878, MainLoop_RecordPlaybackFrameState, 0x6)
 		RestoreFrameState();
 	}
 
-	if ((gReplay.Recording || gReplay.Playback)
-		&& gReplay.ReplayFile != INVALID_HANDLE_VALUE
-		&& Unsorted::CurrentFrame > 0
-		&& (Unsorted::CurrentFrame % REPLAY_FLUSH_INTERVAL_FRAMES) == 0)
-	{
-		FlushFileBuffers(gReplay.ReplayFile);
-	}
-
 	return 0;
 }
 
@@ -1430,7 +1434,11 @@ DEFINE_HOOK(0x55CF13, GameExit_Sell_FlushReplayBuffers, 0x5)
 	return 0;
 }
 
-//Todo: add flush on desync (might be covered by the above, need to test)
+DEFINE_HOOK(0x6BEC60, Game_Exit_FlushReplayBuffers, 0x5)
+{
+	StopReplaySystem();
+	return 0;
+}
 
 
 DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
