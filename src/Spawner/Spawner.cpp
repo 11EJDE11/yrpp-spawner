@@ -22,6 +22,9 @@
 #include "NetHack.h"
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
+#include "FrameGate.h"
+#include "FastRetransmit.h"
+#include "PacketRedundancy.h"
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
 
@@ -407,6 +410,14 @@ void Spawner::InitNetwork()
 
 	Game::Network::PlanetWestwoodStartTime = time(NULL);
 	Game::Network::GameStockKeepingUnit = 0x2901;
+
+	// Netcode experiments (toggle from spawn.ini [Settings]).
+	FrameGate::Enabled          = pSpawnerConfig->FrameAwareGate;
+	FastRetransmit::Enabled     = pSpawnerConfig->FastRetransmit;
+	FastRetransmit::Backoff     = pSpawnerConfig->RetransmitBackoff;
+	PacketRedundancy::Enabled   = pSpawnerConfig->PacketRedundancy;
+	PacketRedundancy::Copies    = pSpawnerConfig->RedundancyCopies < 1 ? 1 : pSpawnerConfig->RedundancyCopies;
+	PacketRedundancy::Adaptive  = pSpawnerConfig->AdaptiveRedundancy;
 
 	ProtocolZero::Enable = (pSpawnerConfig->Protocol == 0);
 	if (ProtocolZero::Enable)

@@ -123,6 +123,12 @@ public:
 	int MaxAhead;
 	int PreCalcMaxAhead;
 	byte MaxLatencyLevel;
+	bool FrameAwareGate;  // fix1: frame-aware advance gate
+	bool FastRetransmit;  // fix2: RTT-adaptive retransmit timer
+	bool RetransmitBackoff;  // fix2: gentle timeout growth on repeated retries
+	bool PacketRedundancy;  // fix3: duplicate reliable command packets
+	int  RedundancyCopies;  // fix3: total copies to send (>=1)
+	bool AdaptiveRedundancy;  // fix3: only duplicate while loss is observed
 	bool ForceMultiplayer;
 
 	// Tunnel Options
@@ -201,6 +207,12 @@ public:
 		, MaxAhead { -1 }
 		, PreCalcMaxAhead { 0 }
 		, MaxLatencyLevel { 0xFF }
+		, FrameAwareGate { true }
+		, FastRetransmit { true }
+		, RetransmitBackoff { true }
+		, PacketRedundancy { true }
+		, RedundancyCopies { 2 }
+		, AdaptiveRedundancy { true }
 		, ForceMultiplayer { false }
 
 		// Tunnel Options
