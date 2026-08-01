@@ -19,6 +19,8 @@
 
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
+#include "FrameGate.h"
+#include "FastRetransmit.h"
 
 #include "Spawner.h"
 #include <Ext/Event/Body.h>
@@ -48,16 +50,38 @@ void ProtocolZero::SendResponseTime2()
 	if (ProtocolZero::NextSendFrame >= currentFrame)
 		return;
 
-	const int ipxResponseTime = IPXManagerClass::Instance.ResponseTime();
+	// Prefer FastRetransmit's clean estimate over IPXManagerClass::ResponseTime().
+	//
+	// The engine's average folds in the round trip of *retransmitted* packets,
+	// whose measured delay contains the retry wait itself -- so under loss it
+	// inflates itself and reports tens of ticks on a link whose real round trip
+	// is a handful. Sizing the runway from that would react to our own retransmit
+	// timer rather than to the network, and would keep the ladder pinned high
+	// long after conditions recovered.
+	const int cleanRtt = FastRetransmit::SmoothedRTT();
+	const int ipxResponseTime = (cleanRtt > 0)
+		? cleanRtt
+		: IPXManagerClass::Instance.ResponseTime();
+
 	if (ipxResponseTime <= -1)
 		return;
+
+	// Outcome feedback: did the runway we are already running actually cover the
+	// last retransmit? Blocks only advances when the frame-aware gate ran out of
+	// stamped-ahead commands, which is the one direct measurement of "MaxAhead was
+	// too short". Round-trip time cannot show this -- a 20ms link with 3% loss
+	// looks pristine right up until it stalls.
+	static int LastSeenBlocks = 0;
+	const bool needRetransmitCover = FrameGate::Blocks != LastSeenBlocks;
+	LastSeenBlocks = FrameGate::Blocks;
 
 	EventExt event;
 	event.Type = EventTypeExt::ResponseTime2;
 	event.HouseIndex = (char)HouseClass::CurrentPlayer->ArrayIndex;
 	event.Frame = currentFrame + Game::Network::MaxAhead;
 	event.ResponseTime2.MaxAhead = (int8_t)ipxResponseTime + 1;
-	event.ResponseTime2.LatencyLevel = (uint8_t)LatencyLevel::FromResponseTime((uint8_t)ipxResponseTime);
+	event.ResponseTime2.LatencyLevel = (uint8_t)LatencyLevel::FromConditions(
+		(uint8_t)ipxResponseTime, needRetransmitCover);
 
 	if (event.AddEvent())
 	{

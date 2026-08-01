@@ -44,16 +44,23 @@
     <ClCompile Include="$(ThisDir)\src\Misc\CopyProtection.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\DisableEdgeScrolling.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\InGameChat.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\NetTelemetry.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\NoCD.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Observers.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Observers.Visibility.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\QuickExit.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\RenderThrottle.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\SavedGamesInSubdir.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\SkipScoreScreen.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\VideoMode.cpp" />
     <!-- Spawner -->
     <ClCompile Include="$(ThisDir)\src\Spawner\CustomMixes.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Spawner\FastRetransmit.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Spawner\FrameGate.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Spawner\PacketRedundancy.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\NetHack.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Spawner\SendClock.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Spawner\StallCounters.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\ProtocolZero.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\ProtocolZero.Hook.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\ProtocolZero.LatencyLevel.cpp" />

@@ -86,6 +86,29 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		PreCalcMaxAhead  = pINI->ReadInteger(pSettingsSection, "PreCalcMaxAhead", PreCalcMaxAhead);
 		MaxLatencyLevel  = (byte)pINI->ReadInteger(pSettingsSection, "MaxLatencyLevel", (int)MaxLatencyLevel);
 		ForceMultiplayer = pINI->ReadBool(pSettingsSection, "ForceMultiplayer", ForceMultiplayer);
+		NetTelemetry     = pINI->ReadBool(pSettingsSection, "NetTelemetry", NetTelemetry);
+		FrameAwareGate   = pINI->ReadBool(pSettingsSection, "FrameAwareGate", FrameAwareGate);
+
+		FastRetransmit     = pINI->ReadBool(pSettingsSection, "FastRetransmit", FastRetransmit);
+		RetransmitBackoff  = pINI->ReadBool(pSettingsSection, "RetransmitBackoff", RetransmitBackoff);
+		PacketRedundancy   = pINI->ReadBool(pSettingsSection, "PacketRedundancy", PacketRedundancy);
+		RedundancyCopies   = pINI->ReadInteger(pSettingsSection, "RedundancyCopies", RedundancyCopies);
+		AdaptiveRedundancy = pINI->ReadBool(pSettingsSection, "AdaptiveRedundancy", AdaptiveRedundancy);
+		StallCounterFix    = pINI->ReadBool(pSettingsSection, "StallCounterFix", StallCounterFix);
+		LadderBidirectional = pINI->ReadBool(pSettingsSection, "LadderBidirectional", LadderBidirectional);
+		pINI->ReadString(pSettingsSection, "NetTestName", NetTestName, NetTestName, sizeof(NetTestName));
+
+		RenderThrottle             = pINI->ReadBool(pSettingsSection, "RenderThrottle", RenderThrottle);
+		RenderThrottleObserveOnly  = pINI->ReadBool(pSettingsSection, "RenderThrottleObserveOnly", RenderThrottleObserveOnly);
+		RenderThrottleEngageFrames = pINI->ReadInteger(pSettingsSection, "RenderThrottleEngageFrames", RenderThrottleEngageFrames);
+		RenderThrottleReleaseFrames = pINI->ReadInteger(pSettingsSection, "RenderThrottleReleaseFrames", RenderThrottleReleaseFrames);
+		RenderThrottleMaxSkip      = pINI->ReadInteger(pSettingsSection, "RenderThrottleMaxSkip", RenderThrottleMaxSkip);
+		RenderThrottleMinFrameRate = pINI->ReadInteger(pSettingsSection, "RenderThrottleMinFrameRate", RenderThrottleMinFrameRate);
+		RenderThrottleMaxFrameRate = pINI->ReadInteger(pSettingsSection, "RenderThrottleMaxFrameRate", RenderThrottleMaxFrameRate);
+
+		SendClockDrift       = pINI->ReadBool(pSettingsSection, "SendClockDrift", SendClockDrift);
+		SendClockMaxDrift    = pINI->ReadInteger(pSettingsSection, "SendClockMaxDrift", SendClockMaxDrift);
+		SendClockDoListLimit = pINI->ReadInteger(pSettingsSection, "SendClockDoListLimit", SendClockDoListLimit);
 	}
 
 	{ // Tunnel Options

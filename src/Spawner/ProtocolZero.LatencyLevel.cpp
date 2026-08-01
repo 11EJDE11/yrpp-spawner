@@ -19,15 +19,75 @@
 
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
+#include "FrameGate.h"
 
 #include <HouseClass.h>
 #include <MessageListClass.h>
 #include <Utilities/Debug.h>
 #include <Unsorted.h>
 
+#include <limits>
+
 LatencyLevelEnum LatencyLevel::CurentLatencyLevel = LatencyLevelEnum::LATENCY_LEVEL_INITIAL;
 unsigned char LatencyLevel::NewFrameSendRate = 3;
+bool LatencyLevel::Bidirectional = true;
 
+namespace
+{
+	//!< Wait this long after raising the level before considering a drop, so a
+	//!< burst of spikes does not oscillate the whole lobby's input latency.
+	constexpr int DownshiftCooldownFrames = 60 * 10;
+
+	//!< ...and then require conditions to stay good for this long before acting.
+	constexpr int DownshiftConfirmFrames = 60 * 6;
+
+	int LastUpshiftFrame = (std::numeric_limits<int>::min)();
+	int PendingDownshiftFrame = -1;
+	LatencyLevelEnum PendingDownshiftLevel = LatencyLevelEnum::LATENCY_LEVEL_INITIAL;
+
+	void ApplyInternal(LatencyLevelEnum newLatencyLevel, const char* pLogTag)
+	{
+		Debug::Log("Player %ls, %s (%d, %d) Frame = %d\n"
+			, HouseClass::CurrentPlayer->UIName
+			, pLogTag
+			, newLatencyLevel
+			, LatencyLevel::CurentLatencyLevel
+			, (int)Unsorted::CurrentFrame
+		);
+
+		LatencyLevel::CurentLatencyLevel = newLatencyLevel;
+		LatencyLevel::NewFrameSendRate = static_cast<unsigned char>(newLatencyLevel);
+		Game::Network::PreCalcFrameRate = 60;
+		Game::Network::PreCalcMaxAhead = LatencyLevel::GetMaxAhead(newLatencyLevel);
+
+		MessageListClass::Instance.PrintMessage(
+			LatencyLevel::GetLatencyMessage(newLatencyLevel),
+			(int)(RulesClass::Instance->MessageDelay * 900),
+			ColorScheme::White,
+			true
+		);
+	}
+}
+
+void LatencyLevel::Reset()
+{
+	CurentLatencyLevel = LatencyLevelEnum::LATENCY_LEVEL_INITIAL;
+	NewFrameSendRate = 3;
+
+	LastUpshiftFrame = (std::numeric_limits<int>::min)();
+	PendingDownshiftFrame = -1;
+	PendingDownshiftLevel = LatencyLevelEnum::LATENCY_LEVEL_INITIAL;
+}
+
+/**
+ *  The ladder used to be a one-way ratchet: `if (new <= current) return;`. One
+ *  transient spike pinned a match at MaxAhead 36 -- roughly 600ms of input
+ *  latency -- for the rest of the game, long after the network recovered.
+ *
+ *  Raising is still immediate, because being short of runway costs everyone a
+ *  stall. Lowering is deliberately slow: a cooldown after the last raise, then a
+ *  sustained-good-conditions confirmation, then one rung at a time.
+ */
 void LatencyLevel::Apply(LatencyLevelEnum newLatencyLevel)
 {
 	if (newLatencyLevel > LatencyLevelEnum::LATENCY_LEVEL_MAX)
@@ -37,22 +97,52 @@ void LatencyLevel::Apply(LatencyLevelEnum newLatencyLevel)
 	if (newLatencyLevel > maxLatencyLevel)
 		newLatencyLevel = maxLatencyLevel;
 
-	if (newLatencyLevel <= CurentLatencyLevel)
+	if (newLatencyLevel == CurentLatencyLevel)
 		return;
 
-	Debug::Log("Player %ls, Loss mode (%d, %d) Frame = %d\n"
-		, HouseClass::CurrentPlayer->UIName
-		, newLatencyLevel
-		, CurentLatencyLevel
-		, (int)Unsorted::CurrentFrame
-	);
+	// Vanilla behaviour: only ever climb. One transient spike then pins the match
+	// at MaxAhead 36 for the rest of the game.
+	if (!Bidirectional)
+	{
+		if (newLatencyLevel < CurentLatencyLevel)
+			return;
 
-	CurentLatencyLevel = newLatencyLevel;
-	NewFrameSendRate = static_cast<unsigned char>(newLatencyLevel);
-	Game::Network::PreCalcFrameRate = 60;
-	Game::Network::PreCalcMaxAhead = GetMaxAhead(newLatencyLevel);
+		ApplyInternal(newLatencyLevel, "Loss mode");
+		return;
+	}
 
-	MessageListClass::Instance.PrintMessage(GetLatencyMessage(newLatencyLevel), (int)(RulesClass::Instance->MessageDelay * 900), ColorScheme::White, true);
+	const int currentFrame = (int)Unsorted::CurrentFrame;
+
+	if (newLatencyLevel > CurentLatencyLevel)
+	{
+		PendingDownshiftFrame = -1;
+		PendingDownshiftLevel = LatencyLevelEnum::LATENCY_LEVEL_INITIAL;
+		LastUpshiftFrame = currentFrame;
+		ApplyInternal(newLatencyLevel, "Loss mode");
+		return;
+	}
+
+	if (currentFrame < LastUpshiftFrame + DownshiftCooldownFrames)
+		return;
+
+	if (PendingDownshiftFrame < 0 || PendingDownshiftLevel != newLatencyLevel)
+	{
+		PendingDownshiftFrame = currentFrame;
+		PendingDownshiftLevel = newLatencyLevel;
+		return;
+	}
+
+	if (currentFrame - PendingDownshiftFrame < DownshiftConfirmFrames)
+		return;
+
+	// One rung per confirmation, so recovery is gradual and re-tests conditions
+	// at each step instead of dropping straight back to the bottom.
+	const auto stepLevel = static_cast<LatencyLevelEnum>(
+		static_cast<uint8_t>(CurentLatencyLevel) - 1);
+
+	PendingDownshiftFrame = -1;
+	PendingDownshiftLevel = LatencyLevelEnum::LATENCY_LEVEL_INITIAL;
+	ApplyInternal(stepLevel, "Recovery mode");
 }
 
 int LatencyLevel::GetMaxAhead(LatencyLevelEnum latencyLevel)
@@ -104,4 +194,27 @@ LatencyLevelEnum LatencyLevel::FromResponseTime(unsigned char rspTime)
 	}
 
 	return LatencyLevelEnum::LATENCY_LEVEL_MAX;
+}
+
+LatencyLevelEnum LatencyLevel::FromConditions(unsigned char rspTime, bool needRetransmitCover)
+{
+	int needed = rspTime;
+
+	// Extra runway only helps if something actually uses it. Without the
+	// frame-aware gate the engine stalls the instant a peer has anything
+	// outstanding, no matter how far ahead it was stamped -- so a bigger MaxAhead
+	// would buy nothing for loss and cost everyone input latency. Only pay for
+	// retransmit cover when the gate is there to spend it.
+	if (needRetransmitCover && FrameGate::Enable)
+	{
+		// One retransmit round trip: the sender waits RetryDelta (= RTT + 10ms,
+		// recomputed at 0x6476D0) and the resend then takes about half an RTT.
+		// rspTime is already in frames, so this is 1.5x plus a frame of slack.
+		needed += (rspTime * 3) / 2 + 1;
+	}
+
+	if (needed > 255)
+		needed = 255;
+
+	return FromResponseTime(static_cast<unsigned char>(needed));
 }

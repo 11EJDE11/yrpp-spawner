@@ -19,11 +19,18 @@
 
 #include <Main.h>
 #include "Spawner.h"
+#include "FrameGate.h"
+#include "FastRetransmit.h"
+#include "PacketRedundancy.h"
+#include "SendClock.h"
+#include "StallCounters.h"
 #include "NetHack.h"
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
+#include <Misc/NetTelemetry.h>
+#include <Misc/RenderThrottle.h>
 
 #include <GameOptionsClass.h>
 #include <GameStrings.h>
@@ -408,7 +415,43 @@ void Spawner::InitNetwork()
 	Game::Network::PlanetWestwoodStartTime = time(NULL);
 	Game::Network::GameStockKeepingUnit = 0x2901;
 
+	NetTelemetry::Enable = pSpawnerConfig->NetTelemetry;
+	NetTelemetry::TestName = pSpawnerConfig->NetTestName;
+	NetTelemetry::Reset();
+
+	FrameGate::Enable = pSpawnerConfig->FrameAwareGate;
+	FrameGate::Reset();
+
+	FastRetransmit::Enabled = pSpawnerConfig->FastRetransmit;
+	FastRetransmit::Backoff = pSpawnerConfig->RetransmitBackoff;
+	FastRetransmit::Reset();
+
+	PacketRedundancy::Enabled = pSpawnerConfig->PacketRedundancy;
+	PacketRedundancy::Copies = pSpawnerConfig->RedundancyCopies;
+	PacketRedundancy::Adaptive = pSpawnerConfig->AdaptiveRedundancy;
+	PacketRedundancy::Reset();
+
+	StallCounters::Enable = pSpawnerConfig->StallCounterFix;
+	StallCounters::Reset();
+
+	LatencyLevel::Bidirectional = pSpawnerConfig->LadderBidirectional;
+
+	RenderThrottle::Enable = pSpawnerConfig->RenderThrottle;
+	RenderThrottle::ObserveOnly = pSpawnerConfig->RenderThrottleObserveOnly;
+	RenderThrottle::EngageFrames = pSpawnerConfig->RenderThrottleEngageFrames;
+	RenderThrottle::ReleaseFrames = pSpawnerConfig->RenderThrottleReleaseFrames;
+	RenderThrottle::MaxConsecutiveSkips = pSpawnerConfig->RenderThrottleMaxSkip;
+	RenderThrottle::MinFrameRate = pSpawnerConfig->RenderThrottleMinFrameRate;
+	RenderThrottle::MaxFrameRate = pSpawnerConfig->RenderThrottleMaxFrameRate;
+	RenderThrottle::Reset();
+
+	SendClock::Enable = pSpawnerConfig->SendClockDrift;
+	SendClock::MaxDrift = pSpawnerConfig->SendClockMaxDrift;
+	SendClock::DoListLimit = pSpawnerConfig->SendClockDoListLimit;
+	SendClock::Reset();
+
 	ProtocolZero::Enable = (pSpawnerConfig->Protocol == 0);
+	LatencyLevel::Reset();
 	if (ProtocolZero::Enable)
 	{
 		Game::Network::FrameSendRate = 2;

@@ -16,6 +16,7 @@
 
 #include "NetHack.h"
 #include "Spawner.h"
+#include "PacketRedundancy.h"
 
 #include <windows.h>
 #include <stdint.h>
@@ -105,9 +106,21 @@ int WINAPI Tunnel::SendTo(
 	uint16_t* BufFrom = reinterpret_cast<uint16_t*>(TempBuf);
 	uint16_t* BufTo = reinterpret_cast<uint16_t*>(TempBuf + 2);
 
+	// Decided from the plain game bytes, before any tunnel header is applied.
+	// The peer's ARQ discards the duplicates, so an isolated loss costs nothing
+	// rather than a retransmit round trip.
+	const int copies = PacketRedundancy::CopiesFor(buf, len);
+
 	// no processing if no tunnel
 	if (!Tunnel::Port)
-		return sendto(sockfd, buf, len, flags, (struct sockaddr*)dest_addr, addrlen);
+	{
+		const int ret = sendto(sockfd, buf, len, flags, (struct sockaddr*)dest_addr, addrlen);
+
+		for (int i = 1; i < copies; ++i)
+			sendto(sockfd, buf, len, flags, (struct sockaddr*)dest_addr, addrlen);
+
+		return ret;
+	}
 
 	// copy packet to our buffer
 	memcpy(TempBuf + 4, buf, len);
@@ -119,7 +132,12 @@ int WINAPI Tunnel::SendTo(
 	dest_addr->sin_port = Tunnel::Port;
 	dest_addr->sin_addr.S_un.S_addr = Tunnel::Ip;
 
-	return sendto(sockfd, TempBuf, len + 4, flags, (struct sockaddr*)dest_addr, addrlen);
+	const int ret = sendto(sockfd, TempBuf, len + 4, flags, (struct sockaddr*)dest_addr, addrlen);
+
+	for (int i = 1; i < copies; ++i)
+		sendto(sockfd, TempBuf, len + 4, flags, (struct sockaddr*)dest_addr, addrlen);
+
+	return ret;
 }
 
 int WINAPI Tunnel::RecvFrom(

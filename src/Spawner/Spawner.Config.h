@@ -124,6 +124,26 @@ public:
 	int PreCalcMaxAhead;
 	byte MaxLatencyLevel;
 	bool ForceMultiplayer;
+	bool NetTelemetry;
+	bool FrameAwareGate;
+	bool FastRetransmit;
+	bool RetransmitBackoff;
+	bool PacketRedundancy;
+	int  RedundancyCopies;
+	bool AdaptiveRedundancy;
+	bool StallCounterFix;
+	bool LadderBidirectional;
+	char NetTestName[32];
+	bool RenderThrottle;
+	bool RenderThrottleObserveOnly;
+	int  RenderThrottleEngageFrames;
+	int  RenderThrottleReleaseFrames;
+	int  RenderThrottleMaxSkip;
+	int  RenderThrottleMinFrameRate;
+	int  RenderThrottleMaxFrameRate;
+	bool SendClockDrift;
+	int  SendClockMaxDrift;
+	int  SendClockDoListLimit;
 
 	// Tunnel Options
 	int  TunnelId;
@@ -202,6 +222,27 @@ public:
 		, PreCalcMaxAhead { 0 }
 		, MaxLatencyLevel { 0xFF }
 		, ForceMultiplayer { false }
+		, NetTelemetry { false }
+		// Measured against 10-20% induced loss, so these carry their own weight.
+		, FrameAwareGate { true }
+		, FastRetransmit { true }
+		, RetransmitBackoff { true }
+		, PacketRedundancy { true }
+		, RedundancyCopies { 2 }
+		, AdaptiveRedundancy { false }
+		, StallCounterFix { true }
+		, LadderBidirectional { true }
+		, NetTestName { "run" }
+		, RenderThrottle { false }
+		, RenderThrottleObserveOnly { false }
+		, RenderThrottleEngageFrames { 40 }
+		, RenderThrottleReleaseFrames { 8 }
+		, RenderThrottleMaxSkip { 30 }
+		, RenderThrottleMinFrameRate { 25 }
+		, RenderThrottleMaxFrameRate { 300 }
+		, SendClockDrift { false }
+		, SendClockMaxDrift { 120 }
+		, SendClockDoListLimit { 4000 }
 
 		// Tunnel Options
 		, TunnelId { 0 }

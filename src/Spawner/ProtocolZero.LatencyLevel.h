@@ -43,13 +43,32 @@ public:
 	static LatencyLevelEnum CurentLatencyLevel;
 	static uint8_t NewFrameSendRate;
 
+	//!< false restores the vanilla one-way ratchet, for A/B testing.
+	static bool Bidirectional;
+
 	static void Apply(LatencyLevelEnum newLatencyLevel);
 	static void __forceinline Apply(uint8_t newLatencyLevel)
 	{
 		Apply(static_cast<LatencyLevelEnum>(newLatencyLevel));
 	}
 
+	static void Reset();
+
 	static int GetMaxAhead(LatencyLevelEnum latencyLevel);
 	static const wchar_t* GetLatencyMessage(LatencyLevelEnum latencyLevel);
 	static LatencyLevelEnum FromResponseTime(uint8_t rspTime);
+
+	/**
+	 *  Picks a level from measured round-trip time plus whether the runway we
+	 *  already chose turned out to be long enough.
+	 *
+	 *  `rspTime` is IPXManagerClass::ResponseTime(), which is in SystemTimer ticks
+	 *  -- i.e. already in frames -- so it compares directly against MaxAhead.
+	 *
+	 *  `needRetransmitCover` says the frame-aware gate blocked on missing commands
+	 *  since we last looked, which means a retransmit did not land inside the
+	 *  runway. That is the only direct evidence available that MaxAhead is too
+	 *  short; round-trip time alone never shows it.
+	 */
+	static LatencyLevelEnum FromConditions(uint8_t rspTime, bool needRetransmitCover);
 };
