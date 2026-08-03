@@ -66,13 +66,6 @@
     <LinkIncremental>false</LinkIncremental>
     <OutDir>$(Configuration)\</OutDir>
     <IntDir>$(Configuration)\IntDir\</IntDir>
-    <!-- Opt-in variant building the same sources under a distinct DLL name, so the QM beta
-         spawner can ship alongside the regular one and be rolled back at any time by pointing
-         the client back at CnCNet-Spawner.dll. Build with /property:SpawnerVariant=QM. Output
-         goes to its own folder so the two builds never overwrite each other. -->
-    <TargetName Condition="'$(SpawnerVariant)' == 'QM'">CnCNet-QM-Spawner</TargetName>
-    <OutDir Condition="'$(SpawnerVariant)' == 'QM'">$(Configuration)-QM\</OutDir>
-    <IntDir Condition="'$(SpawnerVariant)' == 'QM'">$(Configuration)-QM\IntDir\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
