@@ -68,6 +68,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		ReplayLockedViewport = pINI->ReadBool(pSettingsSection, "ReplayLockedViewport", ReplayLockedViewport);
 		ReplaySelectUnits = pINI->ReadBool(pSettingsSection, "ReplaySelectUnits", ReplaySelectUnits);
 		ReplaySpectator = pINI->ReadBool(pSettingsSection, "ReplaySpectator", ReplaySpectator);
+		ReplayShowChatAndBeacons = pINI->ReadBool(pSettingsSection, "ReplayShowChatAndBeacons", ReplayShowChatAndBeacons);
 	}
 
 	{ // Scenario Options

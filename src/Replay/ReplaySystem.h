@@ -19,9 +19,21 @@
 
 #pragma once
 
+#include <GeneralStructures.h>
+
 namespace ReplaySystem
 {
 	bool IsPlaybackRequested();
 	bool IsPlaybackActive();
 	void OnGameStartReset();
+
+	// Recording taps for the "alternate" (non-EventClass) network stream - chat, beacons, taunts.
+	// Safe to call unconditionally from anywhere; each is a no-op unless a replay is currently
+	// being recorded. Always recorded when a replay is being recorded - there is no separate
+	// opt-out for this, only for whether it gets played back (see SpawnerConfig::ReplayShowChatAndBeacons).
+	void RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex);
+	void RecordTaunt(int tauntCommand);
+	void RecordBeaconPlace(int houseIndex, const CoordStruct& coord, int beaconSlot);
+	void RecordBeaconDelete(int houseIndex, int beaconSlot);
+	void RecordBeaconText(int houseIndex, int beaconSlot, const wchar_t* text);
 }

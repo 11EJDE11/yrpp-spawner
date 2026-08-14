@@ -21,6 +21,7 @@
 #include <Utilities/Macro.h>
 #include <HouseClass.h>
 #include <Unsorted.h>
+#include <Replay/ReplaySystem.h>
 
 #ifdef IS_CNCNET_YR_VER
 #include <MessageListClass.h>
@@ -139,21 +140,29 @@ DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 
 	enum { SkipMessage = 0x48DAD3, PrintMessage = 0x48D937 };
 
+	const int houseIndex = GlobalPacket_NetMessage::Instance.HouseIndex;
+	HouseClass* pRecordHouse = (houseIndex < 8 && HouseClass::Array.ValidIndex(houseIndex))
+		? HouseClass::Array.GetItem(houseIndex) : nullptr;
+
+	// Recorded unconditionally (regardless of DisableChat/ChatMask below) - a replay should
+	// reflect what was actually sent, not this client's local display filters.
+	if (pRecordHouse)
+	{
+		ReplaySystem::RecordChatMessage(houseIndex, pRecordHouse->UIName,
+			GlobalPacket_NetMessage::Instance.Message, pRecordHouse->ColorSchemeIndex);
+	}
+
 #ifdef IS_CNCNET_YR_VER
 	if (IsDisableChatEnabled())
 		return SkipMessage;
 #endif
 
-	const int houseIndex = GlobalPacket_NetMessage::Instance.HouseIndex;
-
 	if (houseIndex < 8 && Game::ChatMask[houseIndex])
 	{
-		if (HouseClass::Array.ValidIndex(houseIndex))
+		if (pRecordHouse)
 		{
-			HouseClass* pHouse = HouseClass::Array.GetItem(houseIndex);
-
-			GlobalPacket_NetMessage::Instance.Color = (byte)pHouse->ColorSchemeIndex;
-			R->ESI(pHouse->UIName);
+			GlobalPacket_NetMessage::Instance.Color = (byte)pRecordHouse->ColorSchemeIndex;
+			R->ESI(pRecordHouse->UIName);
 			return PrintMessage;
 		}
 	}
@@ -186,6 +195,13 @@ DEFINE_HOOK(0x55F0A8, MessageInput_Print, 0x5)
 {
 	if (!Spawner::Enabled)
 		return 0;
+
+	HouseClass* pHouse = HouseClass::CurrentPlayer;
+	if (pHouse)
+	{
+		ReplaySystem::RecordChatMessage(pHouse->ArrayIndex, GlobalPacket_NetMessage::Instance.PlayerName,
+			GlobalPacket_NetMessage::Instance.Message, pHouse->ColorSchemeIndex);
+	}
 
 	R->EAX(GlobalPacket_NetMessage::Instance.PlayerName);
 	return 0x55F0B2;

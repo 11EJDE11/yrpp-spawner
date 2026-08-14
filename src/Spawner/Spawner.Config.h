@@ -114,6 +114,10 @@ public:
 	// radar blips and pips visible. Off by default so playback stays from the recorded player's
 	// point of view, which is what most viewers expect.
 	bool ReplaySpectator;
+	// Playback-only: whether recorded chat, beacons and taunts get reproduced. Recording of this
+	// data is unconditional whenever a replay is being recorded - there is no matching record-side
+	// option, only this playback-side one.
+	bool ReplayShowChatAndBeacons;
 
 	// Scenario Options
 	int  Seed;
@@ -198,6 +202,7 @@ public:
 		, ReplayLockedViewport { true }
 		, ReplaySelectUnits { true }
 		, ReplaySpectator { false }
+		, ReplayShowChatAndBeacons { true }
 
 		// Scenario Options
 		, Seed { 0 }
