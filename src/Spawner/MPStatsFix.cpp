@@ -53,7 +53,7 @@ DEFINE_HOOK(0x6497DC, WaitForPlayers_CommandStallStat_Fix, 0x7)
 	int culprit = -1;
 	for (int i = 0; i < nconn; ++i)
 	{
-		if (static_cast<unsigned int>(their[i].__recv) < static_cast<unsigned int>(their[i].__send))
+		if (static_cast<unsigned int>(their[i].CommandsReceived) < static_cast<unsigned int>(their[i].CommandsSent))
 		{
 			culprit = i;
 			break;

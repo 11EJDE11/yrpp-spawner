@@ -108,7 +108,7 @@ bool FrameGate::AllCommandsSatisfied(TheirSync* peers, int* gapIndex)
 
 	for (int i = 0; i < nconn; ++i)
 	{
-		if (static_cast<unsigned int>(peers[i].__recv) >= static_cast<unsigned int>(peers[i].__send))
+		if (static_cast<unsigned int>(peers[i].CommandsReceived) >= static_cast<unsigned int>(peers[i].CommandsSent))
 			continue;
 
 		if (relaxOK && SafeThrough[i] >= frame)
@@ -154,7 +154,7 @@ void FrameGate::OnReceive(unsigned int theirEntry, const unsigned char* evBytes)
 	const int F = static_cast<int>(ev->Frame);
 
 	const int C = ev->FrameInfo.CommandCount;
-	const int recv = reinterpret_cast<const TheirSync*>(theirEntry)->__recv;
+	const int recv = reinterpret_cast<const TheirSync*>(theirEntry)->CommandsReceived;
 
 
 	if (ev->Type == EventType::FrameInfo && F < Unsorted::CurrentFrame && lateDataLogged < 32)

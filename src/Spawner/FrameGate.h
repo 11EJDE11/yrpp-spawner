@@ -21,7 +21,7 @@
 *  FrameGate - frame-aware advance gate.
 *
 *  Vanilla gates frame advance on a raw per-peer command COUNT
-*  (their[i].__recv >= their[i].__send). That test carries no frame
+*  (their[i].CommandsReceived >= their[i].CommandsSent). That test carries no frame
 *  information, so a single lost command packet stalls the whole lobby even
 *  though the missing commands are stamped for a frame nobody has reached yet.
 *
@@ -29,7 +29,7 @@
 *  execute the current frame if, for every peer, all of that peer's commands
 *  stamped for frames <= the current frame are already in hand. We prove that
 *  from the packet stream: a packet stamped F carrying cumulative count C means
-*  "commands 1..C are all stamped <= F"; once our __recv >= C we hold them, so
+*  "commands 1..C are all stamped <= F"; once our CommandsReceived >= C we hold them, so
 *  every frame <= F is safe with respect to that peer.
 *
 */
@@ -41,7 +41,7 @@
 class FrameGate
 {
 public:
-	static const int MaxPeers = 8;
+	static const int MaxPeers = sizeof(TheirSync::Array) / sizeof(TheirSync);
 
 	static bool Enabled;
 
