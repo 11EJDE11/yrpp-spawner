@@ -45,13 +45,23 @@
 #include <deque>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+namespace
+{
 
 constexpr uint32_t REPLAY_MAGIC = 0x4A455259u;
 constexpr uint32_t REPLAY_VERSION = 1;
 // Flush rarely; forced disk commits can stall the game thread.
 constexpr uint64_t REPLAY_FLUSH_INTERVAL_BYTES = 50ull * 1024 * 1024;
 constexpr const char* DEFAULT_RECORDING_PATH = "replay.dat";
+// The engine's GameSpeed is an index into a fixed table; anything above this is out of range.
+constexpr int MAX_GAME_SPEED_INDEX = 6;
+// Queue_AI_Multiplayer's network delay budget.
+constexpr uintptr_t NETWORK_DELAY_TIME_ADDRESS = 0x00AFA458;
+// BeaconClass::Bitfield flag marking the beacon the local player placed.
+constexpr int BEACON_FLAG_LOCAL = 2;
 
 enum FrameRecordFlags : uint32_t
 {
@@ -96,10 +106,10 @@ struct ReplayHeader
 	uint32_t Version;
 	char MapName[260];
 	uint32_t StartFrame;
-	uint8_t ProducerVersionMajor;
-	uint8_t ProducerVersionMinor;
-	uint8_t ProducerVersionRevision;
-	uint8_t ProducerVersionPatch;
+	uint8_t SpawnerVersionMajor;
+	uint8_t SpawnerVersionMinor;
+	uint8_t SpawnerVersionRevision;
+	uint8_t SpawnerVersionPatch;
 	char GameVersionString[32];
 	char GameClientVersion[64];
 	uint32_t GameMode;
@@ -133,6 +143,8 @@ struct FrameRecordHeader
 	uint32_t Flags;              // FrameRecordFlags
 };
 
+#pragma pack(pop)
+
 struct PlaybackFrameRecord
 {
 	int32_t FrameNumber = 0;
@@ -145,7 +157,6 @@ struct PlaybackFrameRecord
 	std::vector<SideChannelRecord> SideChannelEvents;
 	bool EndOfStream = false;
 };
-#pragma pack(pop)
 
 struct PendingRecordedFrameCapture
 {
@@ -240,12 +251,12 @@ void EnsureParentDirectoryExists(const char* path)
 
 bool IsReplayGameSpeedIndexValid(uint32_t gameSpeedIndex)
 {
-	return gameSpeedIndex <= 6u;
+	return gameSpeedIndex <= static_cast<uint32_t>(MAX_GAME_SPEED_INDEX);
 }
 
 int GetReplayFPSFromGameSpeed(int gameSpeed)
 {
-	gameSpeed = std::clamp(gameSpeed, 0, 6);
+	gameSpeed = std::clamp(gameSpeed, 0, MAX_GAME_SPEED_INDEX);
 
 	// Vanilla mapping used by Queue_AI_Multiplayer:
 	// 0 -> 60, 1 -> 45, 2+ -> 60 / gameSpeed.
@@ -263,7 +274,7 @@ void ApplyReplayTimingFromCurrentGameSpeed()
 	if (gReplay.Playback && gReplay.HasPlaybackHeader)
 	{
 		// Keep simulation speed locked to the replay's recorded speed.
-		const int recordedGameSpeed = std::clamp(static_cast<int>(gReplay.PlaybackHeader.RecordedGameSpeed), 0, 6);
+		const int recordedGameSpeed = std::clamp(static_cast<int>(gReplay.PlaybackHeader.RecordedGameSpeed), 0, MAX_GAME_SPEED_INDEX);
 		GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 		GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 	}
@@ -438,57 +449,49 @@ void SanitizeSpawnIniForReplay(std::vector<char>& spawnIni)
 	spawnIni.swap(sanitized);
 }
 
-bool TryReadStringFromSpawnIni(const char* key, char* outBuffer, size_t outBufferSize)
+// CCINIClass needs an explicit unload, so keep the pairing in one place.
+class ScopedINIFile
 {
-	if (!key || !outBuffer || outBufferSize == 0)
+public:
+	explicit ScopedINIFile(const char* fileName)
+		: pINI { CCINIClass::LoadINIFile(fileName) }
+	{ }
+
+	~ScopedINIFile()
+	{
+		if (pINI)
+			CCINIClass::UnloadINIFile(pINI);
+	}
+
+	ScopedINIFile(const ScopedINIFile&) = delete;
+	ScopedINIFile& operator=(const ScopedINIFile&) = delete;
+
+	CCINIClass* Get() const { return pINI; }
+
+private:
+	CCINIClass* pINI;
+};
+
+bool TryReadString(CCINIClass* pINI, const char* section, const char* key, char* outBuffer, size_t outBufferSize)
+{
+	if (!outBuffer || outBufferSize == 0)
 		return false;
 
 	outBuffer[0] = '\0';
 
-	CCINIClass* pSpawnIni = CCINIClass::LoadINIFile("spawn.ini");
-	if (!pSpawnIni)
+	if (!pINI)
 		return false;
 
 	const int charsRead = INIClassExt::ReadString_WithoutAresHook(
-		pSpawnIni,
-		"Settings",
+		pINI,
+		section,
 		key,
 		"",
 		outBuffer,
 		outBufferSize
 	);
-	CCINIClass::UnloadINIFile(pSpawnIni);
 
 	return charsRead > 0 && outBuffer[0] != '\0';
-}
-
-bool TryReadMapNameFromSpawnMapIni(char* outMapName, size_t outMapNameSize)
-{
-	if (!outMapName || outMapNameSize == 0)
-		return false;
-
-	outMapName[0] = '\0';
-
-	CCINIClass* pMapIni = CCINIClass::LoadINIFile("spawnmap.ini");
-	if (!pMapIni)
-		return false;
-
-	const int charsRead = INIClassExt::ReadString_WithoutAresHook(
-		pMapIni,
-		"Basic",
-		"Name",
-		"",
-		outMapName,
-		outMapNameSize
-	);
-	CCINIClass::UnloadINIFile(pMapIni);
-
-	return charsRead > 0 && outMapName[0] != '\0';
-}
-
-bool TryReadMapNameFromSpawnIni(char* outMapName, size_t outMapNameSize)
-{
-	return TryReadStringFromSpawnIni("UIMapName", outMapName, outMapNameSize);
 }
 
 bool TryParseVersionString(const char* versionText, uint8_t& outMajor, uint8_t& outMinor, uint8_t& outRevision, uint8_t& outPatch)
@@ -534,44 +537,40 @@ bool TryParseVersionString(const char* versionText, uint8_t& outMajor, uint8_t& 
 	return true;
 }
 
-bool TryReadSpawnerVersionFromSpawnIni(uint8_t& outMajor, uint8_t& outMinor, uint8_t& outRevision, uint8_t& outPatch)
-{
-	char versionBuffer[64] = { 0 };
-	if (!TryReadStringFromSpawnIni("SpawnerVersion", versionBuffer, sizeof(versionBuffer)))
-		return false;
-
-	return TryParseVersionString(versionBuffer, outMajor, outMinor, outRevision, outPatch);
-}
-
-bool TryReadGameClientVersionFromSpawnIni(char* outVersion, size_t outVersionSize)
-{
-	return TryReadStringFromSpawnIni("GameClientVersion", outVersion, outVersionSize);
-}
-
 ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
 {
 	ReplayHeader header {};
 	header.Magic = REPLAY_MAGIC;
 	header.Version = REPLAY_VERSION;
 
-	if (!TryReadMapNameFromSpawnMapIni(header.MapName, sizeof(header.MapName))
-		&& !TryReadMapNameFromSpawnIni(header.MapName, sizeof(header.MapName))
+	const ScopedINIFile spawnIni { "spawn.ini" };
+	const ScopedINIFile spawnMapIni { "spawnmap.ini" };
+
+	if (!TryReadString(spawnMapIni.Get(), "Basic", "Name", header.MapName, sizeof(header.MapName))
+		&& !TryReadString(spawnIni.Get(), "Settings", "UIMapName", header.MapName, sizeof(header.MapName))
 		&& ScenarioClass::Instance)
 		strncpy_s(header.MapName, sizeof(header.MapName), ScenarioClass::Instance->FileName, _TRUNCATE);
 
 	header.StartFrame = 0;
-	header.ProducerVersionMajor = VERSION_MAJOR;
-	header.ProducerVersionMinor = VERSION_MINOR;
-	header.ProducerVersionRevision = VERSION_REVISION;
-	header.ProducerVersionPatch = VERSION_PATCH;
-	TryReadSpawnerVersionFromSpawnIni(
-		header.ProducerVersionMajor,
-		header.ProducerVersionMinor,
-		header.ProducerVersionRevision,
-		header.ProducerVersionPatch
-	);
+	header.SpawnerVersionMajor = VERSION_MAJOR;
+	header.SpawnerVersionMinor = VERSION_MINOR;
+	header.SpawnerVersionRevision = VERSION_REVISION;
+	header.SpawnerVersionPatch = VERSION_PATCH;
+
+	char versionBuffer[64] = { 0 };
+	if (TryReadString(spawnIni.Get(), "Settings", "SpawnerVersion", versionBuffer, sizeof(versionBuffer)))
+	{
+		TryParseVersionString(
+			versionBuffer,
+			header.SpawnerVersionMajor,
+			header.SpawnerVersionMinor,
+			header.SpawnerVersionRevision,
+			header.SpawnerVersionPatch
+		);
+	}
+
 	strcpy_s(header.GameVersionString, "1.006");
-	TryReadGameClientVersionFromSpawnIni(header.GameClientVersion, sizeof(header.GameClientVersion));
+	TryReadString(spawnIni.Get(), "Settings", "GameClientVersion", header.GameClientVersion, sizeof(header.GameClientVersion));
 	header.GameMode = static_cast<uint32_t>(SessionClass::Instance.GameMode);
 
 	header.UniqueIDCounter = ScenarioClass::Instance ? ScenarioClass::Instance->UniqueID : 0;
@@ -585,7 +584,7 @@ ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
 
 	header.SpawnIniSize = spawnIniSize;
 	header.SpawnMapSize = spawnMapSize;
-	header.RecordedGameSpeed = static_cast<uint32_t>(std::clamp(GameOptionsClass::Instance.GameSpeed, 0, 6));
+	header.RecordedGameSpeed = static_cast<uint32_t>(std::clamp(GameOptionsClass::Instance.GameSpeed, 0, MAX_GAME_SPEED_INDEX));
 	header.RecordedUnixTime = static_cast<uint64_t>(time(nullptr));
 	header.TotalFrames = 0; // stamped by StopReplaySystem once recording finishes cleanly
 	return header;
@@ -751,10 +750,25 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 		return false;
 	}
 
-	const uint32_t payloadSize = header.SpawnIniSize + header.SpawnMapSize;
-	if (payloadSize > 0)
+	// The sizes come straight off disk, so check them against the file before seeking.
+	const uint64_t payloadSize = static_cast<uint64_t>(header.SpawnIniSize) + header.SpawnMapSize;
+
+	LARGE_INTEGER fileSize {};
+	if (!GetFileSizeEx(gReplay.ReplayFile, &fileSize)
+		|| sizeof(ReplayHeader) + payloadSize > static_cast<uint64_t>(fileSize.QuadPart))
 	{
-		SetFilePointer(gReplay.ReplayFile, static_cast<LONG>(payloadSize), nullptr, FILE_CURRENT);
+		Debug::Log("[Replay] Replay declares embedded file sizes that do not fit the file.\n");
+		CloseReplayFile();
+		return false;
+	}
+
+	LARGE_INTEGER payloadOffset {};
+	payloadOffset.QuadPart = static_cast<LONGLONG>(payloadSize);
+
+	if (payloadSize > 0 && !SetFilePointerEx(gReplay.ReplayFile, payloadOffset, nullptr, FILE_CURRENT))
+	{
+		CloseReplayFile();
+		return false;
 	}
 
 	return true;
@@ -901,7 +915,7 @@ void RemoveReplayGameplayEventsFromDoList()
 		const auto& event = EventClass::DoList[i];
 		if (event.Frame == currentFrame && event.Type == EventType::GameSpeed)
 		{
-			const int requestedSpeed = std::clamp(event.GameSpeed.GameSpeed, 0, 6);
+			const int requestedSpeed = std::clamp(event.GameSpeed.GameSpeed, 0, MAX_GAME_SPEED_INDEX);
 			if (requestedSpeed != gReplay.PlaybackSpeedIndex)
 			{
 				gReplay.PlaybackSpeedIndex = requestedSpeed;
@@ -935,6 +949,27 @@ std::vector<uint32_t> GetSelectedObjectIDs()
 	}
 
 	return ids;
+}
+
+// Compares against the live selection without building a temporary for it.
+bool IsCurrentSelection(const std::vector<uint32_t>& ids)
+{
+	auto& currentObjects = ObjectClass::CurrentObjects;
+	size_t index = 0;
+
+	for (int i = 0; i < currentObjects.Count; ++i)
+	{
+		ObjectClass* pObj = currentObjects.Items[i];
+		if (!pObj)
+			continue;
+
+		if (index >= ids.size() || ids[index] != static_cast<uint32_t>(pObj->UniqueID))
+			return false;
+
+		++index;
+	}
+
+	return index == ids.size();
 }
 
 uint32_t SumObjectIDs(const std::vector<uint32_t>& ids)
@@ -1190,44 +1225,54 @@ void ApplyPlaybackSelection(const PlaybackFrameRecord& frameRecord)
 	if (!gReplay.SelectUnits)
 		return;
 
-	if (GetSelectedObjectIDs() == frameRecord.SelectedObjectIDs)
+	if (IsCurrentSelection(frameRecord.SelectedObjectIDs))
 		return;
 
-	MapClass::UnselectAll();
+	const std::unordered_set<uint32_t> recordedIDs(
+		frameRecord.SelectedObjectIDs.begin(), frameRecord.SelectedObjectIDs.end());
 
-	std::unordered_map<int, ObjectClass*> objectByUniqueID;
-	objectByUniqueID.reserve(static_cast<size_t>(std::max(AbstractClass::Array.Count, 0)));
+	// The object array can hold thousands of entries, so only the recorded ones are kept.
+	std::unordered_map<uint32_t, ObjectClass*> objectByUniqueID;
+	objectByUniqueID.reserve(recordedIDs.size());
+
 	for (int i = 0; i < AbstractClass::Array.Count; ++i)
 	{
 		AbstractClass* pAbs = AbstractClass::Array.GetItem(i);
 		if (!pAbs)
 			continue;
 
+		const auto uniqueID = static_cast<uint32_t>(pAbs->UniqueID);
+		if (recordedIDs.find(uniqueID) == recordedIDs.end())
+			continue;
+
 		if (auto* pObject = abstract_cast<ObjectClass*>(pAbs))
-			objectByUniqueID.emplace(pAbs->UniqueID, pObject);
+			objectByUniqueID.emplace(uniqueID, pObject);
 	}
 
+	MapClass::UnselectAll();
+
+	// Recorded order, so the selection ends up ordered the way it was.
 	for (const auto uniqueID : frameRecord.SelectedObjectIDs)
 	{
-		const auto it = objectByUniqueID.find(static_cast<int>(uniqueID));
-		if (it != objectByUniqueID.end() && it->second)
+		const auto it = objectByUniqueID.find(uniqueID);
+		if (it != objectByUniqueID.end())
 			it->second->Select();
 	}
 }
 
 // Replays recorded chat, beacons and taunts without using the network.
-void ApplySideChannelEvent(const SideChannelRecord& event_)
+void ApplySideChannelEvent(const SideChannelRecord& record)
 {
 	if (!gReplay.ShowChatAndBeacons)
 		return;
 
 	constexpr int SIDECHANNEL_MESSAGE_DURATION_FRAMES = 1800;
 
-	switch (static_cast<SideChannelEventType>(event_.Type))
+	switch (static_cast<SideChannelEventType>(record.Type))
 	{
 	case SideChannelEventType::ChatMessage:
 		MessageListClass::Instance.AddMessage(
-			event_.SenderName, event_.House, event_.Text, event_.Aux,
+			record.SenderName, record.House, record.Text, record.Aux,
 			TextPrintType::UseGradPal | TextPrintType::FullShadow | TextPrintType::Point6Grad,
 			SIDECHANNEL_MESSAGE_DURATION_FRAMES, false);
 		if (RulesClass::Instance)
@@ -1235,18 +1280,18 @@ void ApplySideChannelEvent(const SideChannelRecord& event_)
 		break;
 
 	case SideChannelEventType::BeaconPlace:
-		BeaconManagerClass::Instance.PlaceBeacon(event_.House, event_.Coord, event_.Aux);
+		BeaconManagerClass::Instance.PlaceBeacon(record.House, record.Coord, record.Aux);
 		break;
 
 	case SideChannelEventType::BeaconDelete:
-		BeaconManagerClass::Instance.DeleteBeacon(event_.House, event_.Aux);
+		BeaconManagerClass::Instance.DeleteBeacon(record.House, record.Aux);
 		break;
 
 	case SideChannelEventType::BeaconText:
 	{
 		// Beacon text uses BeaconPlacement::Message_431450.
 		using BeaconMessageFn = char(__thiscall*)(BeaconManagerClass*, const wchar_t*, int, int, char);
-		reinterpret_cast<BeaconMessageFn>(0x431450)(&BeaconManagerClass::Instance, event_.Text, event_.House, event_.Aux, 1);
+		reinterpret_cast<BeaconMessageFn>(0x431450)(&BeaconManagerClass::Instance, record.Text, record.House, record.Aux, 1);
 		break;
 	}
 
@@ -1254,7 +1299,7 @@ void ApplySideChannelEvent(const SideChannelRecord& event_)
 	{
 		// Taunts_752B70 resolves the command byte and plays the sound.
 		using TauntsFn = int(__fastcall*)(int);
-		reinterpret_cast<TauntsFn>(0x752B70)(event_.Aux);
+		reinterpret_cast<TauntsFn>(0x752B70)(record.Aux);
 		break;
 	}
 
@@ -1428,6 +1473,119 @@ void PushSideChannelEvent(SideChannelRecord&& record)
 	gReplay.PendingSideChannelEvents.push_back(std::move(record));
 }
 
+void PlaybackFrameEvents()
+{
+	if (!gReplay.RunPlayback || !gReplay.Playback)
+		return;
+
+	const int eventsToReplay = gReplay.ExpectedEventsThisFrame;
+	gReplay.ExpectedEventsThisFrame = 0;
+
+	for (int i = 0; i < eventsToReplay; ++i)
+	{
+		char eventBuffer[sizeof(EventClass)] = { 0 };
+		EventClass* replayEvent = reinterpret_cast<EventClass*>(eventBuffer);
+
+		if (!ReadRaw(replayEvent, sizeof(EventClass)))
+		{
+			Debug::Log("[Replay] Event stream ended unexpectedly during playback.\n");
+			gReplay.RunPlayback = false;
+			StopReplaySystem();
+			return;
+		}
+
+		// Every event on the frame was recorded, so the whole batch has to be read to keep the
+		// stream aligned - but only the ones that drive the simulation get injected.
+		if (!IsReplayableGameplayEvent(*replayEvent))
+			continue;
+
+		replayEvent->IsExecuted = false;
+		if (!EventClass::DoList.Add(*replayEvent))
+		{
+			Debug::Log("[Replay] DoList is full while injecting replay events.\n");
+			gReplay.RunPlayback = false;
+			StopReplaySystem();
+			return;
+		}
+	}
+}
+
+void StartReplayRecording()
+{
+	AbortReplaySystem();
+	gReplay.Recording = true;
+
+	const auto* pConfig = GetConfig();
+	gReplay.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
+	gReplay.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
+	gReplay.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
+
+	if (!ScenarioClass::Instance)
+	{
+		Debug::Log("[Replay] ScenarioClass instance unavailable at recording start.\n");
+		StopReplaySystem();
+		return;
+	}
+
+	if (!WriteInitialReplayFile())
+	{
+		Debug::Log("[Replay] Failed to write replay header.\n");
+		StopReplaySystem();
+		return;
+	}
+
+	if (!OpenRecordingReplayStream())
+	{
+		Debug::Log("[Replay] Failed to open replay file for recording.\n");
+		StopReplaySystem();
+	}
+}
+
+void StartReplayPlayback(const char* replayPath)
+{
+	AbortReplaySystem();
+	gReplay.Playback = true;
+	gReplay.RunPlayback = true;
+
+	gReplay.PlaybackSpeedIndex = std::clamp(GameOptionsClass::Instance.GameSpeed, 0, MAX_GAME_SPEED_INDEX);
+
+	int recordedGameSpeed = gReplay.PlaybackSpeedIndex;
+	if (!gReplay.HasPlaybackHeader)
+	{
+		ReplayHeader header {};
+		if (ReadReplayHeaderFromPath(replayPath, header))
+		{
+			gReplay.PlaybackHeader = header;
+			gReplay.HasPlaybackHeader = true;
+		}
+	}
+
+	if (gReplay.HasPlaybackHeader)
+		recordedGameSpeed = std::clamp(static_cast<int>(gReplay.PlaybackHeader.RecordedGameSpeed), 0, MAX_GAME_SPEED_INDEX);
+
+	GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
+	GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
+
+	ApplyReplayTimingFromCurrentGameSpeed();
+
+	const auto* pConfig = GetConfig();
+	gReplay.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
+	gReplay.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
+	gReplay.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
+	gReplay.SpectatorView = pConfig ? pConfig->ReplaySpectator : false;
+	gReplay.ShowChatAndBeacons = pConfig ? pConfig->ReplayShowChatAndBeacons : true;
+
+	strncpy_s(gReplay.PlaybackPath, sizeof(gReplay.PlaybackPath), replayPath, _TRUNCATE);
+
+	if (!OpenPlaybackReplayStream(gReplay.PlaybackPath))
+	{
+		Debug::Log("[Replay] Failed to open replay file for playback: %s\n", gReplay.PlaybackPath);
+		StopReplaySystem();
+	}
+}
+
+} // namespace
+
 void ReplaySystem::RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex)
 {
 	if (!gReplay.Recording)
@@ -1497,123 +1655,6 @@ void ReplaySystem::RecordBeaconText(int houseIndex, int beaconSlot, const wchar_
 		wcsncpy_s(record.Text, text, _TRUNCATE);
 
 	PushSideChannelEvent(std::move(record));
-}
-
-void PlaybackFrameEvents()
-{
-	if (!gReplay.RunPlayback || !gReplay.Playback)
-		return;
-
-	const int eventsToReplay = gReplay.ExpectedEventsThisFrame;
-	gReplay.ExpectedEventsThisFrame = 0;
-
-	for (int i = 0; i < eventsToReplay; ++i)
-	{
-		char eventBuffer[sizeof(EventClass)] = { 0 };
-		EventClass* replayEvent = reinterpret_cast<EventClass*>(eventBuffer);
-
-		if (!ReadRaw(replayEvent, sizeof(EventClass)))
-		{
-			Debug::Log("[Replay] Event stream ended unexpectedly during playback.\n");
-			gReplay.RunPlayback = false;
-			StopReplaySystem();
-			return;
-		}
-
-		// Every event on the frame was recorded, so the whole batch has to be read to keep the
-		// stream aligned - but only the ones that drive the simulation get injected.
-		if (!IsReplayableGameplayEvent(*replayEvent))
-			continue;
-
-		replayEvent->IsExecuted = false;
-		if (!EventClass::DoList.Add(*replayEvent))
-		{
-			Debug::Log("[Replay] DoList is full while injecting replay events.\n");
-			gReplay.RunPlayback = false;
-			StopReplaySystem();
-			return;
-		}
-	}
-}
-
-void StartReplayRecording()
-{
-	AbortReplaySystem();
-	ResetRuntimeFlagsForScenario();
-	gReplay.Recording = true;
-
-	const auto* pConfig = GetConfig();
-	gReplay.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
-	gReplay.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
-	gReplay.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
-
-	if (!ScenarioClass::Instance)
-	{
-		Debug::Log("[Replay] ScenarioClass instance unavailable at recording start.\n");
-		StopReplaySystem();
-		return;
-	}
-
-	if (!WriteInitialReplayFile())
-	{
-		Debug::Log("[Replay] Failed to write replay header.\n");
-		StopReplaySystem();
-		return;
-	}
-
-	if (!OpenRecordingReplayStream())
-	{
-		Debug::Log("[Replay] Failed to open replay file for recording.\n");
-		StopReplaySystem();
-		return;
-	}
-
-}
-
-void StartReplayPlayback(const char* replayPath)
-{
-	AbortReplaySystem();
-	ResetRuntimeFlagsForScenario();
-	gReplay.Playback = true;
-	gReplay.RunPlayback = true;
-
-	gReplay.PlaybackSpeedIndex = std::clamp(GameOptionsClass::Instance.GameSpeed, 0, 6);
-
-	int recordedGameSpeed = gReplay.PlaybackSpeedIndex;
-	if (!gReplay.HasPlaybackHeader)
-	{
-		ReplayHeader header {};
-		if (ReadReplayHeaderFromPath(replayPath, header))
-		{
-			gReplay.PlaybackHeader = header;
-			gReplay.HasPlaybackHeader = true;
-		}
-	}
-
-	if (gReplay.HasPlaybackHeader)
-		recordedGameSpeed = std::clamp(static_cast<int>(gReplay.PlaybackHeader.RecordedGameSpeed), 0, 6);
-
-	GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
-	GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
-
-	ApplyReplayTimingFromCurrentGameSpeed();
-
-	const auto* pConfig = GetConfig();
-	gReplay.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
-	gReplay.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
-	gReplay.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
-	gReplay.SpectatorView = pConfig ? pConfig->ReplaySpectator : false;
-	gReplay.ShowChatAndBeacons = pConfig ? pConfig->ReplayShowChatAndBeacons : true;
-
-	strncpy_s(gReplay.PlaybackPath, sizeof(gReplay.PlaybackPath), replayPath, _TRUNCATE);
-
-	if (!OpenPlaybackReplayStream(gReplay.PlaybackPath))
-	{
-		Debug::Log("[Replay] Failed to open replay file for playback: %s\n", gReplay.PlaybackPath);
-		StopReplaySystem();
-		return;
-	}
-
 }
 
 bool ReplaySystem::IsPlaybackRequested()
@@ -1695,7 +1736,7 @@ DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0x5)
 }
 
 // Capture visible replay state before dialog handling can skip the normal replay path.
-DEFINE_HOOK(0x0055d878, MainLoop_RecordPlaybackFrameState, 0x6)
+DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 {
 	if (gReplay.Recording)
 	{
@@ -1711,7 +1752,7 @@ DEFINE_HOOK(0x0055d878, MainLoop_RecordPlaybackFrameState, 0x6)
 	return 0;
 }
 
-DEFINE_HOOK(0x0064820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
+DEFINE_HOOK(0x64820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
 {
 	if (gReplay.Recording)
 	{
@@ -1724,7 +1765,7 @@ DEFINE_HOOK(0x0064820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
 		PlaybackFrameEvents();
 	}
 
-	return 0x0064821C;
+	return 0x64821C;
 }
 
 // Replay playback does not pump live network traffic.
@@ -1757,18 +1798,19 @@ DEFINE_HOOK(0x6BEC60, Game_Exit_FlushReplayBuffers, 0x5)
 }
 
 
+// Playback is not waiting on anyone, so the network delay budget never has to expire.
 DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 {
 	if (gReplay.Playback)
 	{
-		*reinterpret_cast<int*>(0x00AFA458) = std::numeric_limits<int>::max();
+		*reinterpret_cast<int*>(NETWORK_DELAY_TIME_ADDRESS) = std::numeric_limits<int>::max();
 	}
 
 	return 0;
 }
 
 // Mark all players loaded during replay startup.
-DEFINE_HOOK(0x0069AFEB, WaitForPlayers_ReplayMarkOthersLoaded, 0x6)
+DEFINE_HOOK(0x69AFEB, WaitForPlayers_ReplayMarkOthersLoaded, 0x6)
 {
 	if (!gReplay.Playback || gReplay.PlayersMarkedLoaded)
 		return 0;
@@ -1785,6 +1827,9 @@ DEFINE_HOOK(0x0069AFEB, WaitForPlayers_ReplayMarkOthersLoaded, 0x6)
 // --- Side-channel recording taps --------------------------------------------------------------
 // Chat, beacons and taunts bypass EventClass::DoList and are recorded here.
 // Some local beacon calls use -1/-1; resolve them before writing the replay.
+namespace
+{
+
 bool ResolveFlaggedBeaconSlot(int& house, int& slot)
 {
 	for (int h = 0; h < 8; ++h)
@@ -1792,7 +1837,7 @@ bool ResolveFlaggedBeaconSlot(int& house, int& slot)
 		for (int s = 0; s < 3; ++s)
 		{
 			BeaconClass* pBeacon = BeaconManagerClass::Instance.Beacons[h][s];
-			if (pBeacon && (pBeacon->Bitfield & 2) != 0)
+			if (pBeacon && (pBeacon->Bitfield & BEACON_FLAG_LOCAL) != 0)
 			{
 				house = h;
 				slot = s;
@@ -1803,6 +1848,8 @@ bool ResolveFlaggedBeaconSlot(int& house, int& slot)
 
 	return false;
 }
+
+} // namespace
 
 // BeaconManagerClass::Place. __thiscall(ECX=this); stack (relative to ESP at entry, before the
 // prologue's `sub esp` runs): +0 retaddr, +4 house, +8 coord.X, +0xC coord.Y, +0x10 coord.Z,

@@ -49,14 +49,6 @@ bool Spawner::DoSave = false;
 int Spawner::NextAutoSaveFrame = -1;
 int Spawner::NextAutoSaveNumber = 0;
 
-namespace
-{
-bool IsReplayPlaybackMode()
-{
-	return ReplaySystem::IsPlaybackRequested();
-}
-}
-
 void Spawner::Init()
 {
 	Spawner::Config = std::make_unique<SpawnerConfig>();
@@ -200,7 +192,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 	const auto pSession = &SessionClass::Instance;
 	const auto pGameModeOptions = &GameModeOptionsClass::Instance;
-	const bool isReplayPlayback = IsReplayPlaybackMode();
+	const bool isReplayPlayback = ReplaySystem::IsPlaybackRequested();
 
 	strcpy_s(Game::ScenarioName, 0x200, pScenarioName);
 	pSession->ReadScenarioDescriptions();
@@ -342,7 +334,6 @@ bool Spawner::StartScenario(const char* pScenarioName)
 	else /* if (SessionClass::IsMultiplayer()) */
 	{
 		Spawner::InitNetwork();
-
 		bool result = Config->LoadSaveGame
 			? Spawner::LoadSavedGame(Config->SaveGameName)
 			: ScenarioClass::StartScenario(pScenarioName, 0, -1);
@@ -414,7 +405,7 @@ bool Spawner::LoadSavedGame(const char* saveGameName)
 void Spawner::InitNetwork()
 {
 	const auto pSpawnerConfig = Spawner::GetConfig();
-	const bool isReplayPlayback = IsReplayPlaybackMode();
+	const bool isReplayPlayback = ReplaySystem::IsPlaybackRequested();
 
 	Tunnel::Id = htons((u_short)pSpawnerConfig->TunnelId);
 	Tunnel::Ip = inet_addr(pSpawnerConfig->TunnelIp);
@@ -454,11 +445,12 @@ void Spawner::InitNetwork()
 		Game::Network::FrameSendRate = isReplayPlayback ? 1 : pSpawnerConfig->FrameSendRate;
 	}
 
-	Game::Network::MaxAhead = isReplayPlayback
-		? 1
-		: pSpawnerConfig->MaxAhead == -1
-			? Game::Network::FrameSendRate * 6
-			: pSpawnerConfig->MaxAhead;
+	if (isReplayPlayback)
+		Game::Network::MaxAhead = 1;
+	else if (pSpawnerConfig->MaxAhead == -1)
+		Game::Network::MaxAhead = Game::Network::FrameSendRate * 6;
+	else
+		Game::Network::MaxAhead = pSpawnerConfig->MaxAhead;
 
 	Game::Network::MaxMaxAhead      = 0;
 	Game::Network::ProtocolVersion  = 2;

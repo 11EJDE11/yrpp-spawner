@@ -242,10 +242,10 @@ DEFINE_HOOK(0x64827D, QueueAIMultiplayer_SendStatistics_3, 0x6)
 
 DEFINE_HOOK(0x648089, QueueAIMultiplayer_SendStatistics_4, 0x5)
 {
-	if (ReplaySystem::IsPlaybackActive())
-		return 0x64820E;
+	enum { Send = 0x64808E, DontSend = 0x648093, SkipStatistics = 0x64820E };
 
-	enum { Send = 0x64808E, DontSend = 0x648093 };
+	if (ReplaySystem::IsPlaybackActive())
+		return SkipStatistics;
 
 	return IsStatisticsEnabled() || (SessionClass::Instance.GameMode == GameMode::Internet)
 		? Send

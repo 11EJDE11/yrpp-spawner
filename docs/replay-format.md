@@ -5,6 +5,9 @@ Written by `src/Replay/ReplaySystem.cpp`. The CnCNet client mirrors the header b
 change here must be made in both repos in the same change**. A size mismatch does not error; it
 silently misparses every field after the point of divergence.
 
+`GetReplayFPSFromGameSpeed` is duplicated the same way, as `ReplayGame.GetFramesPerSecond`. The
+client uses it to turn `TotalFrames` into a displayed duration, so the two have to agree.
+
 ## Layout
 
 ```
@@ -23,7 +26,7 @@ silently misparses every field after the point of divergence.
 | 4 | 4 | `Version` | `1` |
 | 8 | 260 | `MapName` | `spawnmap.ini [Basic] Name`, else spawn.ini `UIMapName`, else `ScenarioClass::FileName` |
 | 268 | 4 | `StartFrame` | always 0; there is no seek support |
-| 272 | 4 | `ProducerVersion{Major,Minor,Revision,Patch}` | four `uint8`; from spawn.ini `SpawnerVersion` if present, else the compiled-in `VERSION_*` |
+| 272 | 4 | `SpawnerVersion{Major,Minor,Revision,Patch}` | four `uint8`; from spawn.ini `SpawnerVersion` if present, else the compiled-in `VERSION_*` |
 | 276 | 32 | `GameVersionString` | hardcoded `"1.006"` |
 | 308 | 64 | `GameClientVersion` | from spawn.ini `GameClientVersion` |
 | 372 | 4 | `GameMode` | `SessionClass::GameMode` — Campaign 0, LAN 3, Internet 4, Skirmish 5 |
@@ -38,8 +41,9 @@ silently misparses every field after the point of divergence.
 | 1404 | 8 | `RecordedUnixTime` | `time()` at recording start |
 | 1412 | 4 | `TotalFrames` | last recorded frame; **0 means the recording was truncated** |
 
-`IsReplayHeaderValid` checks `Magic`, `Version == 1` and `RecordedGameSpeed <= 6`. There is no
-checksum and no compression.
+`IsReplayHeaderValid` checks `Magic`, `Version == 1` and `RecordedGameSpeed <= 6`. Playback also
+checks that `SpawnIniSize + SpawnMapSize` actually fits the file before seeking past them. There is
+no checksum and no compression.
 
 `TotalFrames` is stamped by `StopReplaySystem()` seeking back to offset 1412 just before the file
 is closed. A game that crashes or is killed never reaches that, so the field stays 0 — that is the

@@ -57,18 +57,18 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		LoadSaveGame       = pINI->ReadBool(pSettingsSection, "LoadSaveGame", LoadSaveGame);
 		/* SavedGameDir   */ pINI->ReadString(pSettingsSection, "SavedGameDir", SavedGameDir, SavedGameDir, sizeof(SavedGameDir));
 		/* SaveGameName   */ pINI->ReadString(pSettingsSection, "SaveGameName", SaveGameName, SaveGameName, sizeof(SaveGameName));
-		CustomMissionID    = pINI->ReadInteger(pSettingsSection, "CustomMissionID", 0);
+		CustomMissionID  = pINI->ReadInteger(pSettingsSection, "CustomMissionID", 0);
 		AutoSaveCount      = pINI->ReadInteger(pSettingsSection, "AutoSaveCount", AutoSaveCount);
 		AutoSaveInterval   = pINI->ReadInteger(pSettingsSection, "AutoSaveInterval", AutoSaveInterval);
 		NextAutoSaveNumber = pINI->ReadInteger(pSettingsSection, "NextAutoSaveNumber", NextAutoSaveNumber);
 
-		EnableReplayRecording = pINI->ReadBool(pSettingsSection, "EnableReplayRecording", EnableReplayRecording);
-		/* ReplayFileOut  */ pINI->ReadString(pSettingsSection, "ReplayFileOut", ReplayFileOut, ReplayFileOut, sizeof(ReplayFileOut));
-		/* ReplayFile     */ pINI->ReadString(pSettingsSection, "ReplayFile", ReplayFile, ReplayFile, sizeof(ReplayFile));
-		ReplayShroudEnabled = pINI->ReadBool(pSettingsSection, "ReplayShroudEnabled", ReplayShroudEnabled);
-		ReplayLockedViewport = pINI->ReadBool(pSettingsSection, "ReplayLockedViewport", ReplayLockedViewport);
-		ReplaySelectUnits = pINI->ReadBool(pSettingsSection, "ReplaySelectUnits", ReplaySelectUnits);
-		ReplaySpectator = pINI->ReadBool(pSettingsSection, "ReplaySpectator", ReplaySpectator);
+		EnableReplayRecording    = pINI->ReadBool(pSettingsSection, "EnableReplayRecording", EnableReplayRecording);
+		/* ReplayFileOut        */ pINI->ReadString(pSettingsSection, "ReplayFileOut", ReplayFileOut, ReplayFileOut, sizeof(ReplayFileOut));
+		/* ReplayFile           */ pINI->ReadString(pSettingsSection, "ReplayFile", ReplayFile, ReplayFile, sizeof(ReplayFile));
+		ReplayShroudEnabled      = pINI->ReadBool(pSettingsSection, "ReplayShroudEnabled", ReplayShroudEnabled);
+		ReplayLockedViewport     = pINI->ReadBool(pSettingsSection, "ReplayLockedViewport", ReplayLockedViewport);
+		ReplaySelectUnits        = pINI->ReadBool(pSettingsSection, "ReplaySelectUnits", ReplaySelectUnits);
+		ReplaySpectator          = pINI->ReadBool(pSettingsSection, "ReplaySpectator", ReplaySpectator);
 		ReplayShowChatAndBeacons = pINI->ReadBool(pSettingsSection, "ReplayShowChatAndBeacons", ReplayShowChatAndBeacons);
 	}
 
