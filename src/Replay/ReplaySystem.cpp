@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdlib>
 #include <ctime>
 #include <cstring>
 #include <deque>
@@ -48,11 +49,7 @@
 
 constexpr uint32_t REPLAY_MAGIC = 0x4A455259u;
 constexpr uint32_t REPLAY_VERSION = 1;
-// Forcing a physical disk commit can block the game thread for tens of milliseconds on a
-// mechanical drive, so this is set past what a game realistically produces: measured
-// recordings run around 0.5 MB, with the longest observed at 2.5 MB. In practice the only
-// flush that happens is the one when recording closes. Data already written survives a game
-// crash regardless - the OS owns the page cache - so this only guards against power loss.
+// Flush rarely; forced disk commits can stall the game thread.
 constexpr uint64_t REPLAY_FLUSH_INTERVAL_BYTES = 50ull * 1024 * 1024;
 constexpr const char* DEFAULT_RECORDING_PATH = "replay.dat";
 
@@ -64,10 +61,7 @@ enum FrameRecordFlags : uint32_t
 	FrameRecordFlag_SideChannel = 1u << 2
 };
 
-// Chat, beacons and taunts travel over IPXManagerClass's "global channel" (Send_Global_Message /
-// Network_Call_Back), entirely separate from the deterministic EventClass::DoList queue the rest of
-// this file records. They can't be replayed the same way (there's nothing deterministic to re-inject),
-// so instead we record what was displayed/heard and just reproduce that directly on the matching frame.
+// Non-deterministic network/UI events are recorded separately from EventClass::DoList.
 enum class SideChannelEventType : uint8_t
 {
 	ChatMessage = 1,
@@ -84,15 +78,14 @@ constexpr int32_t SIDECHANNEL_MAX_EVENTS_PER_FRAME = 64; // sanity bound for pla
 #pragma pack(push, 1)
 struct SideChannelRecord
 {
-	int32_t FrameNumber = 0; // filled in when queued, not by the caller
+	int32_t FrameNumber = 0;
 	uint8_t Type = 0;        // SideChannelEventType
-	int32_t House = -1;      // owning/sending house index; -1 if not house-scoped
-	// Per-type: ColorSchemeIndex for ChatMessage, beacon slot (0-2, or -1) for the Beacon* events,
-	// the raw taunt command byte for Taunt.
+	int32_t House = -1;
+	// Per-type payload: chat color, beacon slot or taunt command.
 	int32_t Aux = 0;
-	CoordStruct Coord = {};                     // BeaconPlace only
+	CoordStruct Coord = {}; // BeaconPlace only
 	wchar_t SenderName[SIDECHANNEL_NAME_LENGTH] = {}; // ChatMessage only
-	wchar_t Text[SIDECHANNEL_TEXT_LENGTH] = {};       // ChatMessage / BeaconText only
+	wchar_t Text[SIDECHANNEL_TEXT_LENGTH] = {}; // ChatMessage / BeaconText only
 };
 #pragma pack(pop)
 
@@ -121,12 +114,7 @@ struct ReplayHeader
 	uint32_t SpawnMapSize;
 	uint32_t RecordedGameSpeed;
 
-	// Wall-clock time the recording started. A file's mtime does not survive copying, so the
-	// client shows this instead.
 	uint64_t RecordedUnixTime;
-	// Last recorded frame number, stamped in when recording closes cleanly. Stays 0 if the game
-	// crashed or was killed mid-recording, which is how the client tells a complete replay from a
-	// truncated one - the frame stream itself carries no length.
 	uint32_t TotalFrames;
 };
 
@@ -177,8 +165,7 @@ struct ReplayRuntimeState
 	bool LockViewport = true;
 	bool SelectUnits = true;
 	bool SpectatorView = false;
-	// Playback-only: whether recorded chat/beacons/taunts actually get reproduced. Recording of
-	// this data is unconditional - this only gates whether it's played back.
+	// Playback-only; recording keeps this data unconditionally.
 	bool ShowChatAndBeacons = true;
 	int PlaybackSpeedIndex = -1;
 
@@ -196,10 +183,7 @@ struct ReplayRuntimeState
 	bool HasPendingPlaybackFrame = false;
 	bool PlaybackStreamEnded = false;
 
-	// The recorded viewport position is only stored on frames where it changed, so playback has
-	// to hold on to the last one and keep re-asserting it. Without this the camera is only
-	// corrected on the frames the recorder happened to scroll on, leaving it free to roam in
-	// between - which is not a lock at all.
+	// Last recorded viewport position, re-applied between sparse frame records.
 	Point2D LockedViewportPos = { 0, 0 };
 	bool HasLockedViewportPos = false;
 	PlaybackFrameRecord PendingPlaybackFrame = {};
@@ -232,9 +216,7 @@ const char* GetRecordingOutputPath()
 	return DEFAULT_RECORDING_PATH;
 }
 
-// CreateFileA will not create missing directories and the client writes recordings into a
-// subfolder, so make each component of the path up front. Failures are ignored here - the
-// CreateFileA that follows reports the real problem.
+// Create missing parent folders for the replay output path.
 void EnsureParentDirectoryExists(const char* path)
 {
 	char buffer[MAX_PATH];
@@ -515,24 +497,35 @@ bool TryParseVersionString(const char* versionText, uint8_t& outMajor, uint8_t& 
 		return false;
 
 	unsigned int parsed[4] = { 0, 0, 0, 0 };
-	char extra = '\0';
-	const int count = sscanf_s(
-		versionText,
-		"%u.%u.%u.%u%c",
-		&parsed[0], &parsed[1], &parsed[2], &parsed[3],
-		&extra,
-		static_cast<unsigned int>(sizeof(extra))
-	);
+	int count = 0;
+	const char* cursor = versionText;
 
-	// Must parse at least major, and reject trailing non-version characters.
-	if (count < 1 || count > 4)
-		return false;
-
-	for (unsigned int value : parsed)
+	while (*cursor != '\0')
 	{
-		if (value > std::numeric_limits<uint8_t>::max())
+		if (count >= 4 || !isdigit(static_cast<unsigned char>(*cursor)))
+			return false;
+
+		char* end = nullptr;
+		const unsigned long value = strtoul(cursor, &end, 10);
+		if (end == cursor || value > std::numeric_limits<uint8_t>::max())
+			return false;
+
+		parsed[count++] = static_cast<unsigned int>(value);
+		cursor = end;
+
+		if (*cursor == '\0')
+			break;
+
+		if (*cursor != '.')
+			return false;
+
+		++cursor;
+		if (*cursor == '\0')
 			return false;
 	}
+
+	if (count == 0)
+		return false;
 
 	outMajor = static_cast<uint8_t>(parsed[0]);
 	outMinor = static_cast<uint8_t>(parsed[1]);
@@ -787,6 +780,7 @@ void ResetRuntimeFlagsForScenario()
 	gReplay.LockedViewportPos = { 0, 0 };
 	gReplay.HasLockedViewportPos = false;
 	gReplay.HasLastWrittenFrameState = false;
+	gReplay.LastWrittenFrameNumber = 0;
 	gReplay.LastRecordedTacticalPos = { 0, 0 };
 	gReplay.LastRecordedSelectionCount = 0;
 	gReplay.LastRecordedSelectionCRC = 0;
@@ -812,19 +806,12 @@ void ApplyPlaybackInitialState()
 		memcpy(ScenarioClass::Instance->Random.Table, gReplay.PlaybackHeader.RandomizerTable, sizeof(gReplay.PlaybackHeader.RandomizerTable));
 		ScenarioClass::Instance->UniqueID = gReplay.PlaybackHeader.UniqueIDCounter;
 	}
-
-	// If HideWaitingForPlayersScreen ever crashes during playback, the cause is the panel at
-	// 0x0087F770 being uninitialised in replay mode; zeroing the auto-hide timer at 0x00B07784
-	// stops MainLoop reaching it. Not needed since players are marked loaded up front.
 }
 
-// Network and timing bookkeeping that only meant something to live peers. These are still recorded
-// (they carry the latency and process-time data), they just must not be replayed.
+// Network/timing events are recorded for diagnostics but not replayed.
 bool IsTimingEvent(EventType eventType)
 {
-	// Spawner extension events, currently just ProtocolZero's ResponseTime2. Asking EventExt rather
-	// than testing a 0x30-0x3F range means a future extension event is covered automatically, and
-	// that Ares' events at 0x60/0x61 are not swept up by accident.
+	// Keep extension timing events out of playback without guessing numeric ranges.
 	if (EventExt::IsValidType(static_cast<EventTypeExt>(eventType)))
 		return true;
 
@@ -844,9 +831,7 @@ bool IsTimingEvent(EventType eventType)
 	}
 }
 
-// What actually drives the simulation, and so the only thing playback injects. Timing and network
-// events have nothing to sync with offline, and OPTIONS would reopen menus from the original
-// session; both are read past instead.
+// Playback injects only deterministic gameplay events.
 bool IsReplayableGameplayEvent(const EventClass& event)
 {
 	return event.Type != EventType::Options && !IsTimingEvent(event.Type);
@@ -936,7 +921,32 @@ void RemoveReplayGameplayEventsFromDoList()
 	});
 }
 
-// Record information about this frame (if differs from last frame, or there's side-channel data).
+std::vector<uint32_t> GetSelectedObjectIDs()
+{
+	auto& currentObjects = ObjectClass::CurrentObjects;
+	std::vector<uint32_t> ids;
+	ids.reserve(currentObjects.Count);
+
+	for (int i = 0; i < currentObjects.Count; ++i)
+	{
+		ObjectClass* pObj = currentObjects.Items[i];
+		if (pObj)
+			ids.push_back(static_cast<uint32_t>(pObj->UniqueID));
+	}
+
+	return ids;
+}
+
+uint32_t SumObjectIDs(const std::vector<uint32_t>& ids)
+{
+	uint32_t sum = 0;
+	for (const auto id : ids)
+		sum += id;
+
+	return sum;
+}
+
+// Record this frame when deterministic events or visible replay state changed.
 bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThisFrame,
 	const std::vector<SideChannelRecord>& sideChannelEvents)
 {
@@ -1021,14 +1031,7 @@ void FlushPendingRecordedFramesThrough(int frameNumber, int currentFrameEventCou
 		if (pendingFrame > frameNumber)
 			break;
 
-		// Side-channel hooks (chat/beacons/taunts) tag events with the frame they fired on, which
-		// should always match a pending frame capture here since RecordFrameState() runs every
-		// recorded frame unconditionally. The <= is just a safety net if a hook ever fires slightly
-		// out of order relative to this flush - worst case, the event attaches to the next frame.
-		//
-		// Capped at SIDECHANNEL_MAX_EVENTS_PER_FRAME to match what ReadNextPlaybackFrameRecord will
-		// accept - anything past that is left in the queue rather than dropped, so it just spills
-		// into the next frame's side-channel block instead of making this one unreadable.
+		// Keep playback parsing bounded; excess side-channel records spill into later frames.
 		std::vector<SideChannelRecord> sideChannelForFrame;
 		while (!gReplay.PendingSideChannelEvents.empty()
 			&& gReplay.PendingSideChannelEvents.front().FrameNumber <= pendingFrame
@@ -1058,29 +1061,13 @@ void RecordFrameState()
 	PendingRecordedFrameCapture capture;
 	auto& frameState = capture.FrameState;
 	frameState.FrameNumber = Unsorted::CurrentFrame;
+	frameState.TacticalPos = TacticalClass::Instance
+		? TacticalClass::Instance->TacticalCoord1
+		: Point2D { 0, 0 };
 
-	if (TacticalClass::Instance)
-		frameState.TacticalPos = TacticalClass::Instance->TacticalCoord1;
-	else
-		frameState.TacticalPos = { 0, 0 };
-
-	auto& currentObjects = ObjectClass::CurrentObjects;
-	capture.SelectedObjectIDs.reserve(currentObjects.Count);
-
-	uint32_t crc = 0;
-	for (int i = 0; i < currentObjects.Count; ++i)
-	{
-		ObjectClass* pObj = currentObjects.Items[i];
-		if (!pObj)
-			continue;
-
-		const uint32_t uniqueID = static_cast<uint32_t>(pObj->UniqueID);
-		crc += uniqueID;
-		capture.SelectedObjectIDs.push_back(uniqueID);
-	}
-
+	capture.SelectedObjectIDs = GetSelectedObjectIDs();
 	frameState.SelectedObjectCount = static_cast<int32_t>(capture.SelectedObjectIDs.size());
-	frameState.SelectedObjectCRC = crc;
+	frameState.SelectedObjectCRC = SumObjectIDs(capture.SelectedObjectIDs);
 
 	if (!gReplay.PendingFrameStates.empty()
 		&& gReplay.PendingFrameStates.back().FrameState.FrameNumber == frameState.FrameNumber)
@@ -1100,8 +1087,7 @@ bool WriteReplayEndOfStreamMarker()
 	return WriteRaw(&marker, sizeof(marker));
 }
 
-// Seek back into the header and stamp the final frame count. A recording that never reaches this
-// keeps TotalFrames == 0, which is what lets the client warn that a replay is truncated.
+// Stamp TotalFrames only after a clean recording shutdown.
 bool WriteRecordedTotalFramesToHeader()
 {
 	if (gReplay.ReplayFile == INVALID_HANDLE_VALUE)
@@ -1201,51 +1187,40 @@ void ApplyPlaybackSelection(const PlaybackFrameRecord& frameRecord)
 		return;
 	}
 
-	auto& currentObjects = ObjectClass::CurrentObjects;
-	uint32_t currentCRC = 0;
-	for (int i = 0; i < currentObjects.Count; ++i)
+	if (!gReplay.SelectUnits)
+		return;
+
+	if (GetSelectedObjectIDs() == frameRecord.SelectedObjectIDs)
+		return;
+
+	MapClass::UnselectAll();
+
+	std::unordered_map<int, ObjectClass*> objectByUniqueID;
+	objectByUniqueID.reserve(static_cast<size_t>(std::max(AbstractClass::Array.Count, 0)));
+	for (int i = 0; i < AbstractClass::Array.Count; ++i)
 	{
-		ObjectClass* pObj = currentObjects.Items[i];
-		if (pObj)
-			currentCRC += static_cast<uint32_t>(pObj->UniqueID);
+		AbstractClass* pAbs = AbstractClass::Array.GetItem(i);
+		if (!pAbs)
+			continue;
+
+		if (auto* pObject = abstract_cast<ObjectClass*>(pAbs))
+			objectByUniqueID.emplace(pAbs->UniqueID, pObject);
 	}
 
-	if (gReplay.SelectUnits
-		&& (currentCRC != frameRecord.SelectedObjectCRC || currentObjects.Count != frameRecord.SelectedObjectCount))
+	for (const auto uniqueID : frameRecord.SelectedObjectIDs)
 	{
-		MapClass::UnselectAll();
-
-		std::unordered_map<int, ObjectClass*> objectByUniqueID;
-		objectByUniqueID.reserve(static_cast<size_t>(std::max(AbstractClass::Array.Count, 0)));
-		for (int i = 0; i < AbstractClass::Array.Count; ++i)
-		{
-			AbstractClass* pAbs = AbstractClass::Array.GetItem(i);
-			if (!pAbs)
-				continue;
-
-			if (auto* pObject = abstract_cast<ObjectClass*>(pAbs))
-				objectByUniqueID.emplace(pAbs->UniqueID, pObject);
-		}
-
-		for (const auto uniqueID : frameRecord.SelectedObjectIDs)
-		{
-			const auto it = objectByUniqueID.find(static_cast<int>(uniqueID));
-			if (it != objectByUniqueID.end() && it->second)
-				it->second->Select();
-		}
+		const auto it = objectByUniqueID.find(static_cast<int>(uniqueID));
+		if (it != objectByUniqueID.end() && it->second)
+			it->second->Select();
 	}
 }
 
-// Reproduces a recorded chat/beacon/taunt event, exactly as it was seen/heard on the recording
-// client. This does not go anywhere near the network - it's the same display/audio calls the game
-// itself makes on receipt, just fed from the replay file instead of IPXManagerClass.
+// Replays recorded chat, beacons and taunts without using the network.
 void ApplySideChannelEvent(const SideChannelRecord& event_)
 {
 	if (!gReplay.ShowChatAndBeacons)
 		return;
 
-	// Duration is approximated: the game derives it from a runtime ticks-per-minute value we can't
-	// read back out of the replay file, so this just needs to be "long enough to read comfortably".
 	constexpr int SIDECHANNEL_MESSAGE_DURATION_FRAMES = 1800;
 
 	switch (static_cast<SideChannelEventType>(event_.Type))
@@ -1269,8 +1244,7 @@ void ApplySideChannelEvent(const SideChannelRecord& event_)
 
 	case SideChannelEventType::BeaconText:
 	{
-		// Not exposed in BeaconManagerClass.h; call BeaconPlacement::Message_431450 directly, the
-		// same function both the local compose UI and Network_Call_Back's beacon-text case use.
+		// Beacon text uses BeaconPlacement::Message_431450.
 		using BeaconMessageFn = char(__thiscall*)(BeaconManagerClass*, const wchar_t*, int, int, char);
 		reinterpret_cast<BeaconMessageFn>(0x431450)(&BeaconManagerClass::Instance, event_.Text, event_.House, event_.Aux, 1);
 		break;
@@ -1278,8 +1252,7 @@ void ApplySideChannelEvent(const SideChannelRecord& event_)
 
 	case SideChannelEventType::Taunt:
 	{
-		// Not exposed in BeaconManagerClass.h-style typed headers; call the game's taunt-sound
-		// selector directly, same as Network_Call_Back does for a received taunt.
+		// Taunts_752B70 resolves the command byte and plays the sound.
 		using TauntsFn = int(__fastcall*)(int);
 		reinterpret_cast<TauntsFn>(0x752B70)(event_.Aux);
 		break;
@@ -1308,12 +1281,7 @@ void StopReplaySystem()
 	AbortReplaySystem();
 }
 
-// Pins the camera to the recorded position. Called every frame during playback, not just on the
-// frames that carry a position, because the recording only stores one when it changed.
-//
-// Mirrors the built-in replay viewport restore (sub_6D6000). Writing TacticalPos alone is not
-// enough: TacticalClass::Update overwrites it from TacticalCoord1 every frame, and Draw keys off
-// Redrawing/TacticalCoord1 to decide on a full repaint.
+// Pins the camera to the last recorded viewport position.
 void ApplyLockedViewport()
 {
 	if (!gReplay.LockViewport || !gReplay.HasLockedViewportPos || !TacticalClass::Instance)
@@ -1322,8 +1290,7 @@ void ApplyLockedViewport()
 	auto* tc = TacticalClass::Instance;
 	const Point2D& target = gReplay.LockedViewportPos;
 
-	// Only touch the viewport when it has actually drifted. Forcing Redrawing every frame would
-	// mean a full-screen repaint every frame for no reason.
+	// Avoid forcing a full repaint when the viewport is already correct.
 	if (tc->TacticalCoord1.X == target.X && tc->TacticalCoord1.Y == target.Y)
 		return;
 
@@ -1345,8 +1312,7 @@ void RestoreFrameState()
 
 	gReplay.ExpectedEventsThisFrame = 0;
 
-	// Re-assert before anything else, so the lock holds on frames that carry no record at all -
-	// which is most of them, since frames are only written when something changed.
+	// Keep the viewport locked on frames without replay records.
 	ApplyLockedViewport();
 
 	if (!gReplay.HasPendingPlaybackFrame && !gReplay.PlaybackStreamEnded)
@@ -1391,8 +1357,7 @@ void RestoreFrameState()
 
 	if ((frameRecord.Flags & FrameRecordFlag_TacticalPos) != 0u)
 	{
-		// Tracked even when the viewport is not locked, so that ticking the option mid-session
-		// would have something to snap to rather than waiting for the recorder's next scroll.
+		// Track this even when locking is disabled.
 		gReplay.LockedViewportPos = frameRecord.TacticalPos;
 		gReplay.HasLockedViewportPos = true;
 
@@ -1414,9 +1379,7 @@ void RestoreFrameState()
 	if (!gReplay.RunPlayback)
 		return;
 
-	// Reveal the whole map when the viewer asked for no shroud, and always for a spectator - an
-	// observer is meant to see everything. Observer mode itself is set during load in
-	// Spawner::StartGame, which is early enough for the sidebar to be built for it.
+	// Reveal once at replay start when shroud is disabled or spectator view is active.
 	if ((!gReplay.ShroudEnabled || gReplay.SpectatorView) && Unsorted::CurrentFrame == 0)
 	{
 		for (const auto pHouse : HouseClass::Array)
@@ -1427,9 +1390,7 @@ void RestoreFrameState()
 	}
 }
 
-// Records every event on this frame, including the timing ones that are never replayed - they carry
-// the per-player latency and process-time data, which makes a replay useful for working out who was
-// lagging. Playback decides what to skip, since that is the only place it matters.
+// Record every event on this frame; playback filters non-gameplay events later.
 void RecordEventsForCurrentFrame()
 {
 	const int doListCount = EventClass::DoList.Count;
@@ -1733,9 +1694,7 @@ DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0x5)
 	return 0;
 }
 
-// Record/Restore the frame state. Doing it a little earlier than the game's normal path for replays
-// This way we avoid the SpecialDialog skip. If you do change this, make sure to test if playback
-// works when the options menu is open.
+// Capture visible replay state before dialog handling can skip the normal replay path.
 DEFINE_HOOK(0x0055d878, MainLoop_RecordPlaybackFrameState, 0x6)
 {
 	if (gReplay.Recording)
@@ -1767,8 +1726,8 @@ DEFINE_HOOK(0x0064820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
 
 	return 0x0064821C;
 }
-// MainLoop normally pumps IPX periodically for online games.
-// Built-in playback avoids this network path; do the same for replay playback.
+
+// Replay playback does not pump live network traffic.
 DEFINE_HOOK(0x55D8E3, MainLoop_SkipIPXPumpDuringReplayPlayback, 0x5)
 {
 	if (gReplay.Playback)
@@ -1808,7 +1767,7 @@ DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 	return 0;
 }
 
-// When loading the game in playback, force other players to "loaded"
+// Mark all players loaded during replay startup.
 DEFINE_HOOK(0x0069AFEB, WaitForPlayers_ReplayMarkOthersLoaded, 0x6)
 {
 	if (!gReplay.Playback || gReplay.PlayersMarkedLoaded)
@@ -1823,23 +1782,9 @@ DEFINE_HOOK(0x0069AFEB, WaitForPlayers_ReplayMarkOthersLoaded, 0x6)
 	return 0;
 }
 
-// --- Alternate network stream recording taps -------------------------------------------------
-//
-// Chat, beacons and taunts all travel over IPXManagerClass's "global channel", not the
-// deterministic EventClass::DoList queue the rest of this file replays. For beacons and taunts
-// the game itself funnels both the locally-triggered path and the remote-received path through
-// the same function, so hooking that one function's entry captures every occurrence regardless
-// of who triggered it. Chat is recorded from within src/Misc/InGameChat.cpp's existing hooks
-// instead (see ReplaySystem::RecordChatMessage), since those already sit at the exact point
-// both the local echo and a received message have their final House/Name/Text resolved.
-
-// Local "delete my beacon" and "set my beacon's text" both call through with house=-1, slot=-1,
-// meaning "whichever beacon has Bitfield bit 0x2 set" (BeaconPlacement::Message_431170 does this
-// same lookup to find the beacon the player is currently placing/composing). That flag is set by
-// UI flow we don't otherwise capture or replay, so recording the raw -1/-1 and replaying it later
-// finds nothing on a freshly-reconstructed BeaconManagerClass and silently no-ops. Resolving the
-// actual house/slot here, at the exact point the game itself is about to do the same lookup,
-// makes the recorded event self-contained instead.
+// --- Side-channel recording taps --------------------------------------------------------------
+// Chat, beacons and taunts bypass EventClass::DoList and are recorded here.
+// Some local beacon calls use -1/-1; resolve them before writing the replay.
 bool ResolveFlaggedBeaconSlot(int& house, int& slot)
 {
 	for (int h = 0; h < 8; ++h)
@@ -1879,9 +1824,7 @@ DEFINE_HOOK(0x430BA0, BeaconManagerClass_Place_RecordPlacement, 0x6)
 	return 0;
 }
 
-// BeaconPlacement::Delete. __thiscall(ECX=this); stack: +0 retaddr, +4 house (or -1 for "any"),
-// +8 houseBeaconId (or -1). The local "delete beacon" hotkey (Delete_Command, 0x731A10) always
-// calls this with -1/-1 - see ResolveFlaggedBeaconSlot above.
+// Beacon delete. Stack: +4 house, +8 slot; -1/-1 means the active local beacon.
 DEFINE_HOOK(0x4311C0, BeaconPlacement_Delete_RecordDeletion, 0x6)
 {
 	if (gReplay.Recording)
@@ -1900,14 +1843,8 @@ DEFINE_HOOK(0x4311C0, BeaconPlacement_Delete_RecordDeletion, 0x6)
 	return 0;
 }
 
-// BeaconPlacement::Message_431450 (beacon text). __thiscall(ECX=this); stack: +0 retaddr,
-// +4 strDestination (wchar_t*, may be null), +8 house (-1 = local player's own beacon),
-// +0xC houseBeaconId (-1 alongside house==-1 for "find my own beacon"), +0x10 broadcast (bool).
-//
-// house==-1 && slot==-1 && !broadcast happens on every keystroke while composing locally (a live
-// preview that never reaches the network) - skip those, or the replay fills up with noise. Every
-// other call is either the local player's final committed/cleared text (broadcast=true) or a
-// remote-applied update carrying an explicit house/slot, both of which are worth keeping.
+// Beacon text. Skip local compose previews; record final and remote-applied text.
+// Stack: +4 text, +8 house, +0xC slot, +0x10 broadcast.
 DEFINE_HOOK(0x431450, BeaconPlacement_Message_RecordText, 0x6)
 {
 	if (gReplay.Recording)
@@ -1918,8 +1855,7 @@ DEFINE_HOOK(0x431450, BeaconPlacement_Message_RecordText, 0x6)
 		const int broadcast = R->Stack<int>(0x10);
 
 		bool shouldRecord = broadcast != 0 || house != -1 || slot != -1;
-		// house/slot are -1/-1 for every local call, committed or not - see
-		// ResolveFlaggedBeaconSlot above. Only worth resolving for the ones we're keeping.
+		// Committed local text still needs its concrete beacon slot.
 		if (shouldRecord && house == -1 && slot == -1)
 			shouldRecord = ResolveFlaggedBeaconSlot(house, slot);
 
@@ -1930,9 +1866,7 @@ DEFINE_HOOK(0x431450, BeaconPlacement_Message_RecordText, 0x6)
 	return 0;
 }
 
-// Taunts_752B70 - resolves a taunt command byte to a wav and plays it. __fastcall(ECX=Command).
-// Both the local trigger (TauntCommandClass::Process, before it sends) and the remote-received
-// path (Network_Call_Back's YRPACKET_29 case) call this same function, so it's a clean single tap.
+// Taunts_752B70. __fastcall(ECX=command).
 DEFINE_HOOK(0x752B70, Taunts_RecordPlayback, 0x5)
 {
 	if (gReplay.Recording)
