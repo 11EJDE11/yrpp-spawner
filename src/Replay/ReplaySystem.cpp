@@ -38,6 +38,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <ctime>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -46,7 +48,12 @@
 
 constexpr uint32_t REPLAY_MAGIC = 0x4A455259u;
 constexpr uint32_t REPLAY_VERSION = 1;
-constexpr uint64_t REPLAY_FLUSH_INTERVAL_BYTES = 15ull * 1024 * 1024;
+// Forcing a physical disk commit can block the game thread for tens of milliseconds on a
+// mechanical drive, so this is set past what a game realistically produces: measured
+// recordings run around 0.5 MB, with the longest observed at 2.5 MB. In practice the only
+// flush that happens is the one when recording closes. Data already written survives a game
+// crash regardless - the OS owns the page cache - so this only guards against power loss.
+constexpr uint64_t REPLAY_FLUSH_INTERVAL_BYTES = 50ull * 1024 * 1024;
 constexpr const char* DEFAULT_RECORDING_PATH = "replay.dat";
 
 enum FrameRecordFlags : uint32_t
@@ -113,6 +120,14 @@ struct ReplayHeader
 	uint32_t SpawnIniSize;
 	uint32_t SpawnMapSize;
 	uint32_t RecordedGameSpeed;
+
+	// Wall-clock time the recording started. A file's mtime does not survive copying, so the
+	// client shows this instead.
+	uint64_t RecordedUnixTime;
+	// Last recorded frame number, stamped in when recording closes cleanly. Stays 0 if the game
+	// crashed or was killed mid-recording, which is how the client tells a complete replay from a
+	// truncated one - the frame stream itself carries no length.
+	uint32_t TotalFrames;
 };
 
 struct FrameStateRecord
@@ -180,9 +195,17 @@ struct ReplayRuntimeState
 
 	bool HasPendingPlaybackFrame = false;
 	bool PlaybackStreamEnded = false;
+
+	// The recorded viewport position is only stored on frames where it changed, so playback has
+	// to hold on to the last one and keep re-asserting it. Without this the camera is only
+	// corrected on the frames the recorder happened to scroll on, leaving it free to roam in
+	// between - which is not a lock at all.
+	Point2D LockedViewportPos = { 0, 0 };
+	bool HasLockedViewportPos = false;
 	PlaybackFrameRecord PendingPlaybackFrame = {};
 
 	bool HasLastWrittenFrameState = false;
+	int32_t LastWrittenFrameNumber = 0;
 	Point2D LastRecordedTacticalPos = { 0, 0 };
 	int32_t LastRecordedSelectionCount = 0;
 	uint32_t LastRecordedSelectionCRC = 0;
@@ -198,6 +221,39 @@ void ApplyPlaybackInitialState();
 const SpawnerConfig* GetConfig()
 {
 	return Spawner::GetConfig();
+}
+
+const char* GetRecordingOutputPath()
+{
+	const auto* pConfig = GetConfig();
+	if (pConfig && pConfig->ReplayFileOut[0] != '\0')
+		return pConfig->ReplayFileOut;
+
+	return DEFAULT_RECORDING_PATH;
+}
+
+// CreateFileA will not create missing directories and the client writes recordings into a
+// subfolder, so make each component of the path up front. Failures are ignored here - the
+// CreateFileA that follows reports the real problem.
+void EnsureParentDirectoryExists(const char* path)
+{
+	char buffer[MAX_PATH];
+	strncpy_s(buffer, sizeof(buffer), path, _TRUNCATE);
+
+	for (char* cursor = buffer; *cursor != '\0'; ++cursor)
+	{
+		if (*cursor != '\\' && *cursor != '/')
+			continue;
+
+		// Skip a leading separator, a drive root and the second slash of a UNC prefix.
+		if (cursor == buffer || *(cursor - 1) == ':' || *(cursor - 1) == '\\' || *(cursor - 1) == '/')
+			continue;
+
+		const char separator = *cursor;
+		*cursor = '\0';
+		CreateDirectoryA(buffer, nullptr);
+		*cursor = separator;
+	}
 }
 
 bool IsReplayGameSpeedIndexValid(uint32_t gameSpeedIndex)
@@ -537,6 +593,8 @@ ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
 	header.SpawnIniSize = spawnIniSize;
 	header.SpawnMapSize = spawnMapSize;
 	header.RecordedGameSpeed = static_cast<uint32_t>(std::clamp(GameOptionsClass::Instance.GameSpeed, 0, 6));
+	header.RecordedUnixTime = static_cast<uint64_t>(time(nullptr));
+	header.TotalFrames = 0; // stamped by StopReplaySystem once recording finishes cleanly
 	return header;
 }
 
@@ -565,8 +623,11 @@ bool WriteInitialReplayFile()
 		static_cast<uint32_t>(spawnMap.size())
 	);
 
+	const char* const outputPath = GetRecordingOutputPath();
+	EnsureParentDirectoryExists(outputPath);
+
 	HANDLE file = CreateFileA(
-		DEFAULT_RECORDING_PATH,
+		outputPath,
 		GENERIC_WRITE,
 		FILE_SHARE_READ,
 		nullptr,
@@ -576,7 +637,10 @@ bool WriteInitialReplayFile()
 	);
 
 	if (file == INVALID_HANDLE_VALUE)
+	{
+		Debug::Log("[Replay] Failed to create replay file for recording: %s\n", outputPath);
 		return false;
+	}
 
 	bool ok = WriteRawToHandle(file, &header, sizeof(header));
 	if (ok && !spawnIni.empty())
@@ -636,8 +700,10 @@ bool OpenRecordingReplayStream()
 {
 	CloseReplayFile();
 
+	const char* const outputPath = GetRecordingOutputPath();
+
 	gReplay.ReplayFile = CreateFileA(
-		DEFAULT_RECORDING_PATH,
+		outputPath,
 		GENERIC_WRITE,
 		FILE_SHARE_READ,
 		nullptr,
@@ -648,8 +714,10 @@ bool OpenRecordingReplayStream()
 
 	if (gReplay.ReplayFile == INVALID_HANDLE_VALUE)
 	{
+		EnsureParentDirectoryExists(outputPath);
+
 		gReplay.ReplayFile = CreateFileA(
-			DEFAULT_RECORDING_PATH,
+			outputPath,
 			GENERIC_WRITE,
 			FILE_SHARE_READ,
 			nullptr,
@@ -716,6 +784,8 @@ void ResetRuntimeFlagsForScenario()
 	gReplay.HasPendingPlaybackFrame = false;
 	gReplay.PlaybackStreamEnded = false;
 	gReplay.PendingPlaybackFrame = {};
+	gReplay.LockedViewportPos = { 0, 0 };
+	gReplay.HasLockedViewportPos = false;
 	gReplay.HasLastWrittenFrameState = false;
 	gReplay.LastRecordedTacticalPos = { 0, 0 };
 	gReplay.LastRecordedSelectionCount = 0;
@@ -933,6 +1003,7 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 	}
 
 	gReplay.HasLastWrittenFrameState = true;
+	gReplay.LastWrittenFrameNumber = capture.FrameState.FrameNumber;
 	gReplay.LastRecordedTacticalPos = capture.FrameState.TacticalPos;
 	gReplay.LastRecordedSelectionCount = capture.FrameState.SelectedObjectCount;
 	gReplay.LastRecordedSelectionCRC = capture.FrameState.SelectedObjectCRC;
@@ -1027,6 +1098,27 @@ bool WriteReplayEndOfStreamMarker()
 	FrameRecordHeader marker {};
 	marker.FrameNumber = -1;
 	return WriteRaw(&marker, sizeof(marker));
+}
+
+// Seek back into the header and stamp the final frame count. A recording that never reaches this
+// keeps TotalFrames == 0, which is what lets the client warn that a replay is truncated.
+bool WriteRecordedTotalFramesToHeader()
+{
+	if (gReplay.ReplayFile == INVALID_HANDLE_VALUE)
+		return false;
+
+	const LONG headerOffset = static_cast<LONG>(offsetof(ReplayHeader, TotalFrames));
+	if (SetFilePointer(gReplay.ReplayFile, headerOffset, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
+		return false;
+
+	const uint32_t totalFrames = static_cast<uint32_t>(std::max(0, gReplay.LastWrittenFrameNumber));
+
+	DWORD bytesWritten = 0;
+	const bool ok = WriteFile(gReplay.ReplayFile, &totalFrames, sizeof(totalFrames), &bytesWritten, nullptr) != FALSE
+		&& bytesWritten == sizeof(totalFrames);
+
+	SetFilePointer(gReplay.ReplayFile, 0, nullptr, FILE_END);
+	return ok;
 }
 
 bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
@@ -1203,11 +1295,47 @@ void StopReplaySystem()
 	if (gReplay.Recording)
 	{
 		FlushPendingRecordedFramesThrough(std::numeric_limits<int>::max(), 0);
-		if (gReplay.ReplayFile != INVALID_HANDLE_VALUE && !WriteReplayEndOfStreamMarker())
-			Debug::Log("[Replay] Failed to write replay end-of-stream marker.\n");
+		if (gReplay.ReplayFile != INVALID_HANDLE_VALUE)
+		{
+			if (!WriteReplayEndOfStreamMarker())
+				Debug::Log("[Replay] Failed to write replay end-of-stream marker.\n");
+
+			if (!WriteRecordedTotalFramesToHeader())
+				Debug::Log("[Replay] Failed to stamp the total frame count into the replay header.\n");
+		}
 	}
 
 	AbortReplaySystem();
+}
+
+// Pins the camera to the recorded position. Called every frame during playback, not just on the
+// frames that carry a position, because the recording only stores one when it changed.
+//
+// Mirrors the built-in replay viewport restore (sub_6D6000). Writing TacticalPos alone is not
+// enough: TacticalClass::Update overwrites it from TacticalCoord1 every frame, and Draw keys off
+// Redrawing/TacticalCoord1 to decide on a full repaint.
+void ApplyLockedViewport()
+{
+	if (!gReplay.LockViewport || !gReplay.HasLockedViewportPos || !TacticalClass::Instance)
+		return;
+
+	auto* tc = TacticalClass::Instance;
+	const Point2D& target = gReplay.LockedViewportPos;
+
+	// Only touch the viewport when it has actually drifted. Forcing Redrawing every frame would
+	// mean a full-screen repaint every frame for no reason.
+	if (tc->TacticalCoord1.X == target.X && tc->TacticalCoord1.Y == target.Y)
+		return;
+
+	tc->TacticalCoord1 = target;
+	tc->TacticalCoord2 = target;
+
+	// sub_6D8B30: recalculates TacticalPos (top-left) and visible area.
+	static auto RecalcViewport
+		= reinterpret_cast<void(__thiscall*)(TacticalClass*)>(0x6D8B30);
+	RecalcViewport(tc);
+
+	tc->Redrawing = true;
 }
 
 void RestoreFrameState()
@@ -1216,6 +1344,10 @@ void RestoreFrameState()
 		return;
 
 	gReplay.ExpectedEventsThisFrame = 0;
+
+	// Re-assert before anything else, so the lock holds on frames that carry no record at all -
+	// which is most of them, since frames are only written when something changed.
+	ApplyLockedViewport();
 
 	if (!gReplay.HasPendingPlaybackFrame && !gReplay.PlaybackStreamEnded)
 	{
@@ -1257,23 +1389,14 @@ void RestoreFrameState()
 
 	gReplay.ExpectedEventsThisFrame = frameRecord.EventCountThisFrame;
 
-	if ((frameRecord.Flags & FrameRecordFlag_TacticalPos) != 0u
-		&& gReplay.LockViewport
-		&& TacticalClass::Instance)
+	if ((frameRecord.Flags & FrameRecordFlag_TacticalPos) != 0u)
 	{
-		// Mirrors the built-in replay viewport restore (sub_6D6000). Writing TacticalPos alone is
-		// not enough: TacticalClass::Update overwrites it from TacticalCoord1 every frame, and
-		// Draw keys off Redrawing/TacticalCoord1 to decide on a full repaint.
-		auto* tc = TacticalClass::Instance;
-		tc->TacticalCoord1 = frameRecord.TacticalPos;
-		tc->TacticalCoord2 = frameRecord.TacticalPos;
+		// Tracked even when the viewport is not locked, so that ticking the option mid-session
+		// would have something to snap to rather than waiting for the recorder's next scroll.
+		gReplay.LockedViewportPos = frameRecord.TacticalPos;
+		gReplay.HasLockedViewportPos = true;
 
-		// sub_6D8B30: recalculates TacticalPos (top-left) and visible area.
-		static auto RecalcViewport
-			= reinterpret_cast<void(__thiscall*)(TacticalClass*)>(0x6D8B30);
-		RecalcViewport(tc);
-
-		tc->Redrawing = true;
+		ApplyLockedViewport();
 	}
 
 	if ((frameRecord.Flags & FrameRecordFlag_Selection) != 0u)

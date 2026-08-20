@@ -106,6 +106,10 @@ public:
 
 	// Replay Options
 	bool EnableReplayRecording;
+	// Where a recording is written. Relative paths are resolved against the game directory and
+	// any missing directories are created. The client sets this per game so recordings do not
+	// overwrite each other.
+	char ReplayFileOut[MAX_PATH];
 	char ReplayFile[MAX_PATH];
 	bool ReplayShroudEnabled;
 	bool ReplayLockedViewport;
@@ -197,6 +201,7 @@ public:
 		, AutoSaveInterval { 7200 }
 		, NextAutoSaveNumber { 0 }
 		, EnableReplayRecording { false }
+		, ReplayFileOut { "replay.dat" }
 		, ReplayFile { "" }
 		, ReplayShroudEnabled { false }
 		, ReplayLockedViewport { true }

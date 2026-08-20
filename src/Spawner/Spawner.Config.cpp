@@ -63,6 +63,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		NextAutoSaveNumber = pINI->ReadInteger(pSettingsSection, "NextAutoSaveNumber", NextAutoSaveNumber);
 
 		EnableReplayRecording = pINI->ReadBool(pSettingsSection, "EnableReplayRecording", EnableReplayRecording);
+		/* ReplayFileOut  */ pINI->ReadString(pSettingsSection, "ReplayFileOut", ReplayFileOut, ReplayFileOut, sizeof(ReplayFileOut));
 		/* ReplayFile     */ pINI->ReadString(pSettingsSection, "ReplayFile", ReplayFile, ReplayFile, sizeof(ReplayFile));
 		ReplayShroudEnabled = pINI->ReadBool(pSettingsSection, "ReplayShroudEnabled", ReplayShroudEnabled);
 		ReplayLockedViewport = pINI->ReadBool(pSettingsSection, "ReplayLockedViewport", ReplayLockedViewport);
