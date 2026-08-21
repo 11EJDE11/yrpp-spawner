@@ -18,6 +18,7 @@
 */
 
 #include "ReplaySystem.h"
+#include "ReplayStream.h"
 
 #include <Spawner/Spawner.h>
 #include <Utilities/Debug.h>
@@ -53,6 +54,9 @@ namespace
 
 constexpr uint32_t REPLAY_MAGIC = 0x4A455259u;
 constexpr uint32_t REPLAY_VERSION = 1;
+// How often the compressed stream is given a decodable point. A recording cut short by a crash
+// loses at most this many frames - one second of play - and the cadence costs about 1% of ratio.
+constexpr int REPLAY_SYNC_FLUSH_FRAME_INTERVAL = 60;
 // Flush rarely; forced disk commits can stall the game thread.
 constexpr uint64_t REPLAY_FLUSH_INTERVAL_BYTES = 50ull * 1024 * 1024;
 constexpr const char* DEFAULT_RECORDING_PATH = "replay.dat";
@@ -181,9 +185,13 @@ struct ReplayRuntimeState
 	int PlaybackSpeedIndex = -1;
 
 	int ExpectedEventsThisFrame = 0;
-	uint64_t BytesSinceFlush = 0;
+	uint64_t BytesAtLastDiskFlush = 0;
+	int LastSyncFlushFrame = 0;
 
 	HANDLE ReplayFile = INVALID_HANDLE_VALUE;
+	// Only one of these is ever active: recording deflates, playback inflates.
+	Replay::DeflateWriter Writer;
+	Replay::InflateReader Reader;
 
 	char PlaybackPath[MAX_PATH] = { 0 };
 	std::deque<PendingRecordedFrameCapture> PendingFrameStates;
@@ -311,22 +319,43 @@ bool ReadRawFromHandle(HANDLE file, void* buffer, size_t size)
 
 bool WriteRaw(const void* data, size_t size)
 {
-	if (!WriteRawToHandle(gReplay.ReplayFile, data, size))
-		return false;
+	if (gReplay.Writer.IsActive())
+		return gReplay.Writer.Write(data, size);
 
-	gReplay.BytesSinceFlush += size;
-	if (gReplay.BytesSinceFlush >= REPLAY_FLUSH_INTERVAL_BYTES)
-	{
-		FlushFileBuffers(gReplay.ReplayFile);
-		gReplay.BytesSinceFlush = 0;
-	}
-
-	return true;
+	return WriteRawToHandle(gReplay.ReplayFile, data, size);
 }
 
 bool ReadRaw(void* buffer, size_t size)
 {
+	if (gReplay.Reader.IsActive())
+		return gReplay.Reader.Read(buffer, size);
+
 	return ReadRawFromHandle(gReplay.ReplayFile, buffer, size);
+}
+
+// Ends the current deflate block, so everything recorded up to now can be decoded without any of
+// the bytes that follow it. Called on a frame cadence rather than a byte one, because what
+// matters after a crash is how many frames of play survived, not how many bytes.
+void SyncFlushRecordingStream()
+{
+	if (!gReplay.Writer.IsActive())
+		return;
+
+	if (!gReplay.Writer.SyncFlush())
+	{
+		Debug::Log("[Replay] Failed to flush the replay stream; stopping the recording.\n");
+		AbortReplaySystem();
+		return;
+	}
+
+	// Committing to the disk itself is a separate, far more expensive question, so it stays on
+	// the same rare byte-count schedule it was on before.
+	const uint64_t written = gReplay.Writer.CompressedBytesWritten();
+	if (written - gReplay.BytesAtLastDiskFlush >= REPLAY_FLUSH_INTERVAL_BYTES)
+	{
+		FlushFileBuffers(gReplay.ReplayFile);
+		gReplay.BytesAtLastDiskFlush = written;
+	}
 }
 
 bool ReadRequiredFile(const char* fileName, std::vector<char>& content)
@@ -680,6 +709,9 @@ bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader)
 
 void CloseReplayFile()
 {
+	gReplay.Writer.Reset();
+	gReplay.Reader.Reset();
+
 	if (gReplay.ReplayFile != INVALID_HANDLE_VALUE)
 	{
 		FlushFileBuffers(gReplay.ReplayFile);
@@ -723,6 +755,17 @@ bool OpenRecordingReplayStream()
 		return false;
 
 	SetFilePointer(gReplay.ReplayFile, 0, nullptr, FILE_END);
+
+	// Everything from here on - and nothing before it - is deflated.
+	if (!gReplay.Writer.Start(gReplay.ReplayFile))
+	{
+		Debug::Log("[Replay] Failed to start the compressed replay stream.\n");
+		CloseReplayFile();
+		return false;
+	}
+
+	gReplay.BytesAtLastDiskFlush = 0;
+	gReplay.LastSyncFlushFrame = 0;
 	return true;
 }
 
@@ -771,6 +814,14 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 		return false;
 	}
 
+	// The frame stream is always deflated; the header and the two INIs above it never are.
+	if (!gReplay.Reader.Start(gReplay.ReplayFile))
+	{
+		Debug::Log("[Replay] Failed to start reading the compressed replay stream.\n");
+		CloseReplayFile();
+		return false;
+	}
+
 	return true;
 }
 
@@ -782,7 +833,8 @@ void ResetRuntimeFlagsForScenario()
 	gReplay.SpectatorView = false;
 	gReplay.PlaybackSpeedIndex = -1;
 	gReplay.ExpectedEventsThisFrame = 0;
-	gReplay.BytesSinceFlush = 0;
+	gReplay.BytesAtLastDiskFlush = 0;
+	gReplay.LastSyncFlushFrame = 0;
 	gReplay.PlayersMarkedLoaded = false;
 	gReplay.PendingFrameStates.clear();
 	gReplay.PendingSideChannelEvents.clear();
@@ -1318,6 +1370,11 @@ void StopReplaySystem()
 			if (!WriteReplayEndOfStreamMarker())
 				Debug::Log("[Replay] Failed to write replay end-of-stream marker.\n");
 
+			// The header stamp seeks to the start of the file, so the stream has to be terminated
+			// and fully written out first.
+			if (gReplay.Writer.IsActive() && !gReplay.Writer.Finish())
+				Debug::Log("[Replay] Failed to finish the compressed replay stream.\n");
+
 			if (!WriteRecordedTotalFramesToHeader())
 				Debug::Log("[Replay] Failed to stamp the total frame count into the replay header.\n");
 		}
@@ -1350,6 +1407,30 @@ void ApplyLockedViewport()
 	tc->Redrawing = true;
 }
 
+// Whether playback should show the whole map instead of the recording player's shroud.
+bool PlaybackWantsFullMapReveal()
+{
+	return gReplay.Playback && (!gReplay.ShroudEnabled || gReplay.SpectatorView);
+}
+
+// Revealing once at the start does not hold: the engine tracks "this player can see the whole
+// map" in HouseClass::Visionary, MapClass::Reveal is a no-op while that flag is set, and every
+// path that puts the shroud back clears it first - the scenario's own startup reshroud, spy
+// satellite loss, shroud crates, gap generators, spy infiltration and map triggers. Re-testing
+// the flag each frame therefore re-reveals exactly when something took the reveal away, and
+// costs a single byte compare on every other frame.
+void MaintainFullMapReveal()
+{
+	if (!PlaybackWantsFullMapReveal())
+		return;
+
+	HouseClass* const pPlayer = HouseClass::CurrentPlayer;
+	if (!pPlayer || pPlayer->Visionary)
+		return;
+
+	MapClass::Instance.Reveal(pPlayer);
+}
+
 void RestoreFrameState()
 {
 	if (!gReplay.Playback || !gReplay.RunPlayback)
@@ -1359,6 +1440,8 @@ void RestoreFrameState()
 
 	// Keep the viewport locked on frames without replay records.
 	ApplyLockedViewport();
+
+	MaintainFullMapReveal();
 
 	if (!gReplay.HasPendingPlaybackFrame && !gReplay.PlaybackStreamEnded)
 	{
@@ -1421,18 +1504,6 @@ void RestoreFrameState()
 	}
 
 	gReplay.HasPendingPlaybackFrame = false;
-	if (!gReplay.RunPlayback)
-		return;
-
-	// Reveal once at replay start when shroud is disabled or spectator view is active.
-	if ((!gReplay.ShroudEnabled || gReplay.SpectatorView) && Unsorted::CurrentFrame == 0)
-	{
-		for (const auto pHouse : HouseClass::Array)
-		{
-			if (pHouse)
-				MapClass::Instance.Reveal(pHouse);
-		}
-	}
 }
 
 // Record every event on this frame; playback filters non-gameplay events later.
@@ -1464,6 +1535,12 @@ void RecordEventsForCurrentFrame()
 				return;
 			}
 		}
+	}
+
+	if (Unsorted::CurrentFrame - gReplay.LastSyncFlushFrame >= REPLAY_SYNC_FLUSH_FRAME_INTERVAL)
+	{
+		gReplay.LastSyncFlushFrame = Unsorted::CurrentFrame;
+		SyncFlushRecordingStream();
 	}
 }
 
@@ -1712,8 +1789,18 @@ DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
 	return 0x52FDF9;
 }
 
-DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0x5)
+// The hooked instruction is Clear_Scenario's ten byte `mov [edx+214h], 1000000`, so the hook has
+// to claim all ten bytes; a 0x5 hook splits it and leaves the tail of the immediate behind as
+// garbage code. Syringe re-executes the reset after every hook at this address has run, but the
+// replay header records ScenarioClass::UniqueID, so apply it here as well to record the value the
+// game actually starts the scenario with. Returning 0 rather than 0x685663 is deliberate: Phobos
+// hooks this same address, and a non-zero return would skip the rest of the hook chain.
+DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
 {
+	auto* const pScenario = R->EDX<ScenarioClass*>();
+	if (pScenario)
+		pScenario->UniqueID = 1000000;
+
 	const auto* pConfig = GetConfig();
 	if (!pConfig)
 		return 0;
