@@ -106,21 +106,18 @@ public:
 
 	// Replay Options
 	bool EnableReplayRecording;
-	// Where a recording is written. Relative paths are resolved against the game directory and
-	// any missing directories are created. The client sets this per game so recordings do not
-	// overwrite each other.
+	// Where a recording is written; relative to the game directory, missing folders are created.
+	// The client sets this per game so recordings do not overwrite each other.
 	char ReplayFileOut[MAX_PATH];
 	char ReplayFile[MAX_PATH];
 	bool ReplayShroudEnabled;
 	bool ReplayLockedViewport;
 	bool ReplaySelectUnits;
-	// Watch playback as an observer: reveals the whole map and makes cloaked/disguised units,
-	// radar blips and pips visible. Off by default so playback stays from the recorded player's
-	// point of view, which is what most viewers expect.
+	// Watch as an observer: reveals the whole map and makes cloaked/disguised units and radar blips
+	// visible. Off by default, so playback stays from the recorded player's point of view.
 	bool ReplaySpectator;
-	// Playback-only: whether recorded chat, beacons and taunts get reproduced. Recording of this
-	// data is unconditional whenever a replay is being recorded - there is no matching record-side
-	// option, only this playback-side one.
+	// Playback-only: whether recorded chat, beacons and taunts get reproduced. Recording them is
+	// unconditional - there is no record-side option.
 	bool ReplayShowChatAndBeacons;
 
 	// Scenario Options

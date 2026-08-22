@@ -26,6 +26,7 @@
 #include <Ext/INIClass/Body.h>
 
 #include <BeaconManagerClass.h>
+#include <ColorScheme.h>
 #include <EventClass.h>
 #include <GameModeOptionsClass.h>
 #include <GameOptionsClass.h>
@@ -88,6 +89,9 @@ enum class SideChannelEventType : uint8_t
 constexpr size_t SIDECHANNEL_TEXT_LENGTH = 128; // matches BeaconClass::Text and comfortably fits chat
 constexpr size_t SIDECHANNEL_NAME_LENGTH = 24;
 constexpr int32_t SIDECHANNEL_MAX_EVENTS_PER_FRAME = 64; // sanity bound for playback parsing
+// BeaconManagerClass::Beacons is [8][3].
+constexpr int MAX_HOUSES = 8;
+constexpr int MAX_BEACON_SLOTS = 3;
 
 #pragma pack(push, 1)
 struct SideChannelRecord
@@ -149,6 +153,12 @@ struct FrameRecordHeader
 
 #pragma pack(pop)
 
+// Mirrored by hand in the client's ReplayGame.cs and in docs/replay-format.md. A size change is
+// silent on the reading side, so pin it here and make the mismatch a build error instead.
+static_assert(sizeof(ReplayHeader) == 1416, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
+static_assert(sizeof(SideChannelRecord) == 329, "SideChannelRecord layout changed; update docs/replay-format.md");
+
 struct PlaybackFrameRecord
 {
 	int32_t FrameNumber = 0;
@@ -172,7 +182,6 @@ struct ReplayRuntimeState
 {
 	bool Recording = false;
 	bool Playback = false;
-	bool RunPlayback = true;
 	bool InitRandomHandled = false;
 	bool PlayersMarkedLoaded = false;
 
@@ -235,7 +244,6 @@ const char* GetRecordingOutputPath()
 	return DEFAULT_RECORDING_PATH;
 }
 
-// Create missing parent folders for the replay output path.
 void EnsureParentDirectoryExists(const char* path)
 {
 	char buffer[MAX_PATH];
@@ -348,8 +356,7 @@ void SyncFlushRecordingStream()
 		return;
 	}
 
-	// Committing to the disk itself is a separate, far more expensive question, so it stays on
-	// the same rare byte-count schedule it was on before.
+	// Committing to the disk is far more expensive, so it stays on a rare byte-count schedule.
 	const uint64_t written = gReplay.Writer.CompressedBytesWritten();
 	if (written - gReplay.BytesAtLastDiskFlush >= REPLAY_FLUSH_INTERVAL_BYTES)
 	{
@@ -738,21 +745,11 @@ bool OpenRecordingReplayStream()
 
 	if (gReplay.ReplayFile == INVALID_HANDLE_VALUE)
 	{
-		EnsureParentDirectoryExists(outputPath);
-
-		gReplay.ReplayFile = CreateFileA(
-			outputPath,
-			GENERIC_WRITE,
-			FILE_SHARE_READ,
-			nullptr,
-			CREATE_ALWAYS,
-			FILE_ATTRIBUTE_NORMAL,
-			nullptr
-		);
-	}
-
-	if (gReplay.ReplayFile == INVALID_HANDLE_VALUE)
+		// WriteInitialReplayFile has just written this file. Recreating it would start the deflate
+		// stream at offset 0 and produce a headerless file no reader can parse.
+		Debug::Log("[Replay] Could not reopen the replay file for recording: %s\n", outputPath);
 		return false;
+	}
 
 	SetFilePointer(gReplay.ReplayFile, 0, nullptr, FILE_END);
 
@@ -829,7 +826,6 @@ void ResetRuntimeFlagsForScenario()
 {
 	gReplay.Recording = false;
 	gReplay.Playback = false;
-	gReplay.RunPlayback = true;
 	gReplay.SpectatorView = false;
 	gReplay.PlaybackSpeedIndex = -1;
 	gReplay.ExpectedEventsThisFrame = 0;
@@ -926,24 +922,32 @@ void RemoveDoListEvents(Predicate shouldRemove)
 	if (originalCount <= 0)
 		return;
 
-	std::vector<EventClass> preservedEvents;
-	preservedEvents.reserve(originalCount);
-
+	// DoList holds up to MAX_EVENTS * 128 events of 111 bytes, and playback runs this every frame
+	// with usually nothing to remove - so scan first, and only pay for the copy when needed.
 	bool removedAny = false;
 	for (int i = 0; i < originalCount; ++i)
 	{
-		const auto& event = doList[i];
-		if (shouldRemove(event))
+		if (shouldRemove(doList[i]))
 		{
 			removedAny = true;
-			continue;
+			break;
 		}
-
-		preservedEvents.push_back(event);
 	}
 
 	if (!removedAny)
 		return;
+
+	// Reused across frames so the copy does not reallocate on every rebuild.
+	static std::vector<EventClass> preservedEvents;
+	preservedEvents.clear();
+	preservedEvents.reserve(static_cast<size_t>(originalCount));
+
+	for (int i = 0; i < originalCount; ++i)
+	{
+		const auto& event = doList[i];
+		if (!shouldRemove(event))
+			preservedEvents.push_back(event);
+	}
 
 	doList.Init();
 	for (const auto& event : preservedEvents)
@@ -1003,7 +1007,6 @@ std::vector<uint32_t> GetSelectedObjectIDs()
 	return ids;
 }
 
-// Compares against the live selection without building a temporary for it.
 bool IsCurrentSelection(const std::vector<uint32_t>& ids)
 {
 	auto& currentObjects = ObjectClass::CurrentObjects;
@@ -1079,10 +1082,13 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 			return false;
 		}
 
-		for (const auto uniqueID : capture.SelectedObjectIDs)
+		// One call for the whole block: every WriteRaw is a tdefl_compress call, and box-selecting
+		// a hundred units would otherwise mean a hundred of them on that frame.
+		if (!capture.SelectedObjectIDs.empty()
+			&& !WriteRaw(capture.SelectedObjectIDs.data(),
+				capture.SelectedObjectIDs.size() * sizeof(uint32_t)))
 		{
-			if (!WriteRaw(&uniqueID, sizeof(uniqueID)))
-				return false;
+			return false;
 		}
 	}
 
@@ -1194,6 +1200,44 @@ bool WriteRecordedTotalFramesToHeader()
 	return ok;
 }
 
+// Replays are shared, so records off disk are untrusted: the text arrays need not be terminated
+// and House/Aux index straight into engine arrays. False means the record cannot be made safe.
+// Taunts need no bound - Taunts_752B70 rejects out-of-range commands itself.
+bool SanitizeSideChannelRecord(SideChannelRecord& record)
+{
+	record.SenderName[SIDECHANNEL_NAME_LENGTH - 1] = L'\0';
+	record.Text[SIDECHANNEL_TEXT_LENGTH - 1] = L'\0';
+
+	switch (static_cast<SideChannelEventType>(record.Type))
+	{
+	case SideChannelEventType::ChatMessage:
+		if (record.House < 0 || record.House >= MAX_HOUSES)
+			return false;
+
+		// Indexes ColorScheme::Array in TextLabelClass; fall back to the first scheme.
+		if (record.Aux < 0 || record.Aux >= ColorScheme::Array.Count)
+			record.Aux = 0;
+
+		return true;
+
+	case SideChannelEventType::BeaconPlace:
+		// -1 asks the engine to pick a free slot, which is how a local placement is recorded.
+		return record.House >= 0 && record.House < MAX_HOUSES
+			&& record.Aux >= -1 && record.Aux < MAX_BEACON_SLOTS;
+
+	case SideChannelEventType::BeaconDelete:
+	case SideChannelEventType::BeaconText:
+		return record.House >= 0 && record.House < MAX_HOUSES
+			&& record.Aux >= 0 && record.Aux < MAX_BEACON_SLOTS;
+
+	case SideChannelEventType::Taunt:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
 bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 {
 	FrameRecordHeader header {};
@@ -1236,10 +1280,11 @@ bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 			return false;
 
 		record.SelectedObjectIDs.resize(static_cast<size_t>(record.SelectedObjectCount), 0u);
-		for (int i = 0; i < record.SelectedObjectCount; ++i)
+		if (!record.SelectedObjectIDs.empty()
+			&& !ReadRaw(record.SelectedObjectIDs.data(),
+				record.SelectedObjectIDs.size() * sizeof(uint32_t)))
 		{
-			if (!ReadRaw(&record.SelectedObjectIDs[i], sizeof(uint32_t)))
-				return false;
+			return false;
 		}
 	}
 
@@ -1252,11 +1297,19 @@ bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 		if (sideChannelCount < 0 || sideChannelCount > SIDECHANNEL_MAX_EVENTS_PER_FRAME)
 			return false;
 
-		record.SideChannelEvents.resize(static_cast<size_t>(sideChannelCount));
+		// Read every record to keep the stream aligned, but keep only the ones that survive
+		// validation - the rest would index out of an engine array or run off a text buffer.
+		record.SideChannelEvents.reserve(static_cast<size_t>(sideChannelCount));
 		for (int i = 0; i < sideChannelCount; ++i)
 		{
-			if (!ReadRaw(&record.SideChannelEvents[i], sizeof(SideChannelRecord)))
+			SideChannelRecord sideChannelRecord {};
+			if (!ReadRaw(&sideChannelRecord, sizeof(SideChannelRecord)))
 				return false;
+
+			if (SanitizeSideChannelRecord(sideChannelRecord))
+				record.SideChannelEvents.push_back(sideChannelRecord);
+			else
+				Debug::Log("[Replay] Discarded an out-of-range side-channel record during playback.\n");
 		}
 	}
 
@@ -1269,7 +1322,6 @@ void ApplyPlaybackSelection(const PlaybackFrameRecord& frameRecord)
 	if (frameRecord.SelectedObjectCount < 0 || frameRecord.SelectedObjectCount > maxSelectionCount)
 	{
 		Debug::Log("[Replay] Invalid selected object count (%d) during playback.\n", frameRecord.SelectedObjectCount);
-		gReplay.RunPlayback = false;
 		StopReplaySystem();
 		return;
 	}
@@ -1413,12 +1465,9 @@ bool PlaybackWantsFullMapReveal()
 	return gReplay.Playback && (!gReplay.ShroudEnabled || gReplay.SpectatorView);
 }
 
-// Revealing once at the start does not hold: the engine tracks "this player can see the whole
-// map" in HouseClass::Visionary, MapClass::Reveal is a no-op while that flag is set, and every
-// path that puts the shroud back clears it first - the scenario's own startup reshroud, spy
-// satellite loss, shroud crates, gap generators, spy infiltration and map triggers. Re-testing
-// the flag each frame therefore re-reveals exactly when something took the reveal away, and
-// costs a single byte compare on every other frame.
+// Revealing once does not hold. HouseClass::Visionary gates MapClass::Reveal, and every path that
+// reshrouds - startup, spy satellite loss, crates, gap generators, triggers - clears it first, so
+// re-testing the flag each frame re-reveals exactly when something took the reveal away.
 void MaintainFullMapReveal()
 {
 	if (!PlaybackWantsFullMapReveal())
@@ -1433,7 +1482,7 @@ void MaintainFullMapReveal()
 
 void RestoreFrameState()
 {
-	if (!gReplay.Playback || !gReplay.RunPlayback)
+	if (!gReplay.Playback)
 		return;
 
 	gReplay.ExpectedEventsThisFrame = 0;
@@ -1449,7 +1498,6 @@ void RestoreFrameState()
 		if (!ReadNextPlaybackFrameRecord(nextRecord))
 		{
 			Debug::Log("[Replay] Failed to read frame state during playback.\n");
-			gReplay.RunPlayback = false;
 			StopReplaySystem();
 			return;
 		}
@@ -1473,7 +1521,6 @@ void RestoreFrameState()
 	{
 		Debug::Log("[Replay] Frame mismatch during playback (expected %u got %d).\n",
 			Unsorted::CurrentFrame, frameRecord.FrameNumber);
-		gReplay.RunPlayback = false;
 		StopReplaySystem();
 		return;
 	}
@@ -1552,7 +1599,7 @@ void PushSideChannelEvent(SideChannelRecord&& record)
 
 void PlaybackFrameEvents()
 {
-	if (!gReplay.RunPlayback || !gReplay.Playback)
+	if (!gReplay.Playback)
 		return;
 
 	const int eventsToReplay = gReplay.ExpectedEventsThisFrame;
@@ -1560,13 +1607,12 @@ void PlaybackFrameEvents()
 
 	for (int i = 0; i < eventsToReplay; ++i)
 	{
-		char eventBuffer[sizeof(EventClass)] = { 0 };
+		alignas(EventClass) char eventBuffer[sizeof(EventClass)] = { 0 };
 		EventClass* replayEvent = reinterpret_cast<EventClass*>(eventBuffer);
 
 		if (!ReadRaw(replayEvent, sizeof(EventClass)))
 		{
 			Debug::Log("[Replay] Event stream ended unexpectedly during playback.\n");
-			gReplay.RunPlayback = false;
 			StopReplaySystem();
 			return;
 		}
@@ -1580,7 +1626,6 @@ void PlaybackFrameEvents()
 		if (!EventClass::DoList.Add(*replayEvent))
 		{
 			Debug::Log("[Replay] DoList is full while injecting replay events.\n");
-			gReplay.RunPlayback = false;
 			StopReplaySystem();
 			return;
 		}
@@ -1622,7 +1667,6 @@ void StartReplayPlayback(const char* replayPath)
 {
 	AbortReplaySystem();
 	gReplay.Playback = true;
-	gReplay.RunPlayback = true;
 
 	gReplay.PlaybackSpeedIndex = std::clamp(GameOptionsClass::Instance.GameSpeed, 0, MAX_GAME_SPEED_INDEX);
 
@@ -1656,8 +1700,12 @@ void StartReplayPlayback(const char* replayPath)
 
 	if (!OpenPlaybackReplayStream(gReplay.PlaybackPath))
 	{
-		Debug::Log("[Replay] Failed to open replay file for playback: %s\n", gReplay.PlaybackPath);
 		StopReplaySystem();
+
+		// StartScenario already skipped CreateConnections because ReplayFile was set, so there is no
+		// live session to fall back to - carrying on leaves a game that can never advance a frame.
+		Debug::FatalErrorAndExit("[Replay] Failed to open replay file for playback: %s",
+			gReplay.PlaybackPath);
 	}
 }
 
@@ -1789,12 +1837,12 @@ DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
 	return 0x52FDF9;
 }
 
-// The hooked instruction is Clear_Scenario's ten byte `mov [edx+214h], 1000000`, so the hook has
-// to claim all ten bytes; a 0x5 hook splits it and leaves the tail of the immediate behind as
-// garbage code. Syringe re-executes the reset after every hook at this address has run, but the
-// replay header records ScenarioClass::UniqueID, so apply it here as well to record the value the
-// game actually starts the scenario with. Returning 0 rather than 0x685663 is deliberate: Phobos
-// hooks this same address, and a non-zero return would skip the rest of the hook chain.
+// Hooks Clear_Scenario's ten byte `mov [edx+214h], 1000000`; a 0x5 hook would split the immediate.
+// Return 0, not 0x685663 - Phobos hooks this address too.
+//
+// Syringe re-executes that reset after every hook here has run, so this body still sees the
+// previous scenario's counter and applies the reset by hand for BuildReplayHeader's benefit.
+// Nothing written to UniqueID here survives; the playback restore is in the 0x686B6A hook below.
 DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
 {
 	auto* const pScenario = R->EDX<ScenarioClass*>();
@@ -1822,6 +1870,20 @@ DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
 	return 0;
 }
 
+// Read_Scenario_INI, just after its `call Clear_Scenario`. Order is
+// Select_Game -> Init_Random -> ... -> Read_Scenario_INI -> Clear_Scenario, so this is the first
+// point past the UniqueID reset and before any object exists - every earlier restore is undone.
+// It has to be pinned because object UniqueIDs come from ++ScenarioClass::UniqueID and the
+// recorded selection is stored by them. The hooked `cmp Session, ebx` is also the `jnz` target
+// that skips Clear_Scenario, so both paths are covered.
+DEFINE_HOOK(0x686B6A, ReadScenarioINI_ReplayApplyState, 0x6)
+{
+	if (gReplay.Playback)
+		ApplyPlaybackInitialState();
+
+	return 0;
+}
+
 // Capture visible replay state before dialog handling can skip the normal replay path.
 DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 {
@@ -1830,7 +1892,7 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 		RecordFrameState();
 	}
 
-	if (gReplay.Playback && gReplay.RunPlayback)
+	if (gReplay.Playback)
 	{
 		ApplyReplayTimingFromCurrentGameSpeed();
 		RestoreFrameState();

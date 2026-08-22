@@ -370,10 +370,8 @@ bool Spawner::StartScenario(const char* pScenarioName)
 			Game::ChatMask[7] = false;
 		}
 
-		// Observer mode is opt-in for playback (ReplaySpectator). Forcing it on every replay gave
-		// the viewer the spectator sidebar and full visibility whether they asked for it or not,
-		// and made the local player an observer while still alive - which is exactly the state the
-		// hardened build's anti-cheat looks for.
+		// Opt-in: forcing observer mode on every replay makes the local player an observer while
+		// still alive, which is exactly the state the hardened build's anti-cheat looks for.
 		if (isReplayPlayback && Spawner::Config->ReplaySpectator
 			&& !Spawner::Config->IsCampaign && HouseClass::CurrentPlayer)
 		{
