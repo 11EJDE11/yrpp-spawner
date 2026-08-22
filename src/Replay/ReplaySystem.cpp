@@ -92,6 +92,8 @@ constexpr int32_t SIDECHANNEL_MAX_EVENTS_PER_FRAME = 64; // sanity bound for pla
 // BeaconManagerClass::Beacons is [8][3].
 constexpr int MAX_HOUSES = 8;
 constexpr int MAX_BEACON_SLOTS = 3;
+// MapClass_Array is a fixed 512x512 cell grid (0x40000 entries); 256 leptons per cell.
+constexpr int32_t MAX_MAP_LEPTON_COORD = 512 * 256;
 
 #pragma pack(push, 1)
 struct SideChannelRecord
@@ -1222,8 +1224,14 @@ bool SanitizeSideChannelRecord(SideChannelRecord& record)
 
 	case SideChannelEventType::BeaconPlace:
 		// -1 asks the engine to pick a free slot, which is how a local placement is recorded.
-		return record.House >= 0 && record.House < MAX_HOUSES
-			&& record.Aux >= -1 && record.Aux < MAX_BEACON_SLOTS;
+		if (record.House < 0 || record.House >= MAX_HOUSES
+			|| record.Aux < -1 || record.Aux >= MAX_BEACON_SLOTS)
+		{
+			return false;
+		}
+
+		return record.Coord.X >= 0 && record.Coord.X < MAX_MAP_LEPTON_COORD
+			&& record.Coord.Y >= 0 && record.Coord.Y < MAX_MAP_LEPTON_COORD;
 
 	case SideChannelEventType::BeaconDelete:
 	case SideChannelEventType::BeaconText:
@@ -1804,7 +1812,7 @@ DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
 {
 	if (gReplay.InitRandomHandled)
 	{
-		if (ReplaySystem::IsPlaybackRequested())
+		if (ReplaySystem::IsPlaybackRequested() && gReplay.HasPlaybackHeader)
 		{
 			ApplyPlaybackInitialState();
 			R->EAX(Game::Seed);
@@ -1884,26 +1892,25 @@ DEFINE_HOOK(0x686B6A, ReadScenarioINI_ReplayApplyState, 0x6)
 	return 0;
 }
 
-// MapClass::Reset_Shroud (thiscall, stack: +0 retaddr, +4 house). Gameplay reshrouds the local
-// player constantly during a normal match - gap generators, spy satellite loss, shroud crates,
-// map triggers - and whenever it targets PlayerPtr its body is a full map-cell walk plus a forced
-// full-screen redraw and radar rebuild. During full-map-reveal playback (ReplayShroudEnabled=false
-// or spectator view) MaintainFullMapReveal notices the resulting Visionary==false on the very next
-// frame and immediately re-runs the equally expensive Reveal (0x577D90), so every reshroud event
-// in the recording pays for two full-map passes - the intermittent CPU spikes during playback.
-// Skipping the reshroud for the local player in that mode removes both: the map simply never
-// leaves "revealed", which is what the setting asks for anyway. Other houses' cheap MapIsClear
+// MapClass::Reset_Shroud (thiscall; EAX holds `house` by this point, from the `mov eax,
+// [esp+house]` at the function's true entry, 0x577AB0). Gameplay reshrouds the local player
+// constantly during a normal match - gap generators, spy satellite loss, shroud crates, map
+// triggers - and whenever it targets PlayerPtr (or a null house, which it treats the same way
+// after logging a debug warning) its body is a full map-cell walk plus a forced full-screen redraw
+// and radar rebuild. During full-map-reveal playback (ReplayShroudEnabled=false or spectator view)
+// MaintainFullMapReveal notices the resulting Visionary==false on the very next frame and
+// immediately re-runs the equally expensive Reveal (0x577D90), so every reshroud event in the
+// recording pays for two full-map passes - the intermittent CPU spikes during playback. Skipping
+// the reshroud for the local player in that mode removes both: the map simply never leaves
+// "revealed", which is what the setting asks for anyway. Other houses' cheap MapIsClear
 // bookkeeping (the only work this function does for house != PlayerPtr) is left untouched.
-DEFINE_HOOK(0x577AB0, MapClass_ResetShroud_SkipDuringFullRevealPlayback, 0x8)
+DEFINE_HOOK(0x577AB8, MapClass_ResetShroud_SkipDuringFullRevealPlayback, 0x2)
 {
+	HouseClass* const house = R->EAX<HouseClass*>();
 	if (gReplay.Playback && PlaybackWantsFullMapReveal()
-		&& R->Stack<HouseClass*>(0x4) == HouseClass::CurrentPlayer)
+		&& (house == HouseClass::CurrentPlayer || house == nullptr))
 	{
-		// Emulate the function's own `retn 4` without running its body: pop the return address
-		// and the stack argument, then resume the caller there.
-		const DWORD returnAddress = R->Stack<DWORD>(0x0);
-		R->ESP(R->ESP() + 0x8);
-		return returnAddress;
+		return 0x577B9F;
 	}
 
 	return 0;
@@ -1983,6 +1990,17 @@ DEFINE_HOOK(0x6BEC60, Game_Exit_FlushReplayBuffers, 0x5)
 // fine until the first gap generator goes up, and recurring from then on as power fluctuates.
 // Skip the function outright for the local player during full-map-reveal playback, so nothing can
 // re-shroud PlayerPtr's view in the first place.
+//
+// This also skips the bookkeeping Create_Gap does for the player's own or an allied gap generator
+// (the field_13C_gapgen coverage counter used by radar's jam-radius check, plus the unconditional
+// RadarClass_Update_Map_/Flag_To_Redraw at the end) - not just the enemy-shroud effect this hook
+// exists to suppress. Accepted deliberately: in full-map-reveal playback that bookkeeping only
+// feeds a jam-radius indicator nobody is looking at with the whole map already shown, redraw state
+// still catches up on the next unrelated frame, and a per-cell hook that preserves it would need
+// to duplicate this function's own ally checks from a raw, pre-prologue entry point - meaningfully
+// more risk for a cosmetic gap. Revisit with a hook inside the loop (skip only the write block
+// gated on "not allied with PlayerPtr", landing on its own existing skip target loc_6FB3C1) if that
+// indicator turns out to matter.
 DEFINE_HOOK(0x6FB170, TechnoClass_CreateGap_SkipDuringFullRevealPlayback, 0x5)
 {
 	if (gReplay.Playback && PlaybackWantsFullMapReveal())
@@ -2002,24 +2020,19 @@ DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 	return 0;
 }
 
-// Mark all players loaded during replay startup, and skip SessionClass::Callback entirely.
-// This is the function's true entry point (`mov al, Debug_Map_DEBUGDEBUG`, 5 bytes, before any of
-// its stack frame is set up), which is why 0x69B156 - the function's own bare `retn 4` - is a safe
-// jump target here: the raw [retAddr][arg] stack this hook sees is exactly what `retn 4` expects.
-// Every progress-screen tick during multiplayer scenario load runs through here; once player 0's
-// progress crosses 99.95% the original code broadcasts a "guaranteed progress" message to every
-// other player over IPX/NullModem, then busy-waits (Sleep(20) in a loop) up to 240 SystemTimerClass
-// ticks - about 4 seconds - for the send queue to drain below 5. The broadcast loop is gated on
-// Players.ActiveCount > 1, and playback has no real peer to drain the queue, so with more than one
-// player in the recording it always burns the full ~4 seconds - the load-in stall right after the
-// progress bar reaches 100%. Skipping the function outright removes both the pointless network
-// chatter and the stall; progress is forced to 100 directly below instead of through this callback.
+// Mark all players loaded during replay startup. This is SessionClass::Callback's true entry
+// point, but the function is also the generic progress-tick/pump callback threaded through the
+// entire scenario-load pipeline (Read_Scenario_INI, Init_Theaters, MapGeneratorClass_*, Wait_For_
+// Players, and more - confirmed via its xrefs), not just the multiplayer wait screen. An earlier
+// version of this hook skipped the function outright during playback, which silently dropped its
+// progress-bar-fill call (ProgressScreenClass_callback_643C50) for all of those, not only the one
+// screen the fix targeted. This hook no longer skips anything - it only forces progress to 100 the
+// first time playback sees this address, so the bar shows complete immediately instead of
+// animating; the function still runs normally on every call. The actual multiplayer-load stall is
+// removed surgically below, at the one branch responsible for it.
 DEFINE_HOOK(0x69AE90, WaitForPlayers_ReplayMarkOthersLoaded, 0x5)
 {
-	if (!gReplay.Playback)
-		return 0;
-
-	if (!gReplay.PlayersMarkedLoaded)
+	if (gReplay.Playback && !gReplay.PlayersMarkedLoaded)
 	{
 		gReplay.PlayersMarkedLoaded = true;
 		for (int i = 0; i < 8; ++i)
@@ -2028,7 +2041,28 @@ DEFINE_HOOK(0x69AE90, WaitForPlayers_ReplayMarkOthersLoaded, 0x5)
 		}
 	}
 
-	return 0x69B156;
+	return 0;
+}
+
+// SessionClass::Callback, at `cmp dword ptr [this+284Ch], 1` (loc_69AF0F) - the check the function
+// itself uses to decide whether to run its per-player network-sync dance at all. offset 0x284C is
+// SessionClass::Instance.StartSpots.Count (DynamicVectorClass<NodeNameType*>: vtable +0, Items +4,
+// Capacity +8, IsAllocated +0xC, Count +0x10 -> 0x283C + 0x10 = 0x284C; StartSpots sits at 0x283C
+// per YRpp/SessionClass.h, confirmed by the next field, unknown_2854, landing exactly one vector
+// later). When Count == 1 it jumps straight to 0x69B14E and skips the whole dance; otherwise, once
+// player 0's progress crosses 99.95%, it broadcasts a "guaranteed progress" message to every other
+// player over IPX/NullModem and busy-waits (Sleep(20) in a loop) up to 240 SystemTimerClass ticks -
+// about 4 seconds - for the send queue to drain below 5. Playback has no real peer to drain that
+// queue, and the broadcast loop only sends anything when Players.ActiveCount > 1, so a multi-player
+// replay's session takes the "do the dance" path and burns the full ~4 seconds - the load-in stall
+// right after the progress bar reaches 100%. Forcing the skip-to-0x69B14E branch the game already
+// takes for StartSpots.Count == 1 sessions removes exactly that stall.
+DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
+{
+	if (gReplay.Playback)
+		return 0x69B14E;
+
+	return 0;
 }
 
 // --- Side-channel recording taps --------------------------------------------------------------
