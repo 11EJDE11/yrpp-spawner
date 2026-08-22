@@ -49,12 +49,16 @@ plain seek and read. That is what the client does, and why it needs no decompres
 checks that `SpawnIniSize + SpawnMapSize` actually fits the file before seeking past them. There is
 no checksum.
 
+`ReplaySystem.cpp` static-asserts `sizeof(ReplayHeader) == 1416`, `sizeof(FrameRecordHeader) == 12`
+and `sizeof(SideChannelRecord) == 329`, so a layout change here fails the build rather than
+silently misparsing on the client side. The asserts cannot see `ReplayGame.cs` - the message
+points at it, but keeping the two in step is still manual.
+
 ## Compression
 
 The frame records are a single raw deflate stream (RFC 1951, no zlib wrapper), produced by the
 vendored miniz in `src/Replay/miniz.h` and driven by `Replay::DeflateWriter` /
-`Replay::InflateReader` in `src/Replay/ReplayStream.{h,cpp}`. There is no uncompressed variant:
-the format has only ever shipped this way, so a reader that cannot inflate cannot read a replay.
+`Replay::InflateReader` in `src/Replay/ReplayStream.{h,cpp}`.
 
 The stream is sync-flushed every 60 recorded frames. A sync flush ends the current deflate block
 without resetting the dictionary, so everything written before it decodes on its own. That is what
@@ -108,6 +112,13 @@ rather than the deterministic event queue and so are reproduced directly rather 
 overloaded per type (colour scheme index for chat, beacon slot 0–2 for beacons, raw command byte
 for taunts).
 
+Replays get shared, so these records are treated as untrusted on read.
+`SanitizeSideChannelRecord` terminates `SenderName` and `Text` - the arrays are copied verbatim
+off disk and need not be - and range-checks `House` against `BeaconManagerClass::Beacons[8][3]`
+and `Aux` against the beacon slot count or `ColorScheme::Array`. Records that fail are still read,
+to keep the stream aligned, and then dropped. Taunts need no bound of their own:
+`Taunts_752B70` rejects out-of-range commands before it touches a buffer.
+
 ## Relevant spawn.ini keys
 
 All in `[Settings]`. Recording and playback are mutually exclusive — a non-empty `ReplayFile` wins.
@@ -120,7 +131,7 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayShroudEnabled` | `false` | Keep the recording player's shroud instead of revealing the map. |
 | `ReplayLockedViewport` | `true` | Pin the camera to the recorded position. |
 | `ReplaySelectUnits` | `true` | Reproduce the recorded unit selection. |
-| `ReplaySpectator` | `false` | Watch as an observer. Suppressed when `IsSinglePlayer`. |
+| `ReplaySpectator` | `false` | Watch as an observer. Suppressed when `IsCampaign`. |
 | `ReplayShowChatAndBeacons` | `true` | Playback only; recording of this data is unconditional. |
 
 Playback also overrides `Seed`, `GameSpeed`, `Protocol`, `FrameSendRate` and `MaxAhead` from the
