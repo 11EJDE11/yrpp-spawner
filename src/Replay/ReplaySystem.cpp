@@ -185,7 +185,9 @@ struct ReplayRuntimeState
 	bool Recording = false;
 	bool Playback = false;
 	bool InitRandomHandled = false;
-	bool PlayersMarkedLoaded = false;
+	// Set once the load-progress bar has been force-completed for this scenario (playback,
+	// skirmish, or campaign) instead of animating. See WaitForPlayers_SkipProgressAnimation.
+	bool ProgressBarForcedComplete = false;
 
 	bool ShroudEnabled = false;
 	bool LockViewport = true;
@@ -833,7 +835,7 @@ void ResetRuntimeFlagsForScenario()
 	gReplay.ExpectedEventsThisFrame = 0;
 	gReplay.BytesAtLastDiskFlush = 0;
 	gReplay.LastSyncFlushFrame = 0;
-	gReplay.PlayersMarkedLoaded = false;
+	gReplay.ProgressBarForcedComplete = false;
 	gReplay.PendingFrameStates.clear();
 	gReplay.PendingSideChannelEvents.clear();
 	gReplay.HasPlaybackHeader = false;
@@ -1904,7 +1906,16 @@ DEFINE_HOOK(0x686B6A, ReadScenarioINI_ReplayApplyState, 0x6)
 // the reshroud for the local player in that mode removes both: the map simply never leaves
 // "revealed", which is what the setting asks for anyway. Other houses' cheap MapIsClear
 // bookkeeping (the only work this function does for house != PlayerPtr) is left untouched.
-DEFINE_HOOK(0x577AB8, MapClass_ResetShroud_SkipDuringFullRevealPlayback, 0x2)
+//
+// Size is 6, not 2: Syringe's injected jump needs a full 5 bytes regardless of what's declared
+// here, and a too-small size just means it silently overwrites bytes beyond what it was told about
+// (this exact mistake, on a different hook, produced a same-session access-violation crash 5 bytes
+// past its declared 3-byte hook). 2 only covers `cmp eax, ebx`; 6 is the next instruction-aligned
+// boundary at or past 5, covering `cmp eax, ebx; mov esi, ecx; jz loc_577AD0` as a whole (ending
+// exactly at 0x577ABE, the start of `mov ecx, [eax+30h]`) - confirmed none of those three
+// instructions are themselves a jump target from elsewhere in the function, so claiming them is
+// safe.
+DEFINE_HOOK(0x577AB8, MapClass_ResetShroud_SkipDuringFullRevealPlayback, 0x6)
 {
 	HouseClass* const house = R->EAX<HouseClass*>();
 	if (gReplay.Playback && PlaybackWantsFullMapReveal()
@@ -2020,21 +2031,33 @@ DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 	return 0;
 }
 
-// Mark all players loaded during replay startup. This is SessionClass::Callback's true entry
-// point, but the function is also the generic progress-tick/pump callback threaded through the
-// entire scenario-load pipeline (Read_Scenario_INI, Init_Theaters, MapGeneratorClass_*, Wait_For_
-// Players, and more - confirmed via its xrefs), not just the multiplayer wait screen. An earlier
-// version of this hook skipped the function outright during playback, which silently dropped its
-// progress-bar-fill call (ProgressScreenClass_callback_643C50) for all of those, not only the one
-// screen the fix targeted. This hook no longer skips anything - it only forces progress to 100 the
-// first time playback sees this address, so the bar shows complete immediately instead of
-// animating; the function still runs normally on every call. The actual multiplayer-load stall is
-// removed surgically below, at the one branch responsible for it.
-DEFINE_HOOK(0x69AE90, WaitForPlayers_ReplayMarkOthersLoaded, 0x5)
+// Force-complete the load-progress bar for playback, skirmish and campaign, instead of letting it
+// animate. This is SessionClass::Callback's true entry point, but the function is also the generic
+// progress-tick/pump callback threaded through the entire scenario-load pipeline (Read_Scenario_INI,
+// Init_Theaters, MapGeneratorClass_*, Wait_For_Players, and more - confirmed via its xrefs), not
+// just the multiplayer wait screen. A single call here just nudges progress toward a target and
+// gets re-invoked repeatedly as loading proceeds, which - for any session without a real network
+// peer pacing it - means the bar genuinely animates 0->100 over many real loading-screen frames.
+//
+// REVERTED to playback-only (2026-08-22): this was briefly widened to SessionClass::IsSingleplayer()
+// (skirmish/campaign) on the theory that Sync_Delay (0x55E160) - called every loading-screen frame -
+// routes GAME_SKIRMISH sessions through a real Sleep(FrameTimer.DelayTime) frame-rate cap, and that
+// the animation was costing wall-clock time paying for it. That measured a real speedup (~3.3s ->
+// ~1.1s on a live skirmish load), but the mechanism was wrong: Scenario_Load_Wait (0x684370), the
+// actual driver of that Sync_Delay-paced loop, returns immediately for GAME_CAMPAIGN/GAME_SKIRMISH
+// and never runs it. What this hook actually did instead: forcing PlayerProgresses[] directly means
+// ProgressScreenClass_callback_643C50 never again sees current < target on a later call, so it never
+// reaches its own redraw trigger (SendMessageA(hWnd, WM_PAINT, ...) or the fullscreen draw path
+// ProgressScreenClass_LoadTextColor2) - the loading screen stops repainting entirely (reported as a
+// black screen), and the speedup is a side effect of skipping those draws rather than an animation.
+// The general loading slowdown is fixed in Misc/LoadingScreen.cpp by replacing the legacy fixed
+// blit delay with an actual completion check. This direct completion remains playback-only because
+// that path already accepts skipping the live progress animation.
+DEFINE_HOOK(0x69AE90, WaitForPlayers_SkipProgressAnimation, 0x5)
 {
-	if (gReplay.Playback && !gReplay.PlayersMarkedLoaded)
+	if (gReplay.Playback && !gReplay.ProgressBarForcedComplete)
 	{
-		gReplay.PlayersMarkedLoaded = true;
+		gReplay.ProgressBarForcedComplete = true;
 		for (int i = 0; i < 8; ++i)
 		{
 			ProgressScreenClass::Instance.PlayerProgresses[i] = 100;
