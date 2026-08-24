@@ -793,14 +793,16 @@ bool IsReplayableGameplayEvent(const EventClass& event)
 	return event.Type != EventType::Options && !IsTimingEvent(event.Type);
 }
 
-// Allow these to remain in DoList during playback so local controls work.
+// Allow these to remain in DoList during playback so local controls work. GameSpeed is deliberately
+// not among them: its requested value is harvested before the removal pass, and letting the engine
+// execute it would write Options.GameSpeed - which simulation code reads and playback pins to the
+// recorded speed - for the remainder of the frame.
 bool IsLocalPlaybackControlEvent(const EventClass& event)
 {
 	switch (event.Type)
 	{
 	case EventType::Options:
 	case EventType::Exit:
-	case EventType::GameSpeed:
 	case EventType::SaveGame:
 		return true;
 	default:

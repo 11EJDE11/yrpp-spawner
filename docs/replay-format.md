@@ -152,6 +152,13 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayShowChatAndBeacons` | `true` | Playback only; recording of this data is unconditional. |
 | `ReplayPlaybackSpeed` | `-1` | Game speed index to pace playback at. `-1` falls back to `GameSpeed`. Does not affect the simulation, which stays pinned to `RecordedGameSpeed`. |
 
+Playback speed is deliberately kept out of `OptionsClass Options.GameSpeed` (0xA8EB60): simulation
+code reads that through `GetAnimSpeed`, so it stays pinned to `RecordedGameSpeed` for the whole of
+playback. The in-game options dialog binds its speed slider to the same variable, so three hooks in
+`ReplaySystem.Hook.cpp` (0x4E209E, 0x4E1E1B, 0x4E1EBA) give that dialog a view of the playback
+speed instead. Recorded `GameSpeed` events are harvested for their requested speed and then dropped
+rather than executed, so the engine never writes the pinned value.
+
 Playback also overrides `Seed`, `GameSpeed`, `Protocol`, `FrameSendRate` and `MaxAhead` from the
 header, skips `CreateConnections()`, and suppresses the statistics packet. `Spawner/Statistics.cpp`
 does that last one by jumping to `0x64820E`, which is the address of the replay system's own

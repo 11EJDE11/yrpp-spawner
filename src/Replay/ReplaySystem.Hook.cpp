@@ -31,6 +31,7 @@
 #include <ProgressScreenClass.h>
 #include <ScenarioClass.h>
 
+#include <algorithm>
 #include <limits>
 
 using namespace ReplaySystem::Internal;
@@ -321,6 +322,60 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 {
 	if (ReplayState.Playback)
 		return 0x69B14E;
+
+	return 0;
+}
+
+// --- In-game options dialog, game speed ------------------------------------------------------
+// Options.GameSpeed (0xA8EB60) is read by simulation code - AnimClass, BuildingClass::Animation_AI,
+// InfantryClass::Do_Action and HouseClass::AI all scale off it through GameOptionsClass::GetAnimSpeed
+// - so playback pins it to the speed the game was recorded at and must keep it there. The ESC ->
+// Options dialog binds its speed slider to that same variable, which is why, before these hooks, the
+// slider always showed the recorded speed and picking that speed did nothing at all.
+//
+// These three hooks give the dialog a view of ReplayState.PlaybackSpeedIndex instead, without ever
+// letting it write to the pinned value. Each hooks exactly one instruction that loads or stores
+// Options.GameSpeed, and returns past it.
+
+// GameControlsClass::someDialog, WM_INITDIALOG. `mov edx, Options.GameSpeed`, which becomes the
+// slider position as `6 - GameSpeed`. Feed it the playback speed so the slider opens where the
+// replay is actually running.
+DEFINE_HOOK(0x4E209E, GameControlsDialog_ShowPlaybackSpeed, 0x6)
+{
+	if (ReplayState.Playback && ReplayState.PlaybackSpeedIndex >= 0)
+	{
+		R->EDX(ReplayState.PlaybackSpeedIndex);
+		return 0x4E20A4;
+	}
+
+	return 0;
+}
+
+// GameControls_4E1DE0, the dialog's apply handler. `mov eax, Options.GameSpeed`, compared against
+// the slider's new value; when they match the handler returns without doing anything. Comparing
+// against the recorded speed is what made "set playback back to the recorded speed" a no-op.
+DEFINE_HOOK(0x4E1E1B, GameControlsApply_ComparePlaybackSpeed, 0x5)
+{
+	if (ReplayState.Playback && ReplayState.PlaybackSpeedIndex >= 0)
+	{
+		R->EAX(ReplayState.PlaybackSpeedIndex);
+		return 0x4E1E20;
+	}
+
+	return 0;
+}
+
+// Same handler, the branch it takes when there is no session to broadcast a GameSpeed event to -
+// campaign and skirmish, so any replay of a skirmish game. `mov Options.GameSpeed, ecx` applies the
+// new speed directly. Take the value for playback and skip the store, so the pinned value survives.
+DEFINE_HOOK(0x4E1EBA, GameControlsApply_ApplyPlaybackSpeedDirectly, 0x6)
+{
+	if (ReplayState.Playback)
+	{
+		ReplayState.PlaybackSpeedIndex = std::clamp(R->ECX<int>(), 0, MAX_GAME_SPEED_INDEX);
+		ApplyReplayTimingFromCurrentGameSpeed();
+		return 0x4E1EC0;
+	}
 
 	return 0;
 }
