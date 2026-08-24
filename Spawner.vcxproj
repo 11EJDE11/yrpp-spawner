@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup Label="Globals">
     <ProjectName>CnCNet-Spawner</ProjectName>
@@ -53,8 +53,13 @@
     <ClCompile Include="$(ThisDir)\src\Misc\VideoMode.cpp" />
     <!-- Replay -->
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.Hook.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayStream.cpp" />
-    <ClCompile Include="$(ThisDir)\src\Replay\miniz.cpp" />
+    <!-- Vendored third-party C, compiled as-is: deflate/inflate only, warnings off. -->
+    <ClCompile Include="$(ThisDir)\src\Replay\miniz.c">
+      <PreprocessorDefinitions>MINIZ_NO_STDIO;MINIZ_NO_TIME;MINIZ_NO_ARCHIVE_APIS;MINIZ_NO_ZLIB_APIS;MINIZ_NO_ZLIB_COMPATIBLE_NAMES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
     <!-- Spawner -->
     <ClCompile Include="$(ThisDir)\src\Spawner\CustomMixes.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\NetHack.cpp" />
@@ -88,7 +93,9 @@
     <ClInclude Include="$(ThisDir)\src\Misc\Bugfixes.Desyncs.h" />
     <ClInclude Include="$(ThisDir)\src\UI\Dialogs.h" />
     <!-- Replay -->
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplayFormat.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.Internal.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayStream.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\miniz.h" />
     <!-- Spawner -->

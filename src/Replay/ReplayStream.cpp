@@ -19,7 +19,6 @@
 
 #include "ReplayStream.h"
 
-#define MINIZ_HEADER_FILE_ONLY
 #include "miniz.h"
 
 #include <algorithm>
@@ -31,6 +30,7 @@ namespace Replay
 namespace
 {
 
+// Vendored miniz 3.0.2 (src/Replay/miniz.{c,h}).
 // miniz encodes the compression level as the number of dictionary probes in the low 12 bits of
 // the tdefl flags. 128 is what level 6 maps to, which is the knee of the curve on replay data:
 // level 9 costs 2.6x the CPU for 0.5% more compression.
@@ -249,11 +249,14 @@ bool InflateReader::Refill()
 		// tinfl treats the window as a ring, so never ask it to write past the end of the buffer.
 		size_t outputUsed = TINFL_LZ_DICT_SIZE - this->WindowWritePos;
 
-		// TINFL_FLAG_HAS_MORE_INPUT stays set even once the file is exhausted. Clearing it tells
-		// tinfl the stream is complete, and it then pads the input with zero bits and decodes
-		// tens of kilobytes of plausible-looking garbage past the end - exactly the wrong answer
-		// for a recording a crash cut short. Left set, it stops at the last symbol it could
-		// genuinely decode and asks for input that never comes, which is the truncation signal.
+		// The flag has to be dropped once the file runs out, otherwise tinfl keeps waiting for
+		// input that never arrives. Dropped, a stream that ends mid-symbol - the shape a crashed
+		// recording leaves behind - comes back as TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS
+		// instead of being zero-padded and decoded into garbage past the end.
+		const mz_uint32 flags = this->InputExhausted
+			? 0u
+			: static_cast<mz_uint32>(TINFL_FLAG_HAS_MORE_INPUT);
+
 		const tinfl_status status = tinfl_decompress(
 			AsDecompressor(this->Decompressor.get()),
 			this->InputBuffer.data() + this->InputPos,
@@ -261,7 +264,7 @@ bool InflateReader::Refill()
 			this->Window.data(),
 			this->Window.data() + this->WindowWritePos,
 			&outputUsed,
-			static_cast<mz_uint32>(TINFL_FLAG_HAS_MORE_INPUT)
+			flags
 		);
 
 		this->InputPos += inputUsed;
@@ -285,8 +288,7 @@ bool InflateReader::Refill()
 			return false;
 		}
 
-		// A truncated stream - what a crashed recording leaves behind - lands here: the
-		// decompressor wants more input and the file has none left.
+		// Corrupt input, or the truncation a crashed recording leaves behind, lands here.
 		if (status < TINFL_STATUS_DONE || this->InputExhausted)
 		{
 			this->Finished = true;

@@ -31,9 +31,13 @@
 
 bool __forceinline IsStatisticsEnabled()
 {
+	// Never while a replay is playing back. Every statistics gate in this file routes through here,
+	// including the stats.dmp writer below - without this, replaying a game to its win/lose screen
+	// overwrites the real stats.dmp with the recorded game's results.
 	return Spawner::Active
 		&& Spawner::GetConfig()->WriteStatistics
-		&& !SessionClass::IsCampaign();
+		&& !SessionClass::IsCampaign()
+		&& !ReplaySystem::IsPlaybackActive();
 }
 
 // Write stats.dmp

@@ -110,3 +110,15 @@ cpp_space_around_assignment_operator = insert
 cpp_space_pointer_reference_alignment = left
 cpp_space_around_ternary_operator = insert
 cpp_wrap_preserve_blocks = all_one_line_scopes
+
+# Vendored third-party sources (upstream miniz), kept byte-identical to upstream,
+# so the house C++ style deliberately does not apply here. Matched by file name
+# rather than by path: editorconfig-checker does not apply path-qualified sections.
+[miniz.{c,h}]
+indent_style = space
+indent_size = unset
+tab_width = unset
+end_of_line = unset
+charset = unset
+trim_trailing_whitespace = unset
+insert_final_newline = unset

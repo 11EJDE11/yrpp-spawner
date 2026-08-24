@@ -18,7 +18,7 @@
 */
 
 #include "ReplaySystem.h"
-#include "ReplayStream.h"
+#include "ReplaySystem.Internal.h"
 
 #include <Spawner/Spawner.h>
 #include <Utilities/Debug.h>
@@ -33,9 +33,9 @@
 #include <HouseClass.h>
 #include <MapClass.h>
 #include <MessageListClass.h>
-#include <ProgressScreenClass.h>
 #include <RulesClass.h>
 #include <SessionClass.h>
+#include <TacticalClass.h>
 #include <VocClass.h>
 
 #include <algorithm>
@@ -50,185 +50,13 @@
 #include <unordered_set>
 #include <vector>
 
-namespace
+namespace ReplaySystem
 {
 
-constexpr uint32_t REPLAY_MAGIC = 0x4A455259u;
-constexpr uint32_t REPLAY_VERSION = 1;
-// How often the compressed stream is given a decodable point. A recording cut short by a crash
-// loses at most this many frames - one second of play - and the cadence costs about 1% of ratio.
-constexpr int REPLAY_SYNC_FLUSH_FRAME_INTERVAL = 60;
-// Flush rarely; forced disk commits can stall the game thread.
-constexpr uint64_t REPLAY_FLUSH_INTERVAL_BYTES = 50ull * 1024 * 1024;
-constexpr const char* DEFAULT_RECORDING_PATH = "replay.dat";
-// The engine's GameSpeed is an index into a fixed table; anything above this is out of range.
-constexpr int MAX_GAME_SPEED_INDEX = 6;
-// Queue_AI_Multiplayer's network delay budget.
-constexpr uintptr_t NETWORK_DELAY_TIME_ADDRESS = 0x00AFA458;
-// BeaconClass::Bitfield flag marking the beacon the local player placed.
-constexpr int BEACON_FLAG_LOCAL = 2;
-
-enum FrameRecordFlags : uint32_t
+namespace Internal
 {
-	FrameRecordFlag_None = 0u,
-	FrameRecordFlag_TacticalPos = 1u << 0,
-	FrameRecordFlag_Selection = 1u << 1,
-	FrameRecordFlag_SideChannel = 1u << 2
-};
 
-// Non-deterministic network/UI events are recorded separately from EventClass::DoList.
-enum class SideChannelEventType : uint8_t
-{
-	ChatMessage = 1,
-	BeaconPlace = 2,
-	BeaconDelete = 3,
-	BeaconText = 4,
-	Taunt = 5,
-};
-
-constexpr size_t SIDECHANNEL_TEXT_LENGTH = 128; // matches BeaconClass::Text and comfortably fits chat
-constexpr size_t SIDECHANNEL_NAME_LENGTH = 24;
-constexpr int32_t SIDECHANNEL_MAX_EVENTS_PER_FRAME = 64; // sanity bound for playback parsing
-// BeaconManagerClass::Beacons is [8][3].
-constexpr int MAX_HOUSES = 8;
-constexpr int MAX_BEACON_SLOTS = 3;
-// MapClass_Array is a fixed 512x512 cell grid (0x40000 entries); 256 leptons per cell.
-constexpr int32_t MAX_MAP_LEPTON_COORD = 512 * 256;
-
-#pragma pack(push, 1)
-struct SideChannelRecord
-{
-	int32_t FrameNumber = 0;
-	uint8_t Type = 0;        // SideChannelEventType
-	int32_t House = -1;
-	// Per-type payload: chat color, beacon slot or taunt command.
-	int32_t Aux = 0;
-	CoordStruct Coord = {}; // BeaconPlace only
-	wchar_t SenderName[SIDECHANNEL_NAME_LENGTH] = {}; // ChatMessage only
-	wchar_t Text[SIDECHANNEL_TEXT_LENGTH] = {}; // ChatMessage / BeaconText only
-};
-#pragma pack(pop)
-
-#pragma pack(push, 1)
-struct ReplayHeader
-{
-	uint32_t Magic;
-	uint32_t Version;
-	char MapName[260];
-	uint32_t StartFrame;
-	uint8_t SpawnerVersionMajor;
-	uint8_t SpawnerVersionMinor;
-	uint8_t SpawnerVersionRevision;
-	uint8_t SpawnerVersionPatch;
-	char GameVersionString[32];
-	char GameClientVersion[64];
-	uint32_t GameMode;
-
-	int UniqueIDCounter;
-	int Seed;
-	int RandomNext1;
-	int RandomNext2;
-	uint32_t RandomizerTable[250];
-
-	uint32_t SpawnIniSize;
-	uint32_t SpawnMapSize;
-	uint32_t RecordedGameSpeed;
-
-	uint64_t RecordedUnixTime;
-	uint32_t TotalFrames;
-};
-
-struct FrameStateRecord
-{
-	int FrameNumber;
-	Point2D TacticalPos;
-	int32_t SelectedObjectCount;
-	uint32_t SelectedObjectCRC;
-};
-
-struct FrameRecordHeader
-{
-	int32_t FrameNumber;         // -1 indicates end-of-stream marker
-	int32_t EventCountThisFrame;
-	uint32_t Flags;              // FrameRecordFlags
-};
-
-#pragma pack(pop)
-
-// Mirrored by hand in the client's ReplayGame.cs and in docs/replay-format.md. A size change is
-// silent on the reading side, so pin it here and make the mismatch a build error instead.
-static_assert(sizeof(ReplayHeader) == 1416, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
-static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
-static_assert(sizeof(SideChannelRecord) == 329, "SideChannelRecord layout changed; update docs/replay-format.md");
-
-struct PlaybackFrameRecord
-{
-	int32_t FrameNumber = 0;
-	int32_t EventCountThisFrame = 0;
-	uint32_t Flags = FrameRecordFlag_None;
-	Point2D TacticalPos = { 0, 0 };
-	int32_t SelectedObjectCount = 0;
-	uint32_t SelectedObjectCRC = 0;
-	std::vector<uint32_t> SelectedObjectIDs;
-	std::vector<SideChannelRecord> SideChannelEvents;
-	bool EndOfStream = false;
-};
-
-struct PendingRecordedFrameCapture
-{
-	FrameStateRecord FrameState;
-	std::vector<uint32_t> SelectedObjectIDs;
-};
-
-struct ReplayRuntimeState
-{
-	bool Recording = false;
-	bool Playback = false;
-	bool InitRandomHandled = false;
-	// Set once the load-progress bar has been force-completed for this scenario (playback,
-	// skirmish, or campaign) instead of animating. See WaitForPlayers_SkipProgressAnimation.
-	bool ProgressBarForcedComplete = false;
-
-	bool ShroudEnabled = false;
-	bool LockViewport = true;
-	bool SelectUnits = true;
-	bool SpectatorView = false;
-	// Playback-only; recording keeps this data unconditionally.
-	bool ShowChatAndBeacons = true;
-	int PlaybackSpeedIndex = -1;
-
-	int ExpectedEventsThisFrame = 0;
-	uint64_t BytesAtLastDiskFlush = 0;
-	int LastSyncFlushFrame = 0;
-
-	HANDLE ReplayFile = INVALID_HANDLE_VALUE;
-	// Only one of these is ever active: recording deflates, playback inflates.
-	Replay::DeflateWriter Writer;
-	Replay::InflateReader Reader;
-
-	char PlaybackPath[MAX_PATH] = { 0 };
-	std::deque<PendingRecordedFrameCapture> PendingFrameStates;
-	std::deque<SideChannelRecord> PendingSideChannelEvents;
-	ReplayHeader PlaybackHeader = {};
-	bool HasPlaybackHeader = false;
-
-	bool HasPendingPlaybackFrame = false;
-	bool PlaybackStreamEnded = false;
-
-	// Last recorded viewport position, re-applied between sparse frame records.
-	Point2D LockedViewportPos = { 0, 0 };
-	bool HasLockedViewportPos = false;
-	PlaybackFrameRecord PendingPlaybackFrame = {};
-
-	bool HasLastWrittenFrameState = false;
-	int32_t LastWrittenFrameNumber = 0;
-	Point2D LastRecordedTacticalPos = { 0, 0 };
-	int32_t LastRecordedSelectionCount = 0;
-	uint32_t LastRecordedSelectionCRC = 0;
-	std::vector<uint32_t> LastRecordedSelectionIDs;
-};
-
-ReplayRuntimeState gReplay;
+ReplayRuntimeState ReplayState;
 
 void StopReplaySystem();
 void AbortReplaySystem();
@@ -269,38 +97,18 @@ void EnsureParentDirectoryExists(const char* path)
 	}
 }
 
-bool IsReplayGameSpeedIndexValid(uint32_t gameSpeedIndex)
-{
-	return gameSpeedIndex <= static_cast<uint32_t>(MAX_GAME_SPEED_INDEX);
-}
-
-int GetReplayFPSFromGameSpeed(int gameSpeed)
-{
-	gameSpeed = std::clamp(gameSpeed, 0, MAX_GAME_SPEED_INDEX);
-
-	// Vanilla mapping used by Queue_AI_Multiplayer:
-	// 0 -> 60, 1 -> 45, 2+ -> 60 / gameSpeed.
-	if (gameSpeed <= 0)
-		return 60;
-
-	if (gameSpeed == 1)
-		return 45;
-
-	return std::max(1, 60 / gameSpeed);
-}
-
 void ApplyReplayTimingFromCurrentGameSpeed()
 {
-	if (gReplay.Playback && gReplay.HasPlaybackHeader)
+	if (ReplayState.Playback && ReplayState.HasPlaybackHeader)
 	{
 		// Keep simulation speed locked to the replay's recorded speed.
-		const int recordedGameSpeed = std::clamp(static_cast<int>(gReplay.PlaybackHeader.RecordedGameSpeed), 0, MAX_GAME_SPEED_INDEX);
+		const int recordedGameSpeed = std::clamp(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed), 0, MAX_GAME_SPEED_INDEX);
 		GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 		GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 	}
 
-	const int speedIndex = (gReplay.Playback && gReplay.PlaybackSpeedIndex >= 0)
-		? gReplay.PlaybackSpeedIndex
+	const int speedIndex = (ReplayState.Playback && ReplayState.PlaybackSpeedIndex >= 0)
+		? ReplayState.PlaybackSpeedIndex
 		: GameOptionsClass::Instance.GameSpeed;
 	const int requestedFPS = GetReplayFPSFromGameSpeed(speedIndex);
 
@@ -331,18 +139,18 @@ bool ReadRawFromHandle(HANDLE file, void* buffer, size_t size)
 
 bool WriteRaw(const void* data, size_t size)
 {
-	if (gReplay.Writer.IsActive())
-		return gReplay.Writer.Write(data, size);
+	if (ReplayState.Writer.IsActive())
+		return ReplayState.Writer.Write(data, size);
 
-	return WriteRawToHandle(gReplay.ReplayFile, data, size);
+	return WriteRawToHandle(ReplayState.ReplayFile, data, size);
 }
 
 bool ReadRaw(void* buffer, size_t size)
 {
-	if (gReplay.Reader.IsActive())
-		return gReplay.Reader.Read(buffer, size);
+	if (ReplayState.Reader.IsActive())
+		return ReplayState.Reader.Read(buffer, size);
 
-	return ReadRawFromHandle(gReplay.ReplayFile, buffer, size);
+	return ReadRawFromHandle(ReplayState.ReplayFile, buffer, size);
 }
 
 // Ends the current deflate block, so everything recorded up to now can be decoded without any of
@@ -350,10 +158,10 @@ bool ReadRaw(void* buffer, size_t size)
 // matters after a crash is how many frames of play survived, not how many bytes.
 void SyncFlushRecordingStream()
 {
-	if (!gReplay.Writer.IsActive())
+	if (!ReplayState.Writer.IsActive())
 		return;
 
-	if (!gReplay.Writer.SyncFlush())
+	if (!ReplayState.Writer.SyncFlush())
 	{
 		Debug::Log("[Replay] Failed to flush the replay stream; stopping the recording.\n");
 		AbortReplaySystem();
@@ -361,11 +169,11 @@ void SyncFlushRecordingStream()
 	}
 
 	// Committing to the disk is far more expensive, so it stays on a rare byte-count schedule.
-	const uint64_t written = gReplay.Writer.CompressedBytesWritten();
-	if (written - gReplay.BytesAtLastDiskFlush >= REPLAY_FLUSH_INTERVAL_BYTES)
+	const uint64_t written = ReplayState.Writer.CompressedBytesWritten();
+	if (written - ReplayState.BytesAtLastDiskFlush >= REPLAY_FLUSH_INTERVAL_BYTES)
 	{
-		FlushFileBuffers(gReplay.ReplayFile);
-		gReplay.BytesAtLastDiskFlush = written;
+		FlushFileBuffers(ReplayState.ReplayFile);
+		ReplayState.BytesAtLastDiskFlush = written;
 	}
 }
 
@@ -409,25 +217,113 @@ bool ReadRequiredFile(const char* fileName, std::vector<char>& content)
 	return true;
 }
 
+// Blanks every address value in the embedded spawn.ini. Deliberately section-unaware: it matches
+// on key name alone, so a new section carrying an address is covered without anyone remembering to
+// add it here. Line endings and every other key are preserved byte for byte.
+bool EqualsIgnoreCase(const char* a, size_t aLength, const char* b)
+{
+	const size_t bLength = strlen(b);
+	if (aLength != bLength)
+		return false;
+
+	for (size_t i = 0; i < aLength; ++i)
+	{
+		if (tolower(static_cast<unsigned char>(a[i])) != tolower(static_cast<unsigned char>(b[i])))
+			return false;
+	}
+
+	return true;
+}
+
+// Reads one key out of a raw INI buffer, without building an INI object over it. Used for the
+// embedded spawnmap.ini, which is the whole map file: handing a couple of megabytes to CCINIClass
+// just to read the map name is the most expensive thing recording start does. Handles what a map
+// file's [Basic] section actually contains - case-insensitive section and key names, whitespace
+// around either, and ';' comments - and nothing more.
+bool TryReadIniValueFromBuffer(const std::vector<char>& text, const char* sectionName,
+	const char* keyName, char* outBuffer, size_t outBufferSize)
+{
+	if (!outBuffer || outBufferSize == 0)
+		return false;
+
+	outBuffer[0] = '\0';
+
+	const char* const base = text.data();
+	const size_t size = text.size();
+	bool inSection = false;
+
+	size_t lineStart = 0;
+	while (lineStart < size)
+	{
+		size_t lineEnd = lineStart;
+		while (lineEnd < size && base[lineEnd] != '\n')
+			++lineEnd;
+
+		size_t begin = lineStart;
+		size_t end = lineEnd;
+		if (end > begin && base[end - 1] == '\r')
+			--end;
+
+		// A ';' anywhere outside a value starts a comment; map files do not quote values.
+		for (size_t i = begin; i < end; ++i)
+		{
+			if (base[i] == ';')
+			{
+				end = i;
+				break;
+			}
+		}
+
+		while (begin < end && isspace(static_cast<unsigned char>(base[begin])))
+			++begin;
+		while (end > begin && isspace(static_cast<unsigned char>(base[end - 1])))
+			--end;
+
+		if (begin < end && base[begin] == '[')
+		{
+			const size_t close = static_cast<size_t>(
+				std::find(base + begin, base + end, ']') - base);
+			inSection = close < end
+				&& EqualsIgnoreCase(base + begin + 1, close - begin - 1, sectionName);
+		}
+		else if (inSection && begin < end)
+		{
+			const size_t separator = static_cast<size_t>(
+				std::find(base + begin, base + end, '=') - base);
+
+			if (separator < end)
+			{
+				size_t keyEnd = separator;
+				while (keyEnd > begin && isspace(static_cast<unsigned char>(base[keyEnd - 1])))
+					--keyEnd;
+
+				if (EqualsIgnoreCase(base + begin, keyEnd - begin, keyName))
+				{
+					size_t valueStart = separator + 1;
+					while (valueStart < end && isspace(static_cast<unsigned char>(base[valueStart])))
+						++valueStart;
+
+					if (valueStart >= end)
+						return false;
+
+					const size_t length = std::min(end - valueStart, outBufferSize - 1);
+					memcpy(outBuffer, base + valueStart, length);
+					outBuffer[length] = '\0';
+					return true;
+				}
+			}
+		}
+
+		lineStart = lineEnd + 1;
+	}
+
+	return false;
+}
+
 void SanitizeSpawnIniForReplay(std::vector<char>& spawnIni)
 {
 	static constexpr const char* AddressKeys[] = { "Ip", "IPv6", "LanIP" };
 	static constexpr const char* BlankedAddress = "0.0.0.0";
-
-	const auto equalsIgnoreCase = [](const char* a, size_t aLen, const char* b)
-	{
-		const size_t bLen = strlen(b);
-		if (aLen != bLen)
-			return false;
-
-		for (size_t i = 0; i < aLen; ++i)
-		{
-			if (tolower(static_cast<unsigned char>(a[i])) != tolower(static_cast<unsigned char>(b[i])))
-				return false;
-		}
-
-		return true;
-	};
 
 	const size_t size = spawnIni.size();
 	const char* const base = spawnIni.data();
@@ -465,7 +361,7 @@ void SanitizeSpawnIniForReplay(std::vector<char>& spawnIni)
 
 			for (const char* addressKey : AddressKeys)
 			{
-				if (equalsIgnoreCase(base + keyStart, keyEnd - keyStart, addressKey))
+				if (EqualsIgnoreCase(base + keyStart, keyEnd - keyStart, addressKey))
 				{
 					sanitized.insert(sanitized.end(), base + lineStart, base + separator + 1);
 					sanitized.insert(sanitized.end(), BlankedAddress, BlankedAddress + strlen(BlankedAddress));
@@ -577,21 +473,21 @@ bool TryParseVersionString(const char* versionText, uint8_t& outMajor, uint8_t& 
 	return true;
 }
 
-ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
+ReplayHeader BuildReplayHeader(const std::vector<char>& spawnMap, uint32_t spawnIniSize, uint32_t spawnMapSize)
 {
 	ReplayHeader header {};
 	header.Magic = REPLAY_MAGIC;
 	header.Version = REPLAY_VERSION;
 
 	const ScopedINIFile spawnIni { "spawn.ini" };
-	const ScopedINIFile spawnMapIni { "spawnmap.ini" };
 
-	if (!TryReadString(spawnMapIni.Get(), "Basic", "Name", header.MapName, sizeof(header.MapName))
+	// ScenarioClass is not an option for the map name: this runs from inside Clear_Scenario, which
+	// has already blanked it, and its UIName is a 32 byte buffer besides.
+	if (!TryReadIniValueFromBuffer(spawnMap, "Basic", "Name", header.MapName, sizeof(header.MapName))
 		&& !TryReadString(spawnIni.Get(), "Settings", "UIMapName", header.MapName, sizeof(header.MapName))
 		&& ScenarioClass::Instance)
 		strncpy_s(header.MapName, sizeof(header.MapName), ScenarioClass::Instance->FileName, _TRUNCATE);
 
-	header.StartFrame = 0;
 	header.SpawnerVersionMajor = VERSION_MAJOR;
 	header.SpawnerVersionMinor = VERSION_MINOR;
 	header.SpawnerVersionRevision = VERSION_REVISION;
@@ -609,7 +505,6 @@ ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
 		);
 	}
 
-	strcpy_s(header.GameVersionString, "1.006");
 	TryReadString(spawnIni.Get(), "Settings", "GameClientVersion", header.GameClientVersion, sizeof(header.GameClientVersion));
 	header.GameMode = static_cast<uint32_t>(SessionClass::Instance.GameMode);
 
@@ -626,7 +521,10 @@ ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
 	header.SpawnMapSize = spawnMapSize;
 	header.RecordedGameSpeed = static_cast<uint32_t>(std::clamp(GameOptionsClass::Instance.GameSpeed, 0, MAX_GAME_SPEED_INDEX));
 	header.RecordedUnixTime = static_cast<uint64_t>(time(nullptr));
-	header.TotalFrames = 0; // stamped by StopReplaySystem once recording finishes cleanly
+	// Both stamped by StopReplaySystem; a recording that dies with the process keeps these zeroed,
+	// which is how a reader recognises it as incomplete.
+	header.TotalFrames = 0;
+	header.Flags = ReplayHeaderFlag_None;
 	return header;
 }
 
@@ -651,6 +549,7 @@ bool WriteInitialReplayFile()
 	}
 
 	const ReplayHeader header = BuildReplayHeader(
+		spawnMap,
 		static_cast<uint32_t>(spawnIni.size()),
 		static_cast<uint32_t>(spawnMap.size())
 	);
@@ -684,13 +583,6 @@ bool WriteInitialReplayFile()
 	return ok;
 }
 
-bool IsReplayHeaderValid(const ReplayHeader& header)
-{
-	return header.Magic == REPLAY_MAGIC
-		&& header.Version == REPLAY_VERSION
-		&& IsReplayGameSpeedIndexValid(header.RecordedGameSpeed);
-}
-
 bool ReadReplayHeaderFromHandle(HANDLE file, ReplayHeader& outHeader)
 {
 	outHeader = {};
@@ -720,14 +612,14 @@ bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader)
 
 void CloseReplayFile()
 {
-	gReplay.Writer.Reset();
-	gReplay.Reader.Reset();
+	ReplayState.Writer.Reset();
+	ReplayState.Reader.Reset();
 
-	if (gReplay.ReplayFile != INVALID_HANDLE_VALUE)
+	if (ReplayState.ReplayFile != INVALID_HANDLE_VALUE)
 	{
-		FlushFileBuffers(gReplay.ReplayFile);
-		CloseHandle(gReplay.ReplayFile);
-		gReplay.ReplayFile = INVALID_HANDLE_VALUE;
+		FlushFileBuffers(ReplayState.ReplayFile);
+		CloseHandle(ReplayState.ReplayFile);
+		ReplayState.ReplayFile = INVALID_HANDLE_VALUE;
 	}
 }
 
@@ -737,7 +629,7 @@ bool OpenRecordingReplayStream()
 
 	const char* const outputPath = GetRecordingOutputPath();
 
-	gReplay.ReplayFile = CreateFileA(
+	ReplayState.ReplayFile = CreateFileA(
 		outputPath,
 		GENERIC_WRITE,
 		FILE_SHARE_READ,
@@ -747,7 +639,7 @@ bool OpenRecordingReplayStream()
 		nullptr
 	);
 
-	if (gReplay.ReplayFile == INVALID_HANDLE_VALUE)
+	if (ReplayState.ReplayFile == INVALID_HANDLE_VALUE)
 	{
 		// WriteInitialReplayFile has just written this file. Recreating it would start the deflate
 		// stream at offset 0 and produce a headerless file no reader can parse.
@@ -755,18 +647,18 @@ bool OpenRecordingReplayStream()
 		return false;
 	}
 
-	SetFilePointer(gReplay.ReplayFile, 0, nullptr, FILE_END);
+	SetFilePointer(ReplayState.ReplayFile, 0, nullptr, FILE_END);
 
 	// Everything from here on - and nothing before it - is deflated.
-	if (!gReplay.Writer.Start(gReplay.ReplayFile))
+	if (!ReplayState.Writer.Start(ReplayState.ReplayFile))
 	{
 		Debug::Log("[Replay] Failed to start the compressed replay stream.\n");
 		CloseReplayFile();
 		return false;
 	}
 
-	gReplay.BytesAtLastDiskFlush = 0;
-	gReplay.LastSyncFlushFrame = 0;
+	ReplayState.BytesAtLastDiskFlush = 0;
+	ReplayState.LastSyncFlushFrame = 0;
 	return true;
 }
 
@@ -774,7 +666,7 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 {
 	CloseReplayFile();
 
-	gReplay.ReplayFile = CreateFileA(
+	ReplayState.ReplayFile = CreateFileA(
 		replayPath,
 		GENERIC_READ,
 		FILE_SHARE_READ,
@@ -784,11 +676,11 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 		nullptr
 	);
 
-	if (gReplay.ReplayFile == INVALID_HANDLE_VALUE)
+	if (ReplayState.ReplayFile == INVALID_HANDLE_VALUE)
 		return false;
 
 	ReplayHeader header {};
-	if (!ReadReplayHeaderFromHandle(gReplay.ReplayFile, header))
+	if (!ReadReplayHeaderFromHandle(ReplayState.ReplayFile, header))
 	{
 		CloseReplayFile();
 		return false;
@@ -798,7 +690,7 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 	const uint64_t payloadSize = static_cast<uint64_t>(header.SpawnIniSize) + header.SpawnMapSize;
 
 	LARGE_INTEGER fileSize {};
-	if (!GetFileSizeEx(gReplay.ReplayFile, &fileSize)
+	if (!GetFileSizeEx(ReplayState.ReplayFile, &fileSize)
 		|| sizeof(ReplayHeader) + payloadSize > static_cast<uint64_t>(fileSize.QuadPart))
 	{
 		Debug::Log("[Replay] Replay declares embedded file sizes that do not fit the file.\n");
@@ -809,14 +701,14 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 	LARGE_INTEGER payloadOffset {};
 	payloadOffset.QuadPart = static_cast<LONGLONG>(payloadSize);
 
-	if (payloadSize > 0 && !SetFilePointerEx(gReplay.ReplayFile, payloadOffset, nullptr, FILE_CURRENT))
+	if (payloadSize > 0 && !SetFilePointerEx(ReplayState.ReplayFile, payloadOffset, nullptr, FILE_CURRENT))
 	{
 		CloseReplayFile();
 		return false;
 	}
 
 	// The frame stream is always deflated; the header and the two INIs above it never are.
-	if (!gReplay.Reader.Start(gReplay.ReplayFile))
+	if (!ReplayState.Reader.Start(ReplayState.ReplayFile))
 	{
 		Debug::Log("[Replay] Failed to start reading the compressed replay stream.\n");
 		CloseReplayFile();
@@ -828,29 +720,27 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 
 void ResetRuntimeFlagsForScenario()
 {
-	gReplay.Recording = false;
-	gReplay.Playback = false;
-	gReplay.SpectatorView = false;
-	gReplay.PlaybackSpeedIndex = -1;
-	gReplay.ExpectedEventsThisFrame = 0;
-	gReplay.BytesAtLastDiskFlush = 0;
-	gReplay.LastSyncFlushFrame = 0;
-	gReplay.ProgressBarForcedComplete = false;
-	gReplay.PendingFrameStates.clear();
-	gReplay.PendingSideChannelEvents.clear();
-	gReplay.HasPlaybackHeader = false;
-	memset(&gReplay.PlaybackHeader, 0, sizeof(gReplay.PlaybackHeader));
-	gReplay.HasPendingPlaybackFrame = false;
-	gReplay.PlaybackStreamEnded = false;
-	gReplay.PendingPlaybackFrame = {};
-	gReplay.LockedViewportPos = { 0, 0 };
-	gReplay.HasLockedViewportPos = false;
-	gReplay.HasLastWrittenFrameState = false;
-	gReplay.LastWrittenFrameNumber = 0;
-	gReplay.LastRecordedTacticalPos = { 0, 0 };
-	gReplay.LastRecordedSelectionCount = 0;
-	gReplay.LastRecordedSelectionCRC = 0;
-	gReplay.LastRecordedSelectionIDs.clear();
+	ReplayState.Recording = false;
+	ReplayState.Playback = false;
+	ReplayState.SpectatorView = false;
+	ReplayState.PlaybackSpeedIndex = -1;
+	ReplayState.ExpectedEventsThisFrame = 0;
+	ReplayState.BytesAtLastDiskFlush = 0;
+	ReplayState.LastSyncFlushFrame = 0;
+	ReplayState.ProgressBarForcedComplete = false;
+	ReplayState.PendingFrameStates.clear();
+	ReplayState.PendingSideChannelEvents.clear();
+	ReplayState.HasPlaybackHeader = false;
+	memset(&ReplayState.PlaybackHeader, 0, sizeof(ReplayState.PlaybackHeader));
+	ReplayState.HasPendingPlaybackFrame = false;
+	ReplayState.PlaybackStreamEnded = false;
+	ReplayState.PendingPlaybackFrame = {};
+	ReplayState.LockedViewportPos = { 0, 0 };
+	ReplayState.HasLockedViewportPos = false;
+	ReplayState.HasLastWrittenFrameState = false;
+	ReplayState.LastWrittenFrameNumber = 0;
+	ReplayState.LastRecordedTacticalPos = { 0, 0 };
+	ReplayState.LastRecordedSelectionIDs.clear();
 }
 
 void AbortReplaySystem()
@@ -861,16 +751,16 @@ void AbortReplaySystem()
 
 void ApplyPlaybackInitialState()
 {
-	if (!gReplay.HasPlaybackHeader)
+	if (!ReplayState.HasPlaybackHeader)
 		return;
 
-	Game::Seed = gReplay.PlaybackHeader.Seed;
+	Game::Seed = ReplayState.PlaybackHeader.Seed;
 	if (ScenarioClass::Instance)
 	{
-		ScenarioClass::Instance->Random.Next1 = gReplay.PlaybackHeader.RandomNext1;
-		ScenarioClass::Instance->Random.Next2 = gReplay.PlaybackHeader.RandomNext2;
-		memcpy(ScenarioClass::Instance->Random.Table, gReplay.PlaybackHeader.RandomizerTable, sizeof(gReplay.PlaybackHeader.RandomizerTable));
-		ScenarioClass::Instance->UniqueID = gReplay.PlaybackHeader.UniqueIDCounter;
+		ScenarioClass::Instance->Random.Next1 = ReplayState.PlaybackHeader.RandomNext1;
+		ScenarioClass::Instance->Random.Next2 = ReplayState.PlaybackHeader.RandomNext2;
+		memcpy(ScenarioClass::Instance->Random.Table, ReplayState.PlaybackHeader.RandomizerTable, sizeof(ReplayState.PlaybackHeader.RandomizerTable));
+		ScenarioClass::Instance->UniqueID = ReplayState.PlaybackHeader.UniqueIDCounter;
 	}
 }
 
@@ -942,7 +832,7 @@ void RemoveDoListEvents(Predicate shouldRemove)
 		return;
 
 	// Reused across frames so the copy does not reallocate on every rebuild.
-	static std::vector<EventClass> preservedEvents;
+	std::vector<EventClass>& preservedEvents = ReplayState.PreservedEventsScratch;
 	preservedEvents.clear();
 	preservedEvents.reserve(static_cast<size_t>(originalCount));
 
@@ -963,7 +853,7 @@ void RemoveDoListEvents(Predicate shouldRemove)
 // Remove events the game inserted during playback.
 void RemoveReplayGameplayEventsFromDoList()
 {
-	if (!gReplay.Playback)
+	if (!ReplayState.Playback)
 		return;
 
 	const auto currentFrame = static_cast<unsigned int>(Unsorted::CurrentFrame);
@@ -976,9 +866,9 @@ void RemoveReplayGameplayEventsFromDoList()
 		if (event.Frame == currentFrame && event.Type == EventType::GameSpeed)
 		{
 			const int requestedSpeed = std::clamp(event.GameSpeed.GameSpeed, 0, MAX_GAME_SPEED_INDEX);
-			if (requestedSpeed != gReplay.PlaybackSpeedIndex)
+			if (requestedSpeed != ReplayState.PlaybackSpeedIndex)
 			{
-				gReplay.PlaybackSpeedIndex = requestedSpeed;
+				ReplayState.PlaybackSpeedIndex = requestedSpeed;
 				playbackSpeedChanged = true;
 			}
 		}
@@ -995,10 +885,12 @@ void RemoveReplayGameplayEventsFromDoList()
 	});
 }
 
-std::vector<uint32_t> GetSelectedObjectIDs()
+// Fills rather than returns, so the caller's buffer is reused: this runs on every main loop
+// iteration of a recording game.
+void FillSelectedObjectIDs(std::vector<uint32_t>& ids)
 {
 	auto& currentObjects = ObjectClass::CurrentObjects;
-	std::vector<uint32_t> ids;
+	ids.clear();
 	ids.reserve(currentObjects.Count);
 
 	for (int i = 0; i < currentObjects.Count; ++i)
@@ -1007,8 +899,6 @@ std::vector<uint32_t> GetSelectedObjectIDs()
 		if (pObj)
 			ids.push_back(static_cast<uint32_t>(pObj->UniqueID));
 	}
-
-	return ids;
 }
 
 bool IsCurrentSelection(const std::vector<uint32_t>& ids)
@@ -1031,27 +921,16 @@ bool IsCurrentSelection(const std::vector<uint32_t>& ids)
 	return index == ids.size();
 }
 
-uint32_t SumObjectIDs(const std::vector<uint32_t>& ids)
-{
-	uint32_t sum = 0;
-	for (const auto id : ids)
-		sum += id;
-
-	return sum;
-}
-
 // Record this frame when deterministic events or visible replay state changed.
 bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThisFrame,
 	const std::vector<SideChannelRecord>& sideChannelEvents)
 {
-	const bool tacticalPosChanged = !gReplay.HasLastWrittenFrameState
-		|| capture.FrameState.TacticalPos.X != gReplay.LastRecordedTacticalPos.X
-		|| capture.FrameState.TacticalPos.Y != gReplay.LastRecordedTacticalPos.Y;
+	const bool tacticalPosChanged = !ReplayState.HasLastWrittenFrameState
+		|| capture.TacticalPos.X != ReplayState.LastRecordedTacticalPos.X
+		|| capture.TacticalPos.Y != ReplayState.LastRecordedTacticalPos.Y;
 
-	const bool selectionChanged = !gReplay.HasLastWrittenFrameState
-		|| capture.FrameState.SelectedObjectCount != gReplay.LastRecordedSelectionCount
-		|| capture.FrameState.SelectedObjectCRC != gReplay.LastRecordedSelectionCRC
-		|| capture.SelectedObjectIDs != gReplay.LastRecordedSelectionIDs;
+	const bool selectionChanged = !ReplayState.HasLastWrittenFrameState
+		|| capture.SelectedObjectIDs != ReplayState.LastRecordedSelectionIDs;
 
 	const bool hasSideChannelEvents = !sideChannelEvents.empty();
 
@@ -1059,7 +938,7 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 		return true;
 
 	FrameRecordHeader header {};
-	header.FrameNumber = capture.FrameState.FrameNumber;
+	header.FrameNumber = capture.FrameNumber;
 	header.EventCountThisFrame = eventsThisFrame;
 	header.Flags = FrameRecordFlag_None;
 	if (tacticalPosChanged)
@@ -1073,18 +952,16 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 		return false;
 
 	if ((header.Flags & FrameRecordFlag_TacticalPos) != 0u
-		&& !WriteRaw(&capture.FrameState.TacticalPos, sizeof(capture.FrameState.TacticalPos)))
+		&& !WriteRaw(&capture.TacticalPos, sizeof(capture.TacticalPos)))
 	{
 		return false;
 	}
 
 	if ((header.Flags & FrameRecordFlag_Selection) != 0u)
 	{
-		if (!WriteRaw(&capture.FrameState.SelectedObjectCount, sizeof(capture.FrameState.SelectedObjectCount))
-			|| !WriteRaw(&capture.FrameState.SelectedObjectCRC, sizeof(capture.FrameState.SelectedObjectCRC)))
-		{
+		const int32_t selectedObjectCount = static_cast<int32_t>(capture.SelectedObjectIDs.size());
+		if (!WriteRaw(&selectedObjectCount, sizeof(selectedObjectCount)))
 			return false;
-		}
 
 		// One call for the whole block: every WriteRaw is a tdefl_compress call, and box-selecting
 		// a hundred units would otherwise mean a hundred of them on that frame.
@@ -1109,33 +986,32 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 		}
 	}
 
-	gReplay.HasLastWrittenFrameState = true;
-	gReplay.LastWrittenFrameNumber = capture.FrameState.FrameNumber;
-	gReplay.LastRecordedTacticalPos = capture.FrameState.TacticalPos;
-	gReplay.LastRecordedSelectionCount = capture.FrameState.SelectedObjectCount;
-	gReplay.LastRecordedSelectionCRC = capture.FrameState.SelectedObjectCRC;
-	gReplay.LastRecordedSelectionIDs = capture.SelectedObjectIDs;
+	ReplayState.HasLastWrittenFrameState = true;
+	ReplayState.LastWrittenFrameNumber = capture.FrameNumber;
+	ReplayState.LastRecordedTacticalPos = capture.TacticalPos;
+	ReplayState.LastRecordedSelectionIDs = capture.SelectedObjectIDs;
 
 	return true;
 }
 
 void FlushPendingRecordedFramesThrough(int frameNumber, int currentFrameEventCount)
 {
-	while (!gReplay.PendingFrameStates.empty())
+	while (!ReplayState.PendingFrameStates.empty())
 	{
-		const auto& capture = gReplay.PendingFrameStates.front();
-		const int pendingFrame = capture.FrameState.FrameNumber;
+		const auto& capture = ReplayState.PendingFrameStates.front();
+		const int pendingFrame = capture.FrameNumber;
 		if (pendingFrame > frameNumber)
 			break;
 
 		// Keep playback parsing bounded; excess side-channel records spill into later frames.
-		std::vector<SideChannelRecord> sideChannelForFrame;
-		while (!gReplay.PendingSideChannelEvents.empty()
-			&& gReplay.PendingSideChannelEvents.front().FrameNumber <= pendingFrame
+		std::vector<SideChannelRecord>& sideChannelForFrame = ReplayState.SideChannelScratch;
+		sideChannelForFrame.clear();
+		while (!ReplayState.PendingSideChannelEvents.empty()
+			&& ReplayState.PendingSideChannelEvents.front().FrameNumber <= pendingFrame
 			&& sideChannelForFrame.size() < static_cast<size_t>(SIDECHANNEL_MAX_EVENTS_PER_FRAME))
 		{
-			sideChannelForFrame.push_back(gReplay.PendingSideChannelEvents.front());
-			gReplay.PendingSideChannelEvents.pop_front();
+			sideChannelForFrame.push_back(ReplayState.PendingSideChannelEvents.front());
+			ReplayState.PendingSideChannelEvents.pop_front();
 		}
 
 		const int eventCount = pendingFrame == frameNumber ? currentFrameEventCount : 0;
@@ -1146,35 +1022,34 @@ void FlushPendingRecordedFramesThrough(int frameNumber, int currentFrameEventCou
 			return;
 		}
 
-		gReplay.PendingFrameStates.pop_front();
+		ReplayState.PendingFrameStates.pop_front();
 	}
 }
 
 void RecordFrameState()
 {
-	if (!gReplay.Recording)
+	if (!ReplayState.Recording)
 		return;
 
-	PendingRecordedFrameCapture capture;
-	auto& frameState = capture.FrameState;
-	frameState.FrameNumber = Unsorted::CurrentFrame;
-	frameState.TacticalPos = TacticalClass::Instance
+	const int frameNumber = Unsorted::CurrentFrame;
+
+	// The main loop runs faster than the game frame, so the same frame is usually captured several
+	// times over. Overwriting the pending entry in place reuses its buffer instead of building and
+	// moving a fresh capture on every pass.
+	if (ReplayState.PendingFrameStates.empty()
+		|| ReplayState.PendingFrameStates.back().FrameNumber != frameNumber)
+	{
+		ReplayState.PendingFrameStates.emplace_back();
+		ReplayState.PendingFrameStates.back().FrameNumber = frameNumber;
+	}
+
+	PendingRecordedFrameCapture& capture = ReplayState.PendingFrameStates.back();
+
+	capture.TacticalPos = TacticalClass::Instance
 		? TacticalClass::Instance->TacticalCoord1
 		: Point2D { 0, 0 };
 
-	capture.SelectedObjectIDs = GetSelectedObjectIDs();
-	frameState.SelectedObjectCount = static_cast<int32_t>(capture.SelectedObjectIDs.size());
-	frameState.SelectedObjectCRC = SumObjectIDs(capture.SelectedObjectIDs);
-
-	if (!gReplay.PendingFrameStates.empty()
-		&& gReplay.PendingFrameStates.back().FrameState.FrameNumber == frameState.FrameNumber)
-	{
-		gReplay.PendingFrameStates.back() = std::move(capture);
-	}
-	else
-	{
-		gReplay.PendingFrameStates.push_back(std::move(capture));
-	}
+	FillSelectedObjectIDs(capture.SelectedObjectIDs);
 }
 
 bool WriteReplayEndOfStreamMarker()
@@ -1184,29 +1059,36 @@ bool WriteReplayEndOfStreamMarker()
 	return WriteRaw(&marker, sizeof(marker));
 }
 
-// Stamp TotalFrames only after a clean recording shutdown.
-bool WriteRecordedTotalFramesToHeader()
+// Seeks back and stamps the frame count and the clean-shutdown flag into the header. Only ever
+// reached once recording has finished cleanly, so a recording that dies with the process leaves
+// both fields zero - the only signal a reader has that the frame stream is cut short.
+bool StampCleanShutdownIntoHeader()
 {
-	if (gReplay.ReplayFile == INVALID_HANDLE_VALUE)
+	if (ReplayState.ReplayFile == INVALID_HANDLE_VALUE)
 		return false;
+
+	static_assert(offsetof(ReplayHeader, Flags) == offsetof(ReplayHeader, TotalFrames) + sizeof(uint32_t),
+		"TotalFrames and Flags are stamped in one write and have to stay adjacent");
 
 	const LONG headerOffset = static_cast<LONG>(offsetof(ReplayHeader, TotalFrames));
-	if (SetFilePointer(gReplay.ReplayFile, headerOffset, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
+	if (SetFilePointer(ReplayState.ReplayFile, headerOffset, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
 		return false;
 
-	const uint32_t totalFrames = static_cast<uint32_t>(std::max(0, gReplay.LastWrittenFrameNumber));
+	const uint32_t tail[2] = {
+		static_cast<uint32_t>(std::max(0, ReplayState.LastWrittenFrameNumber)),
+		ReplayHeaderFlag_CleanShutdown
+	};
 
 	DWORD bytesWritten = 0;
-	const bool ok = WriteFile(gReplay.ReplayFile, &totalFrames, sizeof(totalFrames), &bytesWritten, nullptr) != FALSE
-		&& bytesWritten == sizeof(totalFrames);
+	const bool ok = WriteFile(ReplayState.ReplayFile, tail, sizeof(tail), &bytesWritten, nullptr) != FALSE
+		&& bytesWritten == sizeof(tail);
 
-	SetFilePointer(gReplay.ReplayFile, 0, nullptr, FILE_END);
+	SetFilePointer(ReplayState.ReplayFile, 0, nullptr, FILE_END);
 	return ok;
 }
 
 // Replays are shared, so records off disk are untrusted: the text arrays need not be terminated
 // and House/Aux index straight into engine arrays. False means the record cannot be made safe.
-// Taunts need no bound - Taunts_752B70 rejects out-of-range commands itself.
 bool SanitizeSideChannelRecord(SideChannelRecord& record)
 {
 	record.SenderName[SIDECHANNEL_NAME_LENGTH - 1] = L'\0';
@@ -1241,7 +1123,9 @@ bool SanitizeSideChannelRecord(SideChannelRecord& record)
 			&& record.Aux >= 0 && record.Aux < MAX_BEACON_SLOTS;
 
 	case SideChannelEventType::Taunt:
-		return true;
+		// Taunts_752B70 range-checks the command itself, but do not rely on a function we do not
+		// own to be the only bound on a value that came off disk.
+		return record.Aux >= 0 && record.Aux < MAX_TAUNT_COMMAND_COUNT;
 
 	default:
 		return false;
@@ -1280,11 +1164,8 @@ bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 
 	if ((record.Flags & FrameRecordFlag_Selection) != 0u)
 	{
-		if (!ReadRaw(&record.SelectedObjectCount, sizeof(record.SelectedObjectCount))
-			|| !ReadRaw(&record.SelectedObjectCRC, sizeof(record.SelectedObjectCRC)))
-		{
+		if (!ReadRaw(&record.SelectedObjectCount, sizeof(record.SelectedObjectCount)))
 			return false;
-		}
 
 		if (record.SelectedObjectCount < 0 || record.SelectedObjectCount > 4096)
 			return false;
@@ -1336,7 +1217,7 @@ void ApplyPlaybackSelection(const PlaybackFrameRecord& frameRecord)
 		return;
 	}
 
-	if (!gReplay.SelectUnits)
+	if (!ReplayState.SelectUnits)
 		return;
 
 	if (IsCurrentSelection(frameRecord.SelectedObjectIDs))
@@ -1377,7 +1258,7 @@ void ApplyPlaybackSelection(const PlaybackFrameRecord& frameRecord)
 // Replays recorded chat, beacons and taunts without using the network.
 void ApplySideChannelEvent(const SideChannelRecord& record)
 {
-	if (!gReplay.ShowChatAndBeacons)
+	if (!ReplayState.ShowChatAndBeacons)
 		return;
 
 	constexpr int SIDECHANNEL_MESSAGE_DURATION_FRAMES = 1800;
@@ -1403,17 +1284,16 @@ void ApplySideChannelEvent(const SideChannelRecord& record)
 
 	case SideChannelEventType::BeaconText:
 	{
-		// Beacon text uses BeaconPlacement::Message_431450.
 		using BeaconMessageFn = char(__thiscall*)(BeaconManagerClass*, const wchar_t*, int, int, char);
-		reinterpret_cast<BeaconMessageFn>(0x431450)(&BeaconManagerClass::Instance, record.Text, record.House, record.Aux, 1);
+		reinterpret_cast<BeaconMessageFn>(BEACON_MANAGER_MESSAGE_ADDRESS)(
+			&BeaconManagerClass::Instance, record.Text, record.House, record.Aux, 1);
 		break;
 	}
 
 	case SideChannelEventType::Taunt:
 	{
-		// Taunts_752B70 resolves the command byte and plays the sound.
 		using TauntsFn = int(__fastcall*)(int);
-		reinterpret_cast<TauntsFn>(0x752B70)(record.Aux);
+		reinterpret_cast<TauntsFn>(TAUNTS_ADDRESS)(record.Aux);
 		break;
 	}
 
@@ -1424,20 +1304,20 @@ void ApplySideChannelEvent(const SideChannelRecord& record)
 
 void StopReplaySystem()
 {
-	if (gReplay.Recording)
+	if (ReplayState.Recording)
 	{
 		FlushPendingRecordedFramesThrough(std::numeric_limits<int>::max(), 0);
-		if (gReplay.ReplayFile != INVALID_HANDLE_VALUE)
+		if (ReplayState.ReplayFile != INVALID_HANDLE_VALUE)
 		{
 			if (!WriteReplayEndOfStreamMarker())
 				Debug::Log("[Replay] Failed to write replay end-of-stream marker.\n");
 
 			// The header stamp seeks to the start of the file, so the stream has to be terminated
 			// and fully written out first.
-			if (gReplay.Writer.IsActive() && !gReplay.Writer.Finish())
+			if (ReplayState.Writer.IsActive() && !ReplayState.Writer.Finish())
 				Debug::Log("[Replay] Failed to finish the compressed replay stream.\n");
 
-			if (!WriteRecordedTotalFramesToHeader())
+			if (!StampCleanShutdownIntoHeader())
 				Debug::Log("[Replay] Failed to stamp the total frame count into the replay header.\n");
 		}
 	}
@@ -1448,11 +1328,11 @@ void StopReplaySystem()
 // Pins the camera to the last recorded viewport position.
 void ApplyLockedViewport()
 {
-	if (!gReplay.LockViewport || !gReplay.HasLockedViewportPos || !TacticalClass::Instance)
+	if (!ReplayState.LockViewport || !ReplayState.HasLockedViewportPos || !TacticalClass::Instance)
 		return;
 
 	auto* tc = TacticalClass::Instance;
-	const Point2D& target = gReplay.LockedViewportPos;
+	const Point2D& target = ReplayState.LockedViewportPos;
 
 	// Avoid forcing a full repaint when the viewport is already correct.
 	if (tc->TacticalCoord1.X == target.X && tc->TacticalCoord1.Y == target.Y)
@@ -1461,9 +1341,8 @@ void ApplyLockedViewport()
 	tc->TacticalCoord1 = target;
 	tc->TacticalCoord2 = target;
 
-	// sub_6D8B30: recalculates TacticalPos (top-left) and visible area.
-	static auto RecalcViewport
-		= reinterpret_cast<void(__thiscall*)(TacticalClass*)>(0x6D8B30);
+	const auto RecalcViewport
+		= reinterpret_cast<void(__thiscall*)(TacticalClass*)>(TACTICAL_RECALCULATE_VIEWPORT_ADDRESS);
 	RecalcViewport(tc);
 
 	tc->Redrawing = true;
@@ -1472,7 +1351,7 @@ void ApplyLockedViewport()
 // Whether playback should show the whole map instead of the recording player's shroud.
 bool PlaybackWantsFullMapReveal()
 {
-	return gReplay.Playback && (!gReplay.ShroudEnabled || gReplay.SpectatorView);
+	return ReplayState.Playback && (!ReplayState.ShroudEnabled || ReplayState.SpectatorView);
 }
 
 // Revealing once does not hold. HouseClass::Visionary gates MapClass::Reveal, and every path that
@@ -1492,17 +1371,17 @@ void MaintainFullMapReveal()
 
 void RestoreFrameState()
 {
-	if (!gReplay.Playback)
+	if (!ReplayState.Playback)
 		return;
 
-	gReplay.ExpectedEventsThisFrame = 0;
+	ReplayState.ExpectedEventsThisFrame = 0;
 
 	// Keep the viewport locked on frames without replay records.
 	ApplyLockedViewport();
 
 	MaintainFullMapReveal();
 
-	if (!gReplay.HasPendingPlaybackFrame && !gReplay.PlaybackStreamEnded)
+	if (!ReplayState.HasPendingPlaybackFrame && !ReplayState.PlaybackStreamEnded)
 	{
 		PlaybackFrameRecord nextRecord {};
 		if (!ReadNextPlaybackFrameRecord(nextRecord))
@@ -1514,19 +1393,19 @@ void RestoreFrameState()
 
 		if (nextRecord.EndOfStream)
 		{
-			gReplay.PlaybackStreamEnded = true;
+			ReplayState.PlaybackStreamEnded = true;
 		}
 		else
 		{
-			gReplay.PendingPlaybackFrame = std::move(nextRecord);
-			gReplay.HasPendingPlaybackFrame = true;
+			ReplayState.PendingPlaybackFrame = std::move(nextRecord);
+			ReplayState.HasPendingPlaybackFrame = true;
 		}
 	}
 
-	if (!gReplay.HasPendingPlaybackFrame)
+	if (!ReplayState.HasPendingPlaybackFrame)
 		return;
 
-	const auto& frameRecord = gReplay.PendingPlaybackFrame;
+	const auto& frameRecord = ReplayState.PendingPlaybackFrame;
 	if (frameRecord.FrameNumber < Unsorted::CurrentFrame)
 	{
 		Debug::Log("[Replay] Frame mismatch during playback (expected %u got %d).\n",
@@ -1538,13 +1417,13 @@ void RestoreFrameState()
 	if (frameRecord.FrameNumber > Unsorted::CurrentFrame)
 		return;
 
-	gReplay.ExpectedEventsThisFrame = frameRecord.EventCountThisFrame;
+	ReplayState.ExpectedEventsThisFrame = frameRecord.EventCountThisFrame;
 
 	if ((frameRecord.Flags & FrameRecordFlag_TacticalPos) != 0u)
 	{
 		// Track this even when locking is disabled.
-		gReplay.LockedViewportPos = frameRecord.TacticalPos;
-		gReplay.HasLockedViewportPos = true;
+		ReplayState.LockedViewportPos = frameRecord.TacticalPos;
+		ReplayState.HasLockedViewportPos = true;
 
 		ApplyLockedViewport();
 	}
@@ -1560,7 +1439,7 @@ void RestoreFrameState()
 			ApplySideChannelEvent(sideChannelEvent);
 	}
 
-	gReplay.HasPendingPlaybackFrame = false;
+	ReplayState.HasPendingPlaybackFrame = false;
 }
 
 // Record every event on this frame; playback filters non-gameplay events later.
@@ -1577,7 +1456,7 @@ void RecordEventsForCurrentFrame()
 	}
 
 	FlushPendingRecordedFramesThrough(Unsorted::CurrentFrame, eventsThisFrame);
-	if (!gReplay.Recording)
+	if (!ReplayState.Recording)
 		return;
 
 	for (int i = 0; i < doListCount; ++i)
@@ -1594,9 +1473,9 @@ void RecordEventsForCurrentFrame()
 		}
 	}
 
-	if (Unsorted::CurrentFrame - gReplay.LastSyncFlushFrame >= REPLAY_SYNC_FLUSH_FRAME_INTERVAL)
+	if (Unsorted::CurrentFrame - ReplayState.LastSyncFlushFrame >= REPLAY_SYNC_FLUSH_FRAME_INTERVAL)
 	{
-		gReplay.LastSyncFlushFrame = Unsorted::CurrentFrame;
+		ReplayState.LastSyncFlushFrame = Unsorted::CurrentFrame;
 		SyncFlushRecordingStream();
 	}
 }
@@ -1604,16 +1483,16 @@ void RecordEventsForCurrentFrame()
 void PushSideChannelEvent(SideChannelRecord&& record)
 {
 	record.FrameNumber = Unsorted::CurrentFrame;
-	gReplay.PendingSideChannelEvents.push_back(std::move(record));
+	ReplayState.PendingSideChannelEvents.push_back(std::move(record));
 }
 
 void PlaybackFrameEvents()
 {
-	if (!gReplay.Playback)
+	if (!ReplayState.Playback)
 		return;
 
-	const int eventsToReplay = gReplay.ExpectedEventsThisFrame;
-	gReplay.ExpectedEventsThisFrame = 0;
+	const int eventsToReplay = ReplayState.ExpectedEventsThisFrame;
+	ReplayState.ExpectedEventsThisFrame = 0;
 
 	for (int i = 0; i < eventsToReplay; ++i)
 	{
@@ -1645,12 +1524,12 @@ void PlaybackFrameEvents()
 void StartReplayRecording()
 {
 	AbortReplaySystem();
-	gReplay.Recording = true;
+	ReplayState.Recording = true;
 
 	const auto* pConfig = GetConfig();
-	gReplay.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
-	gReplay.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
-	gReplay.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
+	ReplayState.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
+	ReplayState.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
+	ReplayState.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
 
 	if (!ScenarioClass::Instance)
 	{
@@ -1676,23 +1555,32 @@ void StartReplayRecording()
 void StartReplayPlayback(const char* replayPath)
 {
 	AbortReplaySystem();
-	gReplay.Playback = true;
+	ReplayState.Playback = true;
 
-	gReplay.PlaybackSpeedIndex = std::clamp(GameOptionsClass::Instance.GameSpeed, 0, MAX_GAME_SPEED_INDEX);
+	const auto* pPlaybackConfig = GetConfig();
 
-	int recordedGameSpeed = gReplay.PlaybackSpeedIndex;
-	if (!gReplay.HasPlaybackHeader)
+	// GameOptionsClass::GameSpeed is only a fallback: it still holds what StartScenario applied
+	// from spawn.ini, and is overwritten with the recorded speed a few lines down. Reading the
+	// playback speed from its own key means this no longer depends on that ordering.
+	const int requestedSpeed = (pPlaybackConfig && pPlaybackConfig->ReplayPlaybackSpeed >= 0)
+		? pPlaybackConfig->ReplayPlaybackSpeed
+		: GameOptionsClass::Instance.GameSpeed;
+
+	ReplayState.PlaybackSpeedIndex = std::clamp(requestedSpeed, 0, MAX_GAME_SPEED_INDEX);
+
+	int recordedGameSpeed = ReplayState.PlaybackSpeedIndex;
+	if (!ReplayState.HasPlaybackHeader)
 	{
 		ReplayHeader header {};
 		if (ReadReplayHeaderFromPath(replayPath, header))
 		{
-			gReplay.PlaybackHeader = header;
-			gReplay.HasPlaybackHeader = true;
+			ReplayState.PlaybackHeader = header;
+			ReplayState.HasPlaybackHeader = true;
 		}
 	}
 
-	if (gReplay.HasPlaybackHeader)
-		recordedGameSpeed = std::clamp(static_cast<int>(gReplay.PlaybackHeader.RecordedGameSpeed), 0, MAX_GAME_SPEED_INDEX);
+	if (ReplayState.HasPlaybackHeader)
+		recordedGameSpeed = std::clamp(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed), 0, MAX_GAME_SPEED_INDEX);
 
 	GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 	GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
@@ -1700,30 +1588,35 @@ void StartReplayPlayback(const char* replayPath)
 	ApplyReplayTimingFromCurrentGameSpeed();
 
 	const auto* pConfig = GetConfig();
-	gReplay.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
-	gReplay.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
-	gReplay.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
-	gReplay.SpectatorView = pConfig ? pConfig->ReplaySpectator : false;
-	gReplay.ShowChatAndBeacons = pConfig ? pConfig->ReplayShowChatAndBeacons : true;
+	ReplayState.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
+	ReplayState.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
+	ReplayState.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
+	ReplayState.SpectatorView = pConfig ? pConfig->ReplaySpectator : false;
+	ReplayState.ShowChatAndBeacons = pConfig ? pConfig->ReplayShowChatAndBeacons : true;
 
-	strncpy_s(gReplay.PlaybackPath, sizeof(gReplay.PlaybackPath), replayPath, _TRUNCATE);
+	strncpy_s(ReplayState.PlaybackPath, sizeof(ReplayState.PlaybackPath), replayPath, _TRUNCATE);
 
-	if (!OpenPlaybackReplayStream(gReplay.PlaybackPath))
+	if (!OpenPlaybackReplayStream(ReplayState.PlaybackPath))
 	{
 		StopReplaySystem();
 
 		// StartScenario already skipped CreateConnections because ReplayFile was set, so there is no
 		// live session to fall back to - carrying on leaves a game that can never advance a frame.
 		Debug::FatalErrorAndExit("[Replay] Failed to open replay file for playback: %s",
-			gReplay.PlaybackPath);
+			ReplayState.PlaybackPath);
 	}
 }
 
-} // namespace
+} // namespace Internal
+
+} // namespace ReplaySystem
+
+// The public API below is defined outside Internal, so pull its names in.
+using namespace ReplaySystem::Internal;
 
 void ReplaySystem::RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex)
 {
-	if (!gReplay.Recording)
+	if (!ReplayState.Recording)
 		return;
 
 	SideChannelRecord record {};
@@ -1740,7 +1633,7 @@ void ReplaySystem::RecordChatMessage(int houseIndex, const wchar_t* senderName, 
 
 void ReplaySystem::RecordTaunt(int tauntCommand)
 {
-	if (!gReplay.Recording)
+	if (!ReplayState.Recording)
 		return;
 
 	SideChannelRecord record {};
@@ -1752,7 +1645,7 @@ void ReplaySystem::RecordTaunt(int tauntCommand)
 
 void ReplaySystem::RecordBeaconPlace(int houseIndex, const CoordStruct& coord, int beaconSlot)
 {
-	if (!gReplay.Recording)
+	if (!ReplayState.Recording)
 		return;
 
 	SideChannelRecord record {};
@@ -1766,7 +1659,7 @@ void ReplaySystem::RecordBeaconPlace(int houseIndex, const CoordStruct& coord, i
 
 void ReplaySystem::RecordBeaconDelete(int houseIndex, int beaconSlot)
 {
-	if (!gReplay.Recording)
+	if (!ReplayState.Recording)
 		return;
 
 	SideChannelRecord record {};
@@ -1779,7 +1672,7 @@ void ReplaySystem::RecordBeaconDelete(int houseIndex, int beaconSlot)
 
 void ReplaySystem::RecordBeaconText(int houseIndex, int beaconSlot, const wchar_t* text)
 {
-	if (!gReplay.Recording)
+	if (!ReplayState.Recording)
 		return;
 
 	SideChannelRecord record {};
@@ -1800,388 +1693,12 @@ bool ReplaySystem::IsPlaybackRequested()
 
 bool ReplaySystem::IsPlaybackActive()
 {
-	return gReplay.Playback;
+	return ReplayState.Playback;
 }
 
 void ReplaySystem::OnGameStartReset()
 {
 	StopReplaySystem();
-	gReplay.InitRandomHandled = false;
-	gReplay.PlaybackPath[0] = '\0';
-}
-
-DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
-{
-	if (gReplay.InitRandomHandled)
-	{
-		if (ReplaySystem::IsPlaybackRequested() && gReplay.HasPlaybackHeader)
-		{
-			ApplyPlaybackInitialState();
-			R->EAX(Game::Seed);
-			return 0x52FDF9;
-		}
-
-		return 0;
-	}
-
-	gReplay.InitRandomHandled = true;
-	if (!ReplaySystem::IsPlaybackRequested())
-		return 0;
-
-	const auto* pConfig = GetConfig();
-	if (!pConfig)
-		return 0;
-
-	ReplayHeader header {};
-	if (!ReadReplayHeaderFromPath(pConfig->ReplayFile, header))
-	{
-		Debug::Log("[Replay] Failed to read replay header from %s.\n", pConfig->ReplayFile);
-		return 0;
-	}
-
-	gReplay.PlaybackHeader = header;
-	gReplay.HasPlaybackHeader = true;
-	ApplyPlaybackInitialState();
-
-	R->EAX(Game::Seed);
-	return 0x52FDF9;
-}
-
-// Hooks Clear_Scenario's ten byte `mov [edx+214h], 1000000`; a 0x5 hook would split the immediate.
-// Return 0, not 0x685663 - Phobos hooks this address too.
-//
-// Syringe re-executes that reset after every hook here has run, so this body still sees the
-// previous scenario's counter and applies the reset by hand for BuildReplayHeader's benefit.
-// Nothing written to UniqueID here survives; the playback restore is in the 0x686B6A hook below.
-DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
-{
-	auto* const pScenario = R->EDX<ScenarioClass*>();
-	if (pScenario)
-		pScenario->UniqueID = 1000000;
-
-	const auto* pConfig = GetConfig();
-	if (!pConfig)
-		return 0;
-
-	if (ReplaySystem::IsPlaybackRequested())
-	{
-		ApplyPlaybackInitialState();
-		StartReplayPlayback(pConfig->ReplayFile);
-	}
-	else if (pConfig->EnableReplayRecording)
-	{
-		StartReplayRecording();
-	}
-	else
-	{
-		StopReplaySystem();
-	}
-
-	return 0;
-}
-
-// Read_Scenario_INI, just after its `call Clear_Scenario`. Order is
-// Select_Game -> Init_Random -> ... -> Read_Scenario_INI -> Clear_Scenario, so this is the first
-// point past the UniqueID reset and before any object exists - every earlier restore is undone.
-// It has to be pinned because object UniqueIDs come from ++ScenarioClass::UniqueID and the
-// recorded selection is stored by them. The hooked `cmp Session, ebx` is also the `jnz` target
-// that skips Clear_Scenario, so both paths are covered.
-DEFINE_HOOK(0x686B6A, ReadScenarioINI_ReplayApplyState, 0x6)
-{
-	if (gReplay.Playback)
-		ApplyPlaybackInitialState();
-
-	return 0;
-}
-
-// MapClass::Reset_Shroud (thiscall; EAX holds `house` by this point, from the `mov eax,
-// [esp+house]` at the function's true entry, 0x577AB0). Gameplay reshrouds the local player
-// constantly during a normal match - gap generators, spy satellite loss, shroud crates, map
-// triggers - and whenever it targets PlayerPtr (or a null house, which it treats the same way
-// after logging a debug warning) its body is a full map-cell walk plus a forced full-screen redraw
-// and radar rebuild. During full-map-reveal playback (ReplayShroudEnabled=false or spectator view)
-// MaintainFullMapReveal notices the resulting Visionary==false on the very next frame and
-// immediately re-runs the equally expensive Reveal (0x577D90), so every reshroud event in the
-// recording pays for two full-map passes - the intermittent CPU spikes during playback. Skipping
-// the reshroud for the local player in that mode removes both: the map simply never leaves
-// "revealed", which is what the setting asks for anyway. Other houses' cheap MapIsClear
-// bookkeeping (the only work this function does for house != PlayerPtr) is left untouched.
-//
-// Size is 6, not 2: Syringe's injected jump needs a full 5 bytes regardless of what's declared
-// here, and a too-small size just means it silently overwrites bytes beyond what it was told about
-// (this exact mistake, on a different hook, produced a same-session access-violation crash 5 bytes
-// past its declared 3-byte hook). 2 only covers `cmp eax, ebx`; 6 is the next instruction-aligned
-// boundary at or past 5, covering `cmp eax, ebx; mov esi, ecx; jz loc_577AD0` as a whole (ending
-// exactly at 0x577ABE, the start of `mov ecx, [eax+30h]`) - confirmed none of those three
-// instructions are themselves a jump target from elsewhere in the function, so claiming them is
-// safe.
-DEFINE_HOOK(0x577AB8, MapClass_ResetShroud_SkipDuringFullRevealPlayback, 0x6)
-{
-	HouseClass* const house = R->EAX<HouseClass*>();
-	if (gReplay.Playback && PlaybackWantsFullMapReveal()
-		&& (house == HouseClass::CurrentPlayer || house == nullptr))
-	{
-		return 0x577B9F;
-	}
-
-	return 0;
-}
-
-// Capture visible replay state before dialog handling can skip the normal replay path.
-DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
-{
-	if (gReplay.Recording)
-	{
-		RecordFrameState();
-	}
-
-	if (gReplay.Playback)
-	{
-		ApplyReplayTimingFromCurrentGameSpeed();
-		RestoreFrameState();
-	}
-
-	return 0;
-}
-
-DEFINE_HOOK(0x64820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
-{
-	if (gReplay.Recording)
-	{
-		RecordEventsForCurrentFrame();
-	}
-
-	if (gReplay.Playback)
-	{
-		RemoveReplayGameplayEventsFromDoList();
-		PlaybackFrameEvents();
-	}
-
-	return 0x64821C;
-}
-
-// Replay playback does not pump live network traffic.
-DEFINE_HOOK(0x55D8E3, MainLoop_SkipIPXPumpDuringReplayPlayback, 0x5)
-{
-	if (gReplay.Playback)
-	{
-		return 0x55D8E8;
-	}
-
-	return 0;
-}
-
-DEFINE_HOOK(0x55D25C, GameExit_FlushReplayBuffers, 0x6)
-{
-	StopReplaySystem();
-	return 0;
-}
-
-DEFINE_HOOK(0x55CF13, GameExit_Sell_FlushReplayBuffers, 0x5)
-{
-	StopReplaySystem();
-	return 0;
-}
-
-DEFINE_HOOK(0x6BEC60, Game_Exit_FlushReplayBuffers, 0x5)
-{
-	StopReplaySystem();
-	return 0;
-}
-
-// TechnoClass::Create_Gap (thiscall, no stack args - hooked at the true entry, before any
-// prologue runs, so 0x6FB460 - this function's own bare `retn` - is reachable directly).
-// Whenever an enemy gap generator/jammer comes online, this walks every cell in its jam radius and,
-// for each cell not allied with PlayerPtr, bumps that cell's ShroudCounter and GapsCoveringCell -
-// directly re-shrouding patches of the map around itself from PlayerPtr's point of view. That is
-// per-cell state, not the house-wide Visionary flag MaintainFullMapReveal watches, so an enemy gap
-// generator re-fogs the ground around itself during full-map-reveal playback regardless of the
-// Reset_Shroud fix above, and keeps doing it every time the generator's power flips back on (its
-// own GeneratingGap latch only blocks re-entry while power stays up) - matching what was reported:
-// fine until the first gap generator goes up, and recurring from then on as power fluctuates.
-// Skip the function outright for the local player during full-map-reveal playback, so nothing can
-// re-shroud PlayerPtr's view in the first place.
-//
-// This also skips the bookkeeping Create_Gap does for the player's own or an allied gap generator
-// (the field_13C_gapgen coverage counter used by radar's jam-radius check, plus the unconditional
-// RadarClass_Update_Map_/Flag_To_Redraw at the end) - not just the enemy-shroud effect this hook
-// exists to suppress. Accepted deliberately: in full-map-reveal playback that bookkeeping only
-// feeds a jam-radius indicator nobody is looking at with the whole map already shown, redraw state
-// still catches up on the next unrelated frame, and a per-cell hook that preserves it would need
-// to duplicate this function's own ally checks from a raw, pre-prologue entry point - meaningfully
-// more risk for a cosmetic gap. Revisit with a hook inside the loop (skip only the write block
-// gated on "not allied with PlayerPtr", landing on its own existing skip target loc_6FB3C1) if that
-// indicator turns out to matter.
-DEFINE_HOOK(0x6FB170, TechnoClass_CreateGap_SkipDuringFullRevealPlayback, 0x5)
-{
-	if (gReplay.Playback && PlaybackWantsFullMapReveal())
-		return 0x6FB460;
-
-	return 0;
-}
-
-// Playback is not waiting on anyone, so the network delay budget never has to expire.
-DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
-{
-	if (gReplay.Playback)
-	{
-		*reinterpret_cast<int*>(NETWORK_DELAY_TIME_ADDRESS) = std::numeric_limits<int>::max();
-	}
-
-	return 0;
-}
-
-// Force-complete the load-progress bar for playback, skirmish and campaign, instead of letting it
-// animate. This is SessionClass::Callback's true entry point, but the function is also the generic
-// progress-tick/pump callback threaded through the entire scenario-load pipeline (Read_Scenario_INI,
-// Init_Theaters, MapGeneratorClass_*, Wait_For_Players, and more - confirmed via its xrefs), not
-// just the multiplayer wait screen. A single call here just nudges progress toward a target and
-// gets re-invoked repeatedly as loading proceeds, which - for any session without a real network
-// peer pacing it - means the bar genuinely animates 0->100 over many real loading-screen frames.
-//
-// REVERTED to playback-only (2026-08-22): this was briefly widened to SessionClass::IsSingleplayer()
-// (skirmish/campaign) on the theory that Sync_Delay (0x55E160) - called every loading-screen frame -
-// routes GAME_SKIRMISH sessions through a real Sleep(FrameTimer.DelayTime) frame-rate cap, and that
-// the animation was costing wall-clock time paying for it. That measured a real speedup (~3.3s ->
-// ~1.1s on a live skirmish load), but the mechanism was wrong: Scenario_Load_Wait (0x684370), the
-// actual driver of that Sync_Delay-paced loop, returns immediately for GAME_CAMPAIGN/GAME_SKIRMISH
-// and never runs it. What this hook actually did instead: forcing PlayerProgresses[] directly means
-// ProgressScreenClass_callback_643C50 never again sees current < target on a later call, so it never
-// reaches its own redraw trigger (SendMessageA(hWnd, WM_PAINT, ...) or the fullscreen draw path
-// ProgressScreenClass_LoadTextColor2) - the loading screen stops repainting entirely (reported as a
-// black screen), and the speedup is a side effect of skipping those draws rather than an animation.
-// The general loading slowdown is fixed in Misc/LoadingScreen.cpp by replacing the legacy fixed
-// blit delay with an actual completion check. This direct completion remains playback-only because
-// that path already accepts skipping the live progress animation.
-DEFINE_HOOK(0x69AE90, WaitForPlayers_SkipProgressAnimation, 0x5)
-{
-	if (gReplay.Playback && !gReplay.ProgressBarForcedComplete)
-	{
-		gReplay.ProgressBarForcedComplete = true;
-		for (int i = 0; i < 8; ++i)
-		{
-			ProgressScreenClass::Instance.PlayerProgresses[i] = 100;
-		}
-	}
-
-	return 0;
-}
-
-// SessionClass::Callback, at `cmp dword ptr [this+284Ch], 1` (loc_69AF0F) - the check the function
-// itself uses to decide whether to run its per-player network-sync dance at all. offset 0x284C is
-// SessionClass::Instance.StartSpots.Count (DynamicVectorClass<NodeNameType*>: vtable +0, Items +4,
-// Capacity +8, IsAllocated +0xC, Count +0x10 -> 0x283C + 0x10 = 0x284C; StartSpots sits at 0x283C
-// per YRpp/SessionClass.h, confirmed by the next field, unknown_2854, landing exactly one vector
-// later). When Count == 1 it jumps straight to 0x69B14E and skips the whole dance; otherwise, once
-// player 0's progress crosses 99.95%, it broadcasts a "guaranteed progress" message to every other
-// player over IPX/NullModem and busy-waits (Sleep(20) in a loop) up to 240 SystemTimerClass ticks -
-// about 4 seconds - for the send queue to drain below 5. Playback has no real peer to drain that
-// queue, and the broadcast loop only sends anything when Players.ActiveCount > 1, so a multi-player
-// replay's session takes the "do the dance" path and burns the full ~4 seconds - the load-in stall
-// right after the progress bar reaches 100%. Forcing the skip-to-0x69B14E branch the game already
-// takes for StartSpots.Count == 1 sessions removes exactly that stall.
-DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
-{
-	if (gReplay.Playback)
-		return 0x69B14E;
-
-	return 0;
-}
-
-// --- Side-channel recording taps --------------------------------------------------------------
-// Chat, beacons and taunts bypass EventClass::DoList and are recorded here.
-// Some local beacon calls use -1/-1; resolve them before writing the replay.
-namespace
-{
-
-bool ResolveFlaggedBeaconSlot(int& house, int& slot)
-{
-	for (int h = 0; h < 8; ++h)
-	{
-		for (int s = 0; s < 3; ++s)
-		{
-			BeaconClass* pBeacon = BeaconManagerClass::Instance.Beacons[h][s];
-			if (pBeacon && (pBeacon->Bitfield & BEACON_FLAG_LOCAL) != 0)
-			{
-				house = h;
-				slot = s;
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-
-} // namespace
-
-// BeaconManagerClass::Place. __thiscall(ECX=this); stack (relative to ESP at entry, before the
-// prologue's `sub esp` runs): +0 retaddr, +4 house, +8 coord.X, +0xC coord.Y, +0x10 coord.Z,
-// +0x14 houseBeaconId (-1 = auto-assign a free slot).
-DEFINE_HOOK(0x430BA0, BeaconManagerClass_Place_RecordPlacement, 0x6)
-{
-	if (gReplay.Recording)
-	{
-		const int house = R->Stack<int>(0x4);
-		CoordStruct coord;
-		coord.X = R->Stack<int>(0x8);
-		coord.Y = R->Stack<int>(0xC);
-		coord.Z = R->Stack<int>(0x10);
-		const int slot = R->Stack<int>(0x14);
-
-		ReplaySystem::RecordBeaconPlace(house, coord, slot);
-	}
-
-	return 0;
-}
-
-// Beacon delete. Stack: +4 house, +8 slot; -1/-1 means the active local beacon.
-DEFINE_HOOK(0x4311C0, BeaconPlacement_Delete_RecordDeletion, 0x6)
-{
-	if (gReplay.Recording)
-	{
-		int house = R->Stack<int>(0x4);
-		int slot = R->Stack<int>(0x8);
-
-		bool shouldRecord = true;
-		if (house == -1 && slot == -1)
-			shouldRecord = ResolveFlaggedBeaconSlot(house, slot);
-
-		if (shouldRecord)
-			ReplaySystem::RecordBeaconDelete(house, slot);
-	}
-
-	return 0;
-}
-
-// Beacon text. Skip local compose previews; record final and remote-applied text.
-// Stack: +4 text, +8 house, +0xC slot, +0x10 broadcast.
-DEFINE_HOOK(0x431450, BeaconPlacement_Message_RecordText, 0x6)
-{
-	if (gReplay.Recording)
-	{
-		const wchar_t* text = R->Stack<const wchar_t*>(0x4);
-		int house = R->Stack<int>(0x8);
-		int slot = R->Stack<int>(0xC);
-		const int broadcast = R->Stack<int>(0x10);
-
-		bool shouldRecord = broadcast != 0 || house != -1 || slot != -1;
-		// Committed local text still needs its concrete beacon slot.
-		if (shouldRecord && house == -1 && slot == -1)
-			shouldRecord = ResolveFlaggedBeaconSlot(house, slot);
-
-		if (shouldRecord)
-			ReplaySystem::RecordBeaconText(house, slot, text);
-	}
-
-	return 0;
-}
-
-// Taunts_752B70. __fastcall(ECX=command).
-DEFINE_HOOK(0x752B70, Taunts_RecordPlayback, 0x5)
-{
-	if (gReplay.Recording)
-		ReplaySystem::RecordTaunt(R->ECX<int>());
-
-	return 0;
+	ReplayState.InitRandomHandled = false;
+	ReplayState.PlaybackPath[0] = '\0';
 }

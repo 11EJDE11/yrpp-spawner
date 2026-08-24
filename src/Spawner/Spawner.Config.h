@@ -113,6 +113,10 @@ public:
 	bool ReplayShroudEnabled;
 	bool ReplayLockedViewport;
 	bool ReplaySelectUnits;
+	// Index into the engine's game speed table to play back at, or -1 to use whatever the recording
+	// ran at. Separate from GameSpeed so playback pacing does not depend on the order in which
+	// StartScenario and the replay system touch GameOptionsClass.
+	int  ReplayPlaybackSpeed;
 	// Watch as an observer: reveals the whole map and makes cloaked/disguised units and radar blips
 	// visible. Off by default, so playback stays from the recorded player's point of view.
 	bool ReplaySpectator;
@@ -203,6 +207,7 @@ public:
 		, ReplayShroudEnabled { false }
 		, ReplayLockedViewport { true }
 		, ReplaySelectUnits { true }
+		, ReplayPlaybackSpeed { -1 }
 		, ReplaySpectator { false }
 		, ReplayShowChatAndBeacons { true }
 
