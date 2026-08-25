@@ -1211,16 +1211,16 @@ bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 
 void ApplyPlaybackSelection(const PlaybackFrameRecord& frameRecord)
 {
+	if (!ReplayState.SelectUnits)
+		return;
+
 	const int maxSelectionCount = std::max(AbstractClass::Array.Count, 0);
 	if (frameRecord.SelectedObjectCount < 0 || frameRecord.SelectedObjectCount > maxSelectionCount)
 	{
-		Debug::Log("[Replay] Invalid selected object count (%d) during playback.\n", frameRecord.SelectedObjectCount);
-		StopReplaySystem();
+		Debug::Log("[Replay] Skipping a recorded selection of %d objects; %d objects exist.\n",
+			frameRecord.SelectedObjectCount, maxSelectionCount);
 		return;
 	}
-
-	if (!ReplayState.SelectUnits)
-		return;
 
 	if (IsCurrentSelection(frameRecord.SelectedObjectIDs))
 		return;
