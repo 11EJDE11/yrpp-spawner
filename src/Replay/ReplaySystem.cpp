@@ -727,6 +727,9 @@ void ResetRuntimeFlagsForScenario()
 	ReplayState.ExpectedEventsThisFrame = 0;
 	ReplayState.BytesAtLastDiskFlush = 0;
 	ReplayState.LastSyncFlushFrame = 0;
+	ReplayState.ExpectedGameCRC = 0;
+	ReplayState.HasExpectedGameCRC = false;
+	ReplayState.DivergenceReported = false;
 	ReplayState.ProgressBarForcedComplete = false;
 	ReplayState.PendingFrameStates.clear();
 	ReplayState.PendingSideChannelEvents.clear();
@@ -1038,9 +1041,13 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 		|| capture.SelectedObjectIDs != ReplayState.LastRecordedSelectionIDs;
 
 	const bool hasSideChannelEvents = !sideChannelEvents.empty();
+	const bool hasGameCRC = capture.HasGameCRC;
 
-	if (eventsThisFrame == 0 && !tacticalPosChanged && !selectionChanged && !hasSideChannelEvents)
+	if (eventsThisFrame == 0 && !tacticalPosChanged && !selectionChanged && !hasSideChannelEvents
+		&& !hasGameCRC)
+	{
 		return true;
+	}
 
 	FrameRecordHeader header {};
 	header.FrameNumber = capture.FrameNumber;
@@ -1052,6 +1059,8 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 		header.Flags |= FrameRecordFlag_Selection;
 	if (hasSideChannelEvents)
 		header.Flags |= FrameRecordFlag_SideChannel;
+	if (hasGameCRC)
+		header.Flags |= FrameRecordFlag_GameCRC;
 
 	if (!WriteRaw(&header, sizeof(header)))
 		return false;
@@ -1090,6 +1099,9 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 				return false;
 		}
 	}
+
+	if (hasGameCRC && !WriteRaw(&capture.GameCRC, sizeof(capture.GameCRC)))
+		return false;
 
 	ReplayState.HasLastWrittenFrameState = true;
 	ReplayState.LastWrittenFrameNumber = capture.FrameNumber;
@@ -1257,7 +1269,8 @@ bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 	if (record.FrameNumber < 0 || record.EventCountThisFrame < 0)
 		return false;
 
-	constexpr uint32_t knownFlags = FrameRecordFlag_TacticalPos | FrameRecordFlag_Selection | FrameRecordFlag_SideChannel;
+	constexpr uint32_t knownFlags = FrameRecordFlag_TacticalPos | FrameRecordFlag_Selection
+		| FrameRecordFlag_SideChannel | FrameRecordFlag_GameCRC;
 	if ((record.Flags & ~knownFlags) != 0u)
 		return false;
 
@@ -1307,6 +1320,12 @@ bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 			else
 				Debug::Log("[Replay] Discarded an out-of-range side-channel record during playback.\n");
 		}
+	}
+
+	if ((record.Flags & FrameRecordFlag_GameCRC) != 0u
+		&& !ReadRaw(&record.GameCRC, sizeof(record.GameCRC)))
+	{
+		return false;
 	}
 
 	return true;
@@ -1407,6 +1426,52 @@ void ApplySideChannelEvent(const SideChannelRecord& record)
 	}
 }
 
+constexpr int DIVERGENCE_MESSAGE_DURATION_FRAMES = 1800;
+constexpr const wchar_t* DIVERGENCE_MESSAGE = L"Replay playback has diverged from the recording.";
+
+void CaptureGameCRCForCurrentFrame()
+{
+	if (!ReplayState.Recording && !ReplayState.Playback)
+		return;
+
+	const uint32_t gameCRC = *reinterpret_cast<const uint32_t*>(GAME_CRC_ADDRESS);
+	const int frameNumber = Unsorted::CurrentFrame;
+
+	if (ReplayState.Recording)
+	{
+		if (ReplayState.PendingFrameStates.empty()
+			|| ReplayState.PendingFrameStates.back().FrameNumber != frameNumber)
+		{
+			return;
+		}
+
+		PendingRecordedFrameCapture& capture = ReplayState.PendingFrameStates.back();
+		capture.GameCRC = gameCRC;
+		capture.HasGameCRC = true;
+		return;
+	}
+
+	if (ReplayState.DivergenceReported || !ReplayState.HasExpectedGameCRC)
+		return;
+
+	ReplayState.HasExpectedGameCRC = false;
+
+	if (ReplayState.ExpectedGameCRC == gameCRC)
+		return;
+
+	ReplayState.DivergenceReported = true;
+
+	Debug::Log("[Replay] Playback diverged from the recording on frame %d "
+		"(recorded CRC %08X, playback CRC %08X).\n", frameNumber, ReplayState.ExpectedGameCRC,
+		gameCRC);
+
+	MessageListClass::Instance.PrintMessage(
+		DIVERGENCE_MESSAGE,
+		DIVERGENCE_MESSAGE_DURATION_FRAMES,
+		ColorScheme::White,
+		/* bSilent: */ true);
+}
+
 void StopReplaySystem()
 {
 	if (ReplayState.Recording)
@@ -1480,6 +1545,7 @@ void RestoreFrameState()
 		return;
 
 	ReplayState.ExpectedEventsThisFrame = 0;
+	ReplayState.HasExpectedGameCRC = false;
 
 	// Keep the viewport locked on frames without replay records.
 	ApplyLockedViewport();
@@ -1542,6 +1608,12 @@ void RestoreFrameState()
 	{
 		for (const auto& sideChannelEvent : frameRecord.SideChannelEvents)
 			ApplySideChannelEvent(sideChannelEvent);
+	}
+
+	if ((frameRecord.Flags & FrameRecordFlag_GameCRC) != 0u)
+	{
+		ReplayState.ExpectedGameCRC = frameRecord.GameCRC;
+		ReplayState.HasExpectedGameCRC = true;
 	}
 
 	ReplayState.HasPendingPlaybackFrame = false;

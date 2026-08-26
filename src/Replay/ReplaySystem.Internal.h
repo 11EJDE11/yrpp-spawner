@@ -59,6 +59,10 @@ constexpr uintptr_t BEACON_MANAGER_MESSAGE_ADDRESS = 0x431450;
 constexpr uintptr_t TAUNTS_ADDRESS = 0x752B70;
 // TacticalClass::RecalculateViewport - recomputes TacticalPos and the visible area.
 constexpr uintptr_t TACTICAL_RECALCULATE_VIEWPORT_ADDRESS = 0x6D8B30;
+// GameCRC - the engine's own per-frame desync hash, as Compute_Game_CRC (0x64DAB0) leaves it.
+// Queue_AI_Multiplayer calls that once per frame and then stores the result into CRC[Frame & 0xFF]
+// for the network sync check; the replay system reads the same value and never computes its own.
+constexpr uintptr_t GAME_CRC_ADDRESS = 0xAC51FC;
 // BeaconClass::Bitfield flag marking the beacon the local player placed.
 constexpr int BEACON_FLAG_LOCAL = 2;
 // Taunt commands are the low nibble of the command byte, so 16 of them.
@@ -73,6 +77,7 @@ struct PlaybackFrameRecord
 	int32_t SelectedObjectCount = 0;
 	std::vector<uint32_t> SelectedObjectIDs;
 	std::vector<SideChannelRecord> SideChannelEvents;
+	uint32_t GameCRC = 0;
 	bool EndOfStream = false;
 };
 
@@ -83,6 +88,10 @@ struct PendingRecordedFrameCapture
 	int FrameNumber = 0;
 	Point2D TacticalPos { 0, 0 };
 	std::vector<uint32_t> SelectedObjectIDs;
+	// Filled in later than the rest of the capture: the hash only exists once the engine has
+	// computed it, which happens after this struct is created. See CaptureGameCRCForCurrentFrame.
+	uint32_t GameCRC = 0;
+	bool HasGameCRC = false;
 };
 
 struct ReplayRuntimeState
@@ -105,6 +114,14 @@ struct ReplayRuntimeState
 	int ExpectedEventsThisFrame = 0;
 	uint64_t BytesAtLastDiskFlush = 0;
 	int LastSyncFlushFrame = 0;
+
+	// Desync detection. The recorded hash for the frame being played back, consumed once by the
+	// comparison and cleared again every frame, so a frame the recording has no record for is
+	// simply not checked rather than checked against a stale value.
+	uint32_t ExpectedGameCRC = 0;
+	bool HasExpectedGameCRC = false;
+	// Set by the first mismatch, after which the checking stops for the rest of the playback.
+	bool DivergenceReported = false;
 
 	HANDLE ReplayFile = INVALID_HANDLE_VALUE;
 	// Only one of these is ever active: recording deflates, playback inflates.
@@ -149,6 +166,7 @@ bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader);
 // Per-frame work, driven from the main loop and from Queue_AI_Multiplayer.
 void RecordFrameState();
 void RestoreFrameState();
+void CaptureGameCRCForCurrentFrame();
 void ApplyReplayTimingFromCurrentGameSpeed();
 void RecordEventsForCurrentFrame();
 void RemoveReplayGameplayEventsFromDoList();

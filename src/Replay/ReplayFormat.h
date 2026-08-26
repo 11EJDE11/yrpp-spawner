@@ -53,7 +53,8 @@ enum FrameRecordFlags : uint32_t
 	FrameRecordFlag_None = 0u,
 	FrameRecordFlag_TacticalPos = 1u << 0,
 	FrameRecordFlag_Selection = 1u << 1,
-	FrameRecordFlag_SideChannel = 1u << 2
+	FrameRecordFlag_SideChannel = 1u << 2,
+	FrameRecordFlag_GameCRC = 1u << 3
 };
 
 // Non-deterministic network/UI events are recorded separately from EventClass::DoList.
@@ -113,8 +114,6 @@ struct ReplayHeader
 	uint32_t RecordedGameSpeed;
 
 	uint64_t RecordedUnixTime;
-	// Last frame that carried a record, so a recording whose final frames changed nothing
-	// under-reports slightly. Only ever used to show a duration.
 	uint32_t TotalFrames;
 	uint32_t Flags;              // ReplayHeaderFlags
 };

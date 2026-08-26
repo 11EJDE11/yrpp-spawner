@@ -170,6 +170,12 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 	return 0;
 }
 
+DEFINE_HOOK(0x647689, Queue_AI_Multiplayer_ReplayGameCRC, 0x6)
+{
+	CaptureGameCRCForCurrentFrame();
+	return 0;
+}
+
 // The hooked `test AttractBitfield, 1` gates the engine's own Queue_Record call. Returning past
 // it is how playback keeps that from running, so only do it when the replay system is actually
 // active - otherwise a plain multiplayer game silently loses vanilla's recording path.
