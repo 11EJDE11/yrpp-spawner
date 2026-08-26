@@ -457,11 +457,17 @@ DEFINE_HOOK(0x55DE3A, MainLoop_ReplayPause_SkipQueueAI, 0x6)
 // `mov edx, Frame`, the load feeding the `inc edx; mov Frame, edx` at 0x55DE7E. Returning past it
 // to Sync_Delay holds the frame counter and skips the Session::Frame_Plus_3 input-unlock check with
 // it, which playback never sets.
+//
+// This is also where a paused iteration gets its viewport committed and drawn.
 DEFINE_HOOK(0x55DE73, MainLoop_ReplayPause_SkipFrameAdvance, 0x6)
 {
 	enum { SyncDelay = 0x55DE9A };
 
-	return ReplaySystem::Controls::IsPlaybackPaused() ? SyncDelay : 0;
+	if (!ReplaySystem::Controls::IsPlaybackPaused())
+		return 0;
+
+	ReplaySystem::Controls::RenderPausedFrame();
+	return SyncDelay;
 }
 
 // --- Side-channel recording taps --------------------------------------------------------------

@@ -23,7 +23,9 @@
 
 #include <ColorScheme.h>
 #include <CommandClass.h>
+#include <MapClass.h>
 #include <MessageListClass.h>
+#include <TacticalClass.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -169,6 +171,17 @@ void StepPlaybackSpeed(int direction)
 	}
 
 	ReportPlaybackSpeed();
+}
+
+void RenderPausedFrame()
+{
+	if (!TacticalClass::Instance)
+		return;
+
+	const auto TacticalAI = reinterpret_cast<void(__thiscall*)(TacticalClass*)>(TACTICAL_AI_ADDRESS);
+	TacticalAI(TacticalClass::Instance);
+
+	MapClass::Instance.Render();
 }
 
 int GetPlaybackGameSpeedIndex()

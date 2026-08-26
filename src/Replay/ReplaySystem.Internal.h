@@ -59,6 +59,10 @@ constexpr uintptr_t BEACON_MANAGER_MESSAGE_ADDRESS = 0x431450;
 constexpr uintptr_t TAUNTS_ADDRESS = 0x752B70;
 // TacticalClass::RecalculateViewport - recomputes TacticalPos and the visible area.
 constexpr uintptr_t TACTICAL_RECALCULATE_VIEWPORT_ADDRESS = 0x6D8B30;
+// Tactical::AI - commits _DesiredTacticalCoord, which is what Scroll_Map and edge scrolling write,
+// into _TacticalCoord, which is what actually gets drawn. Normally reached once a frame from inside
+// LogicClass::AI (0x55B667); see MainLoop_ReplayPause_SkipLogicAI for why pausing has to call it.
+constexpr uintptr_t TACTICAL_AI_ADDRESS = 0x6D2540;
 // GameCRC - the engine's own per-frame desync hash, as Compute_Game_CRC (0x64DAB0) leaves it.
 // Queue_AI_Multiplayer calls that once per frame and then stores the result into CRC[Frame & 0xFF]
 // for the network sync check; the replay system reads the same value and never computes its own.

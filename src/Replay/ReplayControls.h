@@ -58,6 +58,10 @@ void TogglePlaybackPause();
 // Walks the ladder by one rung: +1 faster, -1 slower. Does nothing outside playback.
 void StepPlaybackSpeed(int direction);
 
+// Commits and draws whatever the viewer scrolled to during a paused frame. Called at the end of a
+// paused iteration, in place of the per-frame work that would normally do it.
+void RenderPausedFrame();
+
 // The game-speed index (0 fastest .. 6 slowest) the options dialog should show and compare against
 // for the current playback speed. Speeds past 60 FPS have no slider position of their own and
 // report as 0, the fastest one the slider has.

@@ -413,6 +413,26 @@ iteration:
 Each hooks a position-independent instruction rather than the relative `call` next to it, so the
 not-paused path can return 0 and re-execute the stolen bytes from Syringe's trampoline safely.
 
+Skipping `LogicClass::AI` takes panning with it, so the last hook puts it back — as a pair, not a
+single call. `Tactical::AI` (0x6D2540) commits `_DesiredTacticalCoord` — where the arrow-key
+`Scroll_Map` calls (0x55DD32-0x55DD96) and mouse edge scrolling reached through
+`GScreenClass::Input` → `ScrollClass::Scroll_AI` both record the viewer's scrolling — into the
+`_TacticalCoord` that gets drawn, and `LogicClass::AI` is its only per-frame caller (0x55B667).
+`GScreenClass::Render` is then what consumes the redraw state that commit leaves behind: it clears
+`GScreenClass::Bitfield` as it goes (0x4F44A8) and takes its scroll-blit delta off the coordinate
+pair `Tactical::AI` just wrote. Both sequences the engine gets a paused frame out of run the two
+back to back in that order — its own pause branch (0x55D835-0x55D854) and the extra pass
+`Sync_Delay` makes (0x55E253-0x55E271) — which is why the hook sits at 0x55DE73, after `Main_Loop`'s
+own `Render` has come and gone, rather than at the skip itself.
+
+That `Sync_Delay` pass is also the whole reason this looked speed-dependent: it is what kept paused
+panning alive without any help at all, and `Sync_Delay` only makes it while more than 10 ms of the
+frame budget is left. `NFTTimer.Accumulated = 1000 / RequestedFPS` is 16 ms at 60 FPS against 8 ms
+at 120, so it quietly stops happening above 60.
+
+A paused frame reaches `Tactical::AI` with `LastAIFrame == Frame` already, so all that runs is the
+commit — not the waypoint animation or the `SpecialFlag` camera lerp ahead of it.
+
 The three move together, and `RestoreFrameState` is held with them (0x55D878). Leaving `Queue_AI` in
 would replay the current frame's events once per paused iteration; leaving the frame counter in
 would walk `Frame` past the record `RestoreFrameState` is holding, which it reports as a frame
