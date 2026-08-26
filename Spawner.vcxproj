@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup Label="Globals">
     <ProjectName>CnCNet-Spawner</ProjectName>
@@ -52,6 +52,7 @@
     <ClCompile Include="$(ThisDir)\src\Misc\SkipScoreScreen.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\VideoMode.cpp" />
     <!-- Replay -->
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayControls.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.Hook.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayStream.cpp" />
@@ -93,6 +94,7 @@
     <ClInclude Include="$(ThisDir)\src\Misc\Bugfixes.Desyncs.h" />
     <ClInclude Include="$(ThisDir)\src\UI\Dialogs.h" />
     <!-- Replay -->
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplayControls.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFormat.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.Internal.h" />
