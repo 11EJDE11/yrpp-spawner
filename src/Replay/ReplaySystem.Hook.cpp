@@ -147,6 +147,14 @@ DEFINE_HOOK(0x577AB8, MapClass_ResetShroud_SkipDuringFullRevealPlayback, 0x6)
 	if (ReplayState.Playback && PlaybackWantsFullMapReveal()
 		&& (house == HouseClass::CurrentPlayer || house == nullptr))
 	{
+		// Everything skipped below is shroud, radar and redraw work - except the one write at
+		// 0x577ACA, which clears the house's MapIsClear, and that byte is hashed by
+		// Compute_Game_CRC once per house. Skipping it would leave the flag reading as revealed
+		// while the recording had it reshrouded, and the frame hashes would differ from here on
+		// for a purely local reason. Do that one write by hand; the reshroud itself stays skipped.
+		if (house)
+			house->MapIsClear = false;
+
 		return 0x577B9F;
 	}
 

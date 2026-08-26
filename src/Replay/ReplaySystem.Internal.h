@@ -120,8 +120,17 @@ struct ReplayRuntimeState
 	// simply not checked rather than checked against a stale value.
 	uint32_t ExpectedGameCRC = 0;
 	bool HasExpectedGameCRC = false;
-	// Set by the first mismatch, after which the checking stops for the rest of the playback.
 	bool DivergenceReported = false;
+
+	// Divergence diagnostics, all logged as a summary when playback ends.
+	int CheckedFrameCount = 0;
+	int MismatchedFrameCount = 0;
+	int LoggedMismatchCount = 0;
+	int LoggedRecoveryCount = 0;
+	int FirstMismatchFrame = -1;
+	int LastMismatchFrame = -1;
+	// Whether the previous checked frame mismatched, so that a return to matching can be reported.
+	bool LastCheckMismatched = false;
 
 	HANDLE ReplayFile = INVALID_HANDLE_VALUE;
 	// Only one of these is ever active: recording deflates, playback inflates.
@@ -155,6 +164,25 @@ struct ReplayRuntimeState
 extern ReplayRuntimeState ReplayState;
 
 const SpawnerConfig* GetConfig();
+
+// Why a replay could not be opened for playback. Playback failure is fatal - StartScenario has
+// already skipped CreateConnections, so there is no live session to fall back on - which makes the
+// message the last thing anyone sees. Version trouble is the failure a format change produces most
+// of, so it says so rather than being folded into a generic read error.
+enum class ReplayOpenFailure
+{
+	None,
+	// The file could not be opened, or ended inside the header.
+	Unreadable,
+	// No magic number: not a replay at all.
+	NotAReplay,
+	// A replay, from a layout generation this build does not know.
+	UnsupportedVersion,
+	// Right generation, but the header does not describe a file this shape.
+	Malformed
+};
+
+const char* DescribeReplayOpenFailure(ReplayOpenFailure failure);
 
 // Lifecycle.
 void StartReplayRecording();

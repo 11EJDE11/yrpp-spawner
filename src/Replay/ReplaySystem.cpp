@@ -153,6 +153,22 @@ bool ReadRaw(void* buffer, size_t size)
 	return ReadRawFromHandle(ReplayState.ReplayFile, buffer, size);
 }
 
+bool SkipRaw(size_t size)
+{
+	char scratch[512];
+
+	while (size > 0)
+	{
+		const size_t chunk = std::min(size, sizeof(scratch));
+		if (!ReadRaw(scratch, chunk))
+			return false;
+
+		size -= chunk;
+	}
+
+	return true;
+}
+
 // Ends the current deflate block, so everything recorded up to now can be decoded without any of
 // the bytes that follow it. Called on a frame cadence rather than a byte one, because what
 // matters after a crash is how many frames of play survived, not how many bytes.
@@ -478,6 +494,7 @@ ReplayHeader BuildReplayHeader(const std::vector<char>& spawnMap, uint32_t spawn
 	ReplayHeader header {};
 	header.Magic = REPLAY_MAGIC;
 	header.Version = REPLAY_VERSION;
+	header.HeaderSize = sizeof(ReplayHeader);
 
 	const ScopedINIFile spawnIni { "spawn.ini" };
 
@@ -583,11 +600,60 @@ bool WriteInitialReplayFile()
 	return ok;
 }
 
-bool ReadReplayHeaderFromHandle(HANDLE file, ReplayHeader& outHeader)
+const char* DescribeReplayOpenFailure(ReplayOpenFailure failure)
+{
+	switch (failure)
+	{
+	case ReplayOpenFailure::NotAReplay:
+		return "the file is not a replay";
+	case ReplayOpenFailure::UnsupportedVersion:
+		return "the replay was recorded in a newer format than this version of the game can read";
+	case ReplayOpenFailure::Malformed:
+		return "the replay header is damaged";
+	case ReplayOpenFailure::Unreadable:
+	default:
+		return "the replay could not be read";
+	}
+}
+
+// Split out from IsReplayHeaderValid so the reason survives as far as the message the player sees.
+ReplayOpenFailure ClassifyReplayHeader(const ReplayHeader& header)
+{
+	if (header.Magic != REPLAY_MAGIC)
+		return ReplayOpenFailure::NotAReplay;
+
+	if (!IsReplayVersionSupported(header.Version))
+		return ReplayOpenFailure::UnsupportedVersion;
+
+	// A shorter header than this build's is missing fields it reads; a longer one is fine, and is
+	// the whole point of HeaderSize.
+	if (header.HeaderSize < sizeof(ReplayHeader))
+		return ReplayOpenFailure::Malformed;
+
+	if (!IsReplayGameSpeedIndexValid(header.RecordedGameSpeed))
+		return ReplayOpenFailure::Malformed;
+
+	return ReplayOpenFailure::None;
+}
+
+bool ReadReplayHeaderFromHandle(HANDLE file, ReplayHeader& outHeader, ReplayOpenFailure& outFailure)
 {
 	outHeader = {};
-	return ReadRawFromHandle(file, &outHeader, sizeof(outHeader))
-		&& IsReplayHeaderValid(outHeader);
+
+	if (!ReadRawFromHandle(file, &outHeader, sizeof(outHeader)))
+	{
+		outFailure = ReplayOpenFailure::Unreadable;
+		return false;
+	}
+
+	outFailure = ClassifyReplayHeader(outHeader);
+	return outFailure == ReplayOpenFailure::None;
+}
+
+bool ReadReplayHeaderFromHandle(HANDLE file, ReplayHeader& outHeader)
+{
+	ReplayOpenFailure failure = ReplayOpenFailure::None;
+	return ReadReplayHeaderFromHandle(file, outHeader, failure);
 }
 
 bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader)
@@ -662,9 +728,10 @@ bool OpenRecordingReplayStream()
 	return true;
 }
 
-bool OpenPlaybackReplayStream(const char* replayPath)
+bool OpenPlaybackReplayStream(const char* replayPath, ReplayOpenFailure& outFailure)
 {
 	CloseReplayFile();
+	outFailure = ReplayOpenFailure::None;
 
 	ReplayState.ReplayFile = CreateFileA(
 		replayPath,
@@ -677,10 +744,13 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 	);
 
 	if (ReplayState.ReplayFile == INVALID_HANDLE_VALUE)
+	{
+		outFailure = ReplayOpenFailure::Unreadable;
 		return false;
+	}
 
 	ReplayHeader header {};
-	if (!ReadReplayHeaderFromHandle(ReplayState.ReplayFile, header))
+	if (!ReadReplayHeaderFromHandle(ReplayState.ReplayFile, header, outFailure))
 	{
 		CloseReplayFile();
 		return false;
@@ -688,21 +758,24 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 
 	// The sizes come straight off disk, so check them against the file before seeking.
 	const uint64_t payloadSize = static_cast<uint64_t>(header.SpawnIniSize) + header.SpawnMapSize;
+	const uint64_t streamOffset = static_cast<uint64_t>(header.HeaderSize) + payloadSize;
 
 	LARGE_INTEGER fileSize {};
 	if (!GetFileSizeEx(ReplayState.ReplayFile, &fileSize)
-		|| sizeof(ReplayHeader) + payloadSize > static_cast<uint64_t>(fileSize.QuadPart))
+		|| streamOffset > static_cast<uint64_t>(fileSize.QuadPart))
 	{
 		Debug::Log("[Replay] Replay declares embedded file sizes that do not fit the file.\n");
+		outFailure = ReplayOpenFailure::Malformed;
 		CloseReplayFile();
 		return false;
 	}
 
-	LARGE_INTEGER payloadOffset {};
-	payloadOffset.QuadPart = static_cast<LONGLONG>(payloadSize);
+	LARGE_INTEGER streamStart {};
+	streamStart.QuadPart = static_cast<LONGLONG>(streamOffset);
 
-	if (payloadSize > 0 && !SetFilePointerEx(ReplayState.ReplayFile, payloadOffset, nullptr, FILE_CURRENT))
+	if (!SetFilePointerEx(ReplayState.ReplayFile, streamStart, nullptr, FILE_BEGIN))
 	{
+		outFailure = ReplayOpenFailure::Unreadable;
 		CloseReplayFile();
 		return false;
 	}
@@ -711,6 +784,7 @@ bool OpenPlaybackReplayStream(const char* replayPath)
 	if (!ReplayState.Reader.Start(ReplayState.ReplayFile))
 	{
 		Debug::Log("[Replay] Failed to start reading the compressed replay stream.\n");
+		outFailure = ReplayOpenFailure::Unreadable;
 		CloseReplayFile();
 		return false;
 	}
@@ -730,6 +804,13 @@ void ResetRuntimeFlagsForScenario()
 	ReplayState.ExpectedGameCRC = 0;
 	ReplayState.HasExpectedGameCRC = false;
 	ReplayState.DivergenceReported = false;
+	ReplayState.CheckedFrameCount = 0;
+	ReplayState.MismatchedFrameCount = 0;
+	ReplayState.LoggedMismatchCount = 0;
+	ReplayState.LoggedRecoveryCount = 0;
+	ReplayState.FirstMismatchFrame = -1;
+	ReplayState.LastMismatchFrame = -1;
+	ReplayState.LastCheckMismatched = false;
 	ReplayState.ProgressBarForcedComplete = false;
 	ReplayState.PendingFrameStates.clear();
 	ReplayState.PendingSideChannelEvents.clear();
@@ -1269,10 +1350,13 @@ bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 	if (record.FrameNumber < 0 || record.EventCountThisFrame < 0)
 		return false;
 
-	constexpr uint32_t knownFlags = FrameRecordFlag_TacticalPos | FrameRecordFlag_Selection
-		| FrameRecordFlag_SideChannel | FrameRecordFlag_GameCRC;
-	if ((record.Flags & ~knownFlags) != 0u)
+	if ((record.Flags & ~KNOWN_FRAME_RECORD_FLAGS) != 0u)
+	{
+		Debug::Log("[Replay] Frame %d carries unknown block flags (0x%08X); "
+			"the replay was recorded in a newer format than this build can read.\n",
+			record.FrameNumber, record.Flags & ~KNOWN_FRAME_RECORD_FLAGS);
 		return false;
+	}
 
 	if ((record.Flags & FrameRecordFlag_TacticalPos) != 0u
 		&& !ReadRaw(&record.TacticalPos, sizeof(record.TacticalPos)))
@@ -1326,6 +1410,23 @@ bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 		&& !ReadRaw(&record.GameCRC, sizeof(record.GameCRC)))
 	{
 		return false;
+	}
+
+	if ((record.Flags & FrameRecordFlag_Extensions) != 0u)
+	{
+		uint32_t extensionBytes = 0;
+		if (!ReadRaw(&extensionBytes, sizeof(extensionBytes)))
+			return false;
+
+		if (extensionBytes > MAX_FRAME_EXTENSION_BYTES)
+		{
+			Debug::Log("[Replay] Frame %d declares a %u byte extension block; refusing it.\n",
+				record.FrameNumber, extensionBytes);
+			return false;
+		}
+
+		if (!SkipRaw(extensionBytes))
+			return false;
 	}
 
 	return true;
@@ -1428,6 +1529,8 @@ void ApplySideChannelEvent(const SideChannelRecord& record)
 
 constexpr int DIVERGENCE_MESSAGE_DURATION_FRAMES = 1800;
 constexpr const wchar_t* DIVERGENCE_MESSAGE = L"Replay playback has diverged from the recording.";
+constexpr int MAX_LOGGED_DIVERGENCES = 10;
+constexpr int MAX_LOGGED_DIVERGENCE_RECOVERIES = 3;
 
 void CaptureGameCRCForCurrentFrame()
 {
@@ -1451,29 +1554,81 @@ void CaptureGameCRCForCurrentFrame()
 		return;
 	}
 
-	if (ReplayState.DivergenceReported || !ReplayState.HasExpectedGameCRC)
+	if (!ReplayState.HasExpectedGameCRC)
 		return;
 
 	ReplayState.HasExpectedGameCRC = false;
+	++ReplayState.CheckedFrameCount;
 
 	if (ReplayState.ExpectedGameCRC == gameCRC)
+	{
+		if (ReplayState.LastCheckMismatched
+			&& ReplayState.LoggedRecoveryCount < MAX_LOGGED_DIVERGENCE_RECOVERIES)
+		{
+			++ReplayState.LoggedRecoveryCount;
+			Debug::Log("[Replay] Playback matched the recording again on frame %d, after "
+				"mismatching from frame %d to %d.\n", frameNumber,
+				ReplayState.FirstMismatchFrame, ReplayState.LastMismatchFrame);
+		}
+
+		ReplayState.LastCheckMismatched = false;
+		return;
+	}
+
+	++ReplayState.MismatchedFrameCount;
+	if (ReplayState.FirstMismatchFrame < 0)
+		ReplayState.FirstMismatchFrame = frameNumber;
+
+	ReplayState.LastMismatchFrame = frameNumber;
+	ReplayState.LastCheckMismatched = true;
+
+	if (ReplayState.LoggedMismatchCount < MAX_LOGGED_DIVERGENCES)
+	{
+		++ReplayState.LoggedMismatchCount;
+		Debug::Log("[Replay] Playback diverged from the recording on frame %d "
+			"(recorded CRC %08X, playback CRC %08X).\n", frameNumber, ReplayState.ExpectedGameCRC,
+			gameCRC);
+
+		if (ReplayState.LoggedMismatchCount == MAX_LOGGED_DIVERGENCES)
+		{
+			Debug::Log("[Replay] Further per-frame divergences will not be logged; "
+				"a total is written when playback ends.\n");
+		}
+	}
+
+	if (!ReplayState.DivergenceReported)
+	{
+		ReplayState.DivergenceReported = true;
+
+		MessageListClass::Instance.PrintMessage(
+			DIVERGENCE_MESSAGE,
+			DIVERGENCE_MESSAGE_DURATION_FRAMES,
+			ColorScheme::White,
+			/* bSilent: */ true);
+	}
+}
+
+void LogPlaybackDivergenceSummary()
+{
+	if (!ReplayState.Playback || ReplayState.CheckedFrameCount == 0)
 		return;
 
-	ReplayState.DivergenceReported = true;
+	if (ReplayState.MismatchedFrameCount == 0)
+	{
+		Debug::Log("[Replay] Playback matched the recording on all %d checked frames.\n",
+			ReplayState.CheckedFrameCount);
+		return;
+	}
 
-	Debug::Log("[Replay] Playback diverged from the recording on frame %d "
-		"(recorded CRC %08X, playback CRC %08X).\n", frameNumber, ReplayState.ExpectedGameCRC,
-		gameCRC);
-
-	MessageListClass::Instance.PrintMessage(
-		DIVERGENCE_MESSAGE,
-		DIVERGENCE_MESSAGE_DURATION_FRAMES,
-		ColorScheme::White,
-		/* bSilent: */ true);
+	Debug::Log("[Replay] Playback diverged on %d of %d checked frames (first frame %d, "
+		"last frame %d).\n", ReplayState.MismatchedFrameCount, ReplayState.CheckedFrameCount,
+		ReplayState.FirstMismatchFrame, ReplayState.LastMismatchFrame);
 }
 
 void StopReplaySystem()
 {
+	LogPlaybackDivergenceSummary();
+
 	if (ReplayState.Recording)
 	{
 		FlushPendingRecordedFramesThrough(std::numeric_limits<int>::max(), 0);
@@ -1536,7 +1691,21 @@ void MaintainFullMapReveal()
 	if (!pPlayer || pPlayer->Visionary)
 		return;
 
+	// Clear_Shroud's first act, ahead of every guard in it, is to set the house's MapIsClear - and
+	// that byte is one of the things Compute_Game_CRC folds in, once per house. This reveal is not
+	// part of the recorded simulation, so letting it write there would make the frame hash differ
+	// from the recording's for a reason that has nothing to do with the simulation, on this frame
+	// and every frame after. Put it back.
+	//
+	// Safe because nothing plays off this flag: MapIsClear is written by the shroud reveal and
+	// reshroud paths and read by exactly three functions, all of them hashes or diagnostics -
+	// Compute_Game_CRC (0x64DCCA), HouseClass::Compute_CRC (0x502FFF) and
+	// Print_CRCs_Current_Player (0x64E250). No gameplay code reads it.
+	const bool mapIsClear = pPlayer->MapIsClear;
+
 	MapClass::Instance.Reveal(pPlayer);
+
+	pPlayer->MapIsClear = mapIsClear;
 }
 
 void RestoreFrameState()
@@ -1784,14 +1953,17 @@ void StartReplayPlayback(const char* replayPath)
 
 	strncpy_s(ReplayState.PlaybackPath, sizeof(ReplayState.PlaybackPath), replayPath, _TRUNCATE);
 
-	if (!OpenPlaybackReplayStream(ReplayState.PlaybackPath))
+	ReplayOpenFailure failure = ReplayOpenFailure::None;
+	if (!OpenPlaybackReplayStream(ReplayState.PlaybackPath, failure))
 	{
 		StopReplaySystem();
 
 		// StartScenario already skipped CreateConnections because ReplayFile was set, so there is no
 		// live session to fall back to - carrying on leaves a game that can never advance a frame.
-		Debug::FatalErrorAndExit("[Replay] Failed to open replay file for playback: %s",
-			ReplayState.PlaybackPath);
+		// This message is the whole of what the player gets, so it names the reason: a format change
+		// makes UnsupportedVersion much the most likely of them.
+		Debug::FatalErrorAndExit("[Replay] Cannot play %s: %s.",
+			ReplayState.PlaybackPath, DescribeReplayOpenFailure(failure));
 	}
 }
 

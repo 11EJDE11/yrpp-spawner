@@ -24,7 +24,24 @@
 // The CnCNet client mirrors this by hand in DXMainClient/Domain/ReplayGame.cs, and the layout is
 // written out in docs/replay-format.md. There is no compile-time link between the three, so a
 // change here has to be made in all of them together; the static_asserts below turn a size change
-// into a build error rather than a silent misparse on the reading side.
+// - or a field moving without the size changing - into a build error rather than a silent
+// misparse on the reading side.
+//
+// How to change this format without invalidating everyone's existing replays:
+//
+//   Additive change - keep Version at 1. Take space out of ReplayHeader::Reserved, or append to
+//   the header and let HeaderSize grow, or hang per-frame data off an Extensions block. A reader
+//   built before the change skips all three and keeps working, because the skipping is what the
+//   version below already ships.
+//
+//   Incompatible change - moving or repurposing an existing field, changing what an existing one
+//   means - bump REPLAY_VERSION. Old readers then refuse the file, which is the point. Leave
+//   MIN_SUPPORTED_REPLAY_VERSION where it is so this build still reads everything written before
+//   the break.
+//
+// Only the first twelve bytes - Magic, Version, HeaderSize - are guaranteed to mean the same thing
+// in every version there will ever be. Everything else is only readable once Version has been
+// checked. Nothing may be inserted ahead of them.
 
 #include <GeneralStructures.h>
 
@@ -37,6 +54,7 @@ namespace Replay
 
 constexpr uint32_t REPLAY_MAGIC = 0x4A455259u;
 constexpr uint32_t REPLAY_VERSION = 1;
+constexpr uint32_t MIN_SUPPORTED_REPLAY_VERSION = 1;
 // The engine's GameSpeed is an index into a fixed table; anything above this is out of range.
 constexpr int MAX_GAME_SPEED_INDEX = 6;
 
@@ -54,8 +72,17 @@ enum FrameRecordFlags : uint32_t
 	FrameRecordFlag_TacticalPos = 1u << 0,
 	FrameRecordFlag_Selection = 1u << 1,
 	FrameRecordFlag_SideChannel = 1u << 2,
-	FrameRecordFlag_GameCRC = 1u << 3
+	FrameRecordFlag_GameCRC = 1u << 3,
+	FrameRecordFlag_Extensions = 1u << 4
 };
+
+constexpr uint32_t KNOWN_FRAME_RECORD_FLAGS = FrameRecordFlag_TacticalPos
+	| FrameRecordFlag_Selection
+	| FrameRecordFlag_SideChannel
+	| FrameRecordFlag_GameCRC
+	| FrameRecordFlag_Extensions;
+
+constexpr uint32_t MAX_FRAME_EXTENSION_BYTES = 1u << 20;
 
 // Non-deterministic network/UI events are recorded separately from EventClass::DoList.
 enum class SideChannelEventType : uint8_t
@@ -95,6 +122,7 @@ struct ReplayHeader
 {
 	uint32_t Magic;
 	uint32_t Version;
+	uint32_t HeaderSize;
 	char MapName[260];
 	uint8_t SpawnerVersionMajor;
 	uint8_t SpawnerVersionMinor;
@@ -115,7 +143,8 @@ struct ReplayHeader
 
 	uint64_t RecordedUnixTime;
 	uint32_t TotalFrames;
-	uint32_t Flags;              // ReplayHeaderFlags
+	uint32_t Flags;
+	uint32_t Reserved[16];
 };
 
 struct FrameRecordHeader
@@ -129,9 +158,34 @@ struct FrameRecordHeader
 
 // Mirrored by hand in the client's ReplayGame.cs and in docs/replay-format.md. A size change is
 // silent on the reading side, so pin it here and make the mismatch a build error instead.
-static_assert(sizeof(ReplayHeader) == 1384, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(sizeof(ReplayHeader) == 1452, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
 static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
 static_assert(sizeof(SideChannelRecord) == 329, "SideChannelRecord layout changed; update docs/replay-format.md");
+
+// Size alone does not pin a layout: swapping two fields of the same width, or shortening one array
+// and lengthening another, leaves sizeof untouched and misparses every field from the point of
+// divergence on. These are the offsets ReplayGame.cs hardcodes, so pin each one individually.
+static_assert(offsetof(ReplayHeader, Magic) == 0, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, Version) == 4, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, HeaderSize) == 8, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, MapName) == 12, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, SpawnerVersionMajor) == 272, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, GameClientVersion) == 276, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, SpawnIniSize) == 1360, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, SpawnMapSize) == 1364, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, RecordedGameSpeed) == 1368, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, RecordedUnixTime) == 1372, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, TotalFrames) == 1380, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, Flags) == 1384, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+static_assert(offsetof(ReplayHeader, Reserved) == 1388, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+
+// The four version bytes are read as one group by anything reporting which spawner recorded a file.
+static_assert(offsetof(ReplayHeader, SpawnerVersionPatch) == offsetof(ReplayHeader, SpawnerVersionMajor) + 3,
+	"Spawner version bytes have to stay adjacent and in order");
+
+static_assert(offsetof(FrameRecordHeader, FrameNumber) == 0, "FrameRecordHeader layout changed; update docs/replay-format.md");
+static_assert(offsetof(FrameRecordHeader, EventCountThisFrame) == 4, "FrameRecordHeader layout changed; update docs/replay-format.md");
+static_assert(offsetof(FrameRecordHeader, Flags) == 8, "FrameRecordHeader layout changed; update docs/replay-format.md");
 
 inline bool IsReplayGameSpeedIndexValid(uint32_t gameSpeedIndex)
 {
@@ -153,10 +207,19 @@ inline int GetReplayFPSFromGameSpeed(int gameSpeed)
 	return std::max(1, 60 / gameSpeed);
 }
 
+// Whether this build understands a file's layout generation at all. Nothing to do with whether the
+// recorded game will reproduce: that is what the client's per-file hash check answers, and a replay
+// can pass this and still diverge because the rules or the engine moved underneath it.
+inline bool IsReplayVersionSupported(uint32_t version)
+{
+	return version >= MIN_SUPPORTED_REPLAY_VERSION && version <= REPLAY_VERSION;
+}
+
 inline bool IsReplayHeaderValid(const ReplayHeader& header)
 {
 	return header.Magic == REPLAY_MAGIC
-		&& header.Version == REPLAY_VERSION
+		&& IsReplayVersionSupported(header.Version)
+		&& header.HeaderSize >= sizeof(ReplayHeader)
 		&& IsReplayGameSpeedIndexValid(header.RecordedGameSpeed);
 }
 
