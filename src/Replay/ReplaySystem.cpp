@@ -107,13 +107,21 @@ void ApplyReplayTimingFromCurrentGameSpeed()
 		GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 	}
 
-	const int speedIndex = (ReplayState.Playback && ReplayState.PlaybackSpeedIndex >= 0)
-		? ReplayState.PlaybackSpeedIndex
-		: GameOptionsClass::Instance.GameSpeed;
-	const int requestedFPS = GetReplayFPSFromGameSpeed(speedIndex);
+	// Playback paces off its own target rate, which the viewer hotkeys can push past anything the
+	// game-speed slider can express; a recording game just follows the slider.
+	const int requestedFPS = (ReplayState.Playback && ReplayState.PlaybackFPS > 0)
+		? ReplayState.PlaybackFPS
+		: GetReplayFPSFromGameSpeed(GameOptionsClass::Instance.GameSpeed);
 
 	// RequestedFPS controls local pacing. Keep SessionClass::DesiredFrameRate
 	// owned by the game simulation to avoid altering deterministic logic.
+	//
+	// Main_Loop divides by it twice (0x55D501, 0x55D522): FrameTimer.DelayTime = 60 / RequestedFPS
+	// in 60Hz ticks, and NFTTimer.Accumulated = 1000 / RequestedFPS in milliseconds. Past 60 FPS the
+	// first goes to zero and stops capping anything, and the second - the one Sync_Delay actually
+	// waits on for a networked session (Session.Type is neither campaign nor skirmish for anything
+	// that can be recorded) - keeps its millisecond resolution all the way up. That is what lets
+	// playback run faster than a live game ever does.
 	Game::Network::RequestedFPS = requestedFPS;
 }
 
@@ -797,7 +805,8 @@ void ResetRuntimeFlagsForScenario()
 	ReplayState.Recording = false;
 	ReplayState.Playback = false;
 	ReplayState.SpectatorView = false;
-	ReplayState.PlaybackSpeedIndex = -1;
+	ReplayState.PlaybackFPS = 0;
+	ReplayState.PlaybackPaused = false;
 	ReplayState.ExpectedEventsThisFrame = 0;
 	ReplayState.BytesAtLastDiskFlush = 0;
 	ReplayState.LastSyncFlushFrame = 0;
@@ -1054,10 +1063,12 @@ void RemoveReplayGameplayEventsFromDoList()
 		const auto& event = EventClass::DoList[i];
 		if (event.Frame == currentFrame && event.Type == EventType::GameSpeed)
 		{
-			const int requestedSpeed = std::clamp(event.GameSpeed.GameSpeed, 0, MAX_GAME_SPEED_INDEX);
-			if (requestedSpeed != ReplayState.PlaybackSpeedIndex)
+			const int requestedFPS = GetReplayFPSFromGameSpeed(
+				std::clamp(event.GameSpeed.GameSpeed, 0, MAX_GAME_SPEED_INDEX));
+
+			if (requestedFPS != ReplayState.PlaybackFPS)
 			{
-				ReplayState.PlaybackSpeedIndex = requestedSpeed;
+				ReplayState.PlaybackFPS = requestedFPS;
 				playbackSpeedChanged = true;
 			}
 		}
@@ -1912,9 +1923,9 @@ void StartReplayPlayback(const char* replayPath)
 		? pPlaybackConfig->ReplayPlaybackSpeed
 		: GameOptionsClass::Instance.GameSpeed;
 
-	ReplayState.PlaybackSpeedIndex = std::clamp(requestedSpeed, 0, MAX_GAME_SPEED_INDEX);
+	ReplayState.PlaybackFPS = GetReplayFPSFromGameSpeed(std::clamp(requestedSpeed, 0, MAX_GAME_SPEED_INDEX));
 
-	int recordedGameSpeed = ReplayState.PlaybackSpeedIndex;
+	int recordedGameSpeed = std::clamp(requestedSpeed, 0, MAX_GAME_SPEED_INDEX);
 	if (!ReplayState.HasPlaybackHeader)
 	{
 		ReplayHeader header {};

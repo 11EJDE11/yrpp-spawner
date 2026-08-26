@@ -327,6 +327,8 @@ playback. The in-game options dialog binds its speed slider to the same variable
 speed instead. Recorded `GameSpeed` events are harvested for their requested speed and then dropped
 rather than executed, so the engine never writes the pinned value.
 
+`ReplayPlaybackSpeed` only sets the speed playback *starts* at; from there the hotkeys below own it.
+
 Playback also overrides `Seed`, `GameSpeed`, `Protocol`, `FrameSendRate` and `MaxAhead` from the
 header, skips `CreateConnections()`, and suppresses the statistics packet. `Spawner/Statistics.cpp`
 does that last one by jumping to `0x64820E`, which is the address of the replay system's own
@@ -334,6 +336,94 @@ event-pump hook - moving that hook means moving that jump target with it.
 
 The spawner does **not** extract the embedded spawn.ini/spawnmap.ini for playback — it seeks past
 them. The client is responsible for writing both files out before launching.
+
+## Playback controls
+
+Three `CommandClass` commands, registered from `Init_Commands` (0x533066) and implemented in
+`Replay/ReplayControls.{h,cpp}`. They show up in the in-game keyboard options under a `Replay`
+category and are bound from there, or by hand in `KEYBOARDMD.INI`:
+
+```ini
+[Hotkey]
+ReplayTogglePause=48    ; '0'
+ReplaySpeedUp=187       ; VK_OEM_PLUS, the '='/'+' key
+ReplaySpeedDown=189     ; VK_OEM_MINUS, the '-' key
+```
+
+They ship unbound on purpose. `Init_Commands` runs once per process rather than once per session, so
+a default would apply to normal games too, and every plausible key is already spoken for by vanilla
+(`0` is `TeamSelect_10`).
+
+### Speed
+
+Playback paces off its own target frame rate rather than a game-speed index, because the ladder runs
+past what any index can express:
+
+    10  12  15  20  30  45  60  90  120  180  240  300  500  1000  2000 FPS
+
+The first seven rungs are exactly the rates the game-speed slider produces (index 6 down to index
+0), so the slider and the hotkeys agree wherever they overlap; above 60 FPS the slider reports its
+fastest position, so opening the options dialog and leaving it alone cannot silently slow playback
+back down.
+
+Nothing caps the engine at 60 FPS — `GetReplayFPSFromGameSpeed` simply topped out there.
+`Main_Loop` turns `Game::Network::RequestedFPS` into two timers: `FrameTimer.DelayTime =
+60 / RequestedFPS` in 60Hz ticks (0x55D501) and `NFTTimer.Accumulated = 1000 / RequestedFPS` in
+milliseconds (0x55D522). Past 60 FPS the first floors to zero and stops capping anything, and the
+second — the one `Sync_Delay` actually waits on, because a replayable session is never campaign or
+skirmish — carries the pacing the rest of the way. A speed change lands on the next iteration, since
+those timers are set before the hook that applies it (0x55D878).
+
+That millisecond division is what sets the spacing at the top of the ladder. `MSTimerClass` has no
+resolution below 1 ms, so above 240 FPS only rungs that divide to a different millisecond do
+anything — 300 → 3 ms, 500 → 2 ms, 1000 → 1 ms — and anything past 1000 divides to 0, which
+`Sync_Delay` treats as "expired, do not wait" and skips its wait loop entirely. 2000 is that
+uncapped rung. It does not deliver 2000 FPS: every iteration still simulates and draws a full frame,
+so what you get is whatever the machine manages, typically a few hundred. Adding rungs between these
+would cost a keypress and change nothing.
+
+Playback speed does not reach the simulation. The only place `Game::Network::RequestedFPS` feeds
+anything deterministic is `HouseClass::Begin_Production` (0x4FA661), which sets a starting
+`FactoryClass::Production.Value` of `min(53, 54 * (RequestedFPS * MaxAhead / 60) / Time_To_Build)` —
+the head start compensating for the frames a live game takes to get a produce event executed. That
+write is gated on a per-category `HouseClass` flag (0x53D0-0x53D8) whose only setter is
+`SidebarClass::StripClass::SelectClass::Action` (0x6AB4E3, 0x6AB737), a local sidebar cameo click on
+`PlayerPtr`. Playback injects recorded produce events straight into `EventClass::DoList` and nobody
+clicks the sidebar, so the flag is never set and the branch is never taken — `RequestedFPS` and
+`MaxAhead` both stay out of the simulation no matter what speed the viewer picks.
+
+### Pause
+
+Pausing has to hold the simulation while the rest of `Main_Loop` carries on, so that the viewer can
+still scroll, drag-select, open the options dialog and press the unpause key. The engine's own pause
+(`Scen->someloopcount_62C`, honoured at 0x55D821) cannot do that — it is campaign/skirmish only,
+locks user input and never reaches `Keyboard_Process`, so nothing could unpause it. Standing in for
+the whole function the way Phobos's frame-step mode does at 0x55D360 loses the dialog and scroll
+handling with it.
+
+Instead three hooks cut exactly the three things that advance the game out of an otherwise normal
+iteration:
+
+| Hook | Instruction | Skips |
+|---|---|---|
+| 0x55DC99 → 0x55DCA3 | `mov ecx, offset Logic` | `LogicClass::AI` (0x55DC9E) |
+| 0x55DE3A → 0x55DE45 | `mov ProcessingFrames, ecx` | `Queue_AI` (0x55DE40) |
+| 0x55DE73 → 0x55DE9A | `mov edx, Frame` | `++Frame` (0x55DE7E) |
+
+Each hooks a position-independent instruction rather than the relative `call` next to it, so the
+not-paused path can return 0 and re-execute the stolen bytes from Syringe's trampoline safely.
+
+The three move together, and `RestoreFrameState` is held with them (0x55D878). Leaving `Queue_AI` in
+would replay the current frame's events once per paused iteration; leaving the frame counter in
+would walk `Frame` past the record `RestoreFrameState` is holding, which it reports as a frame
+mismatch and stops playback over; and running `RestoreFrameState` again would clear
+`ExpectedEventsThisFrame` for a frame whose events are still sitting unread in the file, so every
+later frame would parse the wrong bytes. Held together, a paused iteration touches no replay state
+at all.
+
+Everything ahead of those three still runs — input, keyboard commands, rendering, arrow-key and edge
+scrolling, the message list — and `Sync_Delay` still paces the loop, so a paused replay does not spin
+the CPU.
 
 ## Watching from another player
 

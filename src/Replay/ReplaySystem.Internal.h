@@ -109,7 +109,14 @@ struct ReplayRuntimeState
 	bool SpectatorView = false;
 	// Playback-only; recording keeps this data unconditionally.
 	bool ShowChatAndBeacons = true;
-	int PlaybackSpeedIndex = -1;
+
+	// Playback pacing, as a target frame rate rather than a game-speed index: the ladder the
+	// viewer hotkeys walk runs past 60 FPS, which no game-speed index can express. 0 until
+	// playback starts. See Replay/ReplayControls.h.
+	int PlaybackFPS = 0;
+	// Set by the pause hotkey. While it is set the main loop still renders, scrolls and takes
+	// input, but LogicClass::AI, Queue_AI and the frame counter are all held.
+	bool PlaybackPaused = false;
 
 	int ExpectedEventsThisFrame = 0;
 	uint64_t BytesAtLastDiskFlush = 0;

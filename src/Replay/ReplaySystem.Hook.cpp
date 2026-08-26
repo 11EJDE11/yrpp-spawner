@@ -20,6 +20,7 @@
 // Every hook the replay system installs. The work itself lives in ReplaySystem.cpp; this file is
 // the list of engine sites it is wired into, and the reasoning for each one.
 
+#include "ReplayControls.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
 
@@ -172,7 +173,15 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 	if (ReplayState.Playback)
 	{
 		ApplyReplayTimingFromCurrentGameSpeed();
-		RestoreFrameState();
+
+		// A paused iteration must leave the replay stream exactly where it was. RestoreFrameState
+		// clears ExpectedEventsThisFrame before it looks at the pending record, so running it a
+		// second time on a frame whose events have not been pumped yet would drop that frame's
+		// event count while the events themselves stay in the file - and every later frame would
+		// then read the wrong bytes. The three hooks below hold Queue_AI and the frame counter to
+		// match, so a paused iteration touches no replay state at all.
+		if (!ReplaySystem::Controls::IsPlaybackPaused())
+			RestoreFrameState();
 	}
 
 	return 0;
@@ -356,9 +365,9 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 // replay is actually running.
 DEFINE_HOOK(0x4E209E, GameControlsDialog_ShowPlaybackSpeed, 0x6)
 {
-	if (ReplayState.Playback && ReplayState.PlaybackSpeedIndex >= 0)
+	if (ReplayState.Playback && ReplayState.PlaybackFPS > 0)
 	{
-		R->EDX(ReplayState.PlaybackSpeedIndex);
+		R->EDX(ReplaySystem::Controls::GetPlaybackGameSpeedIndex());
 		return 0x4E20A4;
 	}
 
@@ -370,9 +379,9 @@ DEFINE_HOOK(0x4E209E, GameControlsDialog_ShowPlaybackSpeed, 0x6)
 // against the recorded speed is what made "set playback back to the recorded speed" a no-op.
 DEFINE_HOOK(0x4E1E1B, GameControlsApply_ComparePlaybackSpeed, 0x5)
 {
-	if (ReplayState.Playback && ReplayState.PlaybackSpeedIndex >= 0)
+	if (ReplayState.Playback && ReplayState.PlaybackFPS > 0)
 	{
-		R->EAX(ReplayState.PlaybackSpeedIndex);
+		R->EAX(ReplaySystem::Controls::GetPlaybackGameSpeedIndex());
 		return 0x4E1E20;
 	}
 
@@ -386,12 +395,73 @@ DEFINE_HOOK(0x4E1EBA, GameControlsApply_ApplyPlaybackSpeedDirectly, 0x6)
 {
 	if (ReplayState.Playback)
 	{
-		ReplayState.PlaybackSpeedIndex = std::clamp(R->ECX<int>(), 0, MAX_GAME_SPEED_INDEX);
-		ApplyReplayTimingFromCurrentGameSpeed();
+		ReplaySystem::Controls::SetPlaybackGameSpeedIndex(R->ECX<int>());
 		return 0x4E1EC0;
 	}
 
 	return 0;
+}
+
+// --- Viewer controls: pause and playback speed ---------------------------------------------------
+// Init_Commands, at the first command it creates. Registering them here is all the binding side
+// needs: the commands turn up in the in-game keyboard options under "Replay" and are bound from
+// there, or by hand in KEYBOARDMD.INI's [Hotkey] section by command name. They ship with no key of
+// their own - every plausible default is already spoken for by vanilla, and taking one of those
+// away would reach normal games too, since Init_Commands runs once per process rather than per
+// session. Phobos and Ares hook this same address; all three run, because none returns an address.
+DEFINE_HOOK(0x533066, Init_Commands_RegisterReplayCommands, 0x6)
+{
+	ReplaySystem::Controls::RegisterReplayCommands();
+	return 0;
+}
+
+// --- Pause -------------------------------------------------------------------------------------
+// Pausing playback means holding the simulation while the rest of Main_Loop carries on, so that the
+// viewer can still scroll the map, drag-select, open the options dialog and press the unpause key.
+// That rules out the engine's own pause (Scen->someloopcount_62C, honoured at 0x55D821): it is
+// campaign/skirmish-only, locks user input and never reaches Keyboard_Process, so nothing could
+// unpause it. It also rules out standing in for the whole function the way Phobos's frame-step
+// mode does at 0x55D360, which loses the dialog and scroll handling with it.
+//
+// Instead three hooks cut exactly the three things that advance the game out of an otherwise normal
+// iteration - LogicClass::AI, Queue_AI and the frame counter. Everything before them (input,
+// keyboard commands, rendering, arrow-key and edge scrolling, the message list) still runs, and
+// Sync_Delay at the end still paces the loop, so a paused replay does not spin the CPU.
+//
+// The three have to move together. Queue_AI is what pumps the recorded events for the current
+// frame, so leaving it in would replay the same frame's events once per paused iteration; and
+// leaving the frame counter in would walk Frame past the record RestoreFrameState is holding,
+// which it reports as a frame mismatch and stops playback over.
+
+// `mov ecx, offset Logic`, the argument setup for the `call LogicClass::AI` at 0x55DC9E. Hooked
+// here rather than on the call itself, which is relative and so cannot be safely re-executed from
+// a trampoline on the not-paused path. Two branches jump to 0x55DC99 (0x55DBD3, 0x55DBE0, both
+// skipping the campaign autosave) but both land on the first byte, which is where the hook is.
+DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
+{
+	enum { SkipLogicAI = 0x55DCA3 };
+
+	return ReplaySystem::Controls::IsPlaybackPaused() ? SkipLogicAI : 0;
+}
+
+// `mov ProcessingFrames, ecx`, the last instruction before `call Queue_AI` at 0x55DE40. Skipping
+// the store as well only costs the frame-time statistics a sample, which is right anyway - no frame
+// was processed.
+DEFINE_HOOK(0x55DE3A, MainLoop_ReplayPause_SkipQueueAI, 0x6)
+{
+	enum { SkipQueueAI = 0x55DE45 };
+
+	return ReplaySystem::Controls::IsPlaybackPaused() ? SkipQueueAI : 0;
+}
+
+// `mov edx, Frame`, the load feeding the `inc edx; mov Frame, edx` at 0x55DE7E. Returning past it
+// to Sync_Delay holds the frame counter and skips the Session::Frame_Plus_3 input-unlock check with
+// it, which playback never sets.
+DEFINE_HOOK(0x55DE73, MainLoop_ReplayPause_SkipFrameAdvance, 0x6)
+{
+	enum { SyncDelay = 0x55DE9A };
+
+	return ReplaySystem::Controls::IsPlaybackPaused() ? SyncDelay : 0;
 }
 
 // --- Side-channel recording taps --------------------------------------------------------------
