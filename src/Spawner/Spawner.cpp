@@ -101,6 +101,10 @@ void Spawner::AssignHouses()
 {
 	ScenarioClass::AssignHouses();
 
+	// Ahead of the loop below so that MakeObserver(), which only acts on the current player, sees
+	// the house a replay is being watched from rather than the one that recorded it.
+	ReplaySystem::ApplyPlaybackViewPlayer();
+
 	const int count = std::min(HouseClass::Array.Count, (int)std::size(Spawner::Config->Houses));
 	for (int indexOfHouseArray = 0; indexOfHouseArray < count; indexOfHouseArray++)
 	{
@@ -194,6 +198,10 @@ bool Spawner::StartScenario(const char* pScenarioName)
 	const auto pGameModeOptions = &GameModeOptionsClass::Instance;
 	const bool isReplayPlayback = ReplaySystem::IsPlaybackRequested();
 
+	// Which spawn.ini player slot this screen belongs to. Always 0 outside replay playback, where
+	// it is whichever player the replay is being watched from.
+	const int localPlayerIndex = ReplaySystem::GetViewPlayerIndex();
+
 	strcpy_s(Game::ScenarioName, 0x200, pScenarioName);
 	pSession->ReadScenarioDescriptions();
 
@@ -228,7 +236,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 		Game::Seed = Spawner::Config->Seed;
 		Game::TechLevel = Spawner::Config->TechLevel;
-		Game::PlayerColor = Spawner::Config->Players[0].Color;
+		Game::PlayerColor = Spawner::Config->Players[localPlayerIndex].Color;
 		GameOptionsClass::Instance.GameSpeed = Spawner::Config->GameSpeed;
 
 		Spawner::NextAutoSaveNumber = Spawner::Config->NextAutoSaveNumber;
@@ -273,7 +281,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 				pNode->SpectatorFlag = 0xFFFFFFFF;
 
-				if (playerIndex == 0)
+				if (playerIndex == localPlayerIndex)
 					Game::ObserverMode = true;
 			}
 

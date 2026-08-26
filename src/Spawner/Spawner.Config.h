@@ -123,6 +123,10 @@ public:
 	// Playback-only: whether recorded chat, beacons and taunts get reproduced. Recording them is
 	// unconditional - there is no record-side option.
 	bool ReplayShowChatAndBeacons;
+	// Which spawn.ini player slot playback is watched from: 0 = [Settings] (the player who made the
+	// recording), N = [OtherN]. -1 means the recorded player, which is the same slot as 0 and is the
+	// default. Only human slots are accepted; anything else falls back to the recorded player.
+	int  ReplayViewPlayer;
 
 	// Scenario Options
 	int  Seed;
@@ -210,6 +214,7 @@ public:
 		, ReplayPlaybackSpeed { -1 }
 		, ReplaySpectator { false }
 		, ReplayShowChatAndBeacons { true }
+		, ReplayViewPlayer { -1 }
 
 		// Scenario Options
 		, Seed { 0 }

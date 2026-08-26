@@ -71,6 +71,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		ReplayPlaybackSpeed      = pINI->ReadInteger(pSettingsSection, "ReplayPlaybackSpeed", ReplayPlaybackSpeed);
 		ReplaySpectator          = pINI->ReadBool(pSettingsSection, "ReplaySpectator", ReplaySpectator);
 		ReplayShowChatAndBeacons = pINI->ReadBool(pSettingsSection, "ReplayShowChatAndBeacons", ReplayShowChatAndBeacons);
+		ReplayViewPlayer         = pINI->ReadInteger(pSettingsSection, "ReplayViewPlayer", ReplayViewPlayer);
 	}
 
 	{ // Scenario Options

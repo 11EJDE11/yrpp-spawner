@@ -764,6 +764,109 @@ void ApplyPlaybackInitialState()
 	}
 }
 
+// Which spawn.ini player slot playback reproduces the screen of. Slot 0 - [Settings], the player
+// who made the recording - is both the default and the fallback, so this always names a slot that
+// exists. Deliberately a pure function of spawn.ini rather than of ReplayState: it is read once
+// before the replay system has started and twice after, and all three have to agree.
+int ResolveViewPlayerIndex()
+{
+	const auto* pConfig = GetConfig();
+	if (!pConfig || !ReplaySystem::IsPlaybackRequested())
+		return 0;
+
+	// A campaign recording has one player slot, so there is nothing to switch to.
+	if (pConfig->IsCampaign)
+		return 0;
+
+	const int requested = pConfig->ReplayViewPlayer;
+	if (requested <= 0 || requested >= static_cast<int>(std::size(pConfig->Players)))
+		return 0;
+
+	// AI slots have no [OtherN] section and so never get a NodeNameType, which is what the house
+	// lookup in ApplyViewPlayerToCurrentPlayer walks. Only human slots can be watched from.
+	return pConfig->Players[requested].IsHuman ? requested : 0;
+}
+
+// StartScenario creates one NodeNameType per human spawn.ini slot, in slot order, so a slot's node
+// is preceded by exactly the human slots below it.
+int NodeIndexForPlayerSlot(int playerSlot)
+{
+	const auto* pConfig = GetConfig();
+	if (!pConfig)
+		return -1;
+
+	int nodeIndex = 0;
+	for (int slot = 0; slot < playerSlot; ++slot)
+	{
+		if (pConfig->Players[slot].IsHuman)
+			++nodeIndex;
+	}
+
+	return nodeIndex;
+}
+
+// Hands the local screen to another player in the recording. This is only a change of viewpoint:
+// the recorded event stream is house indexed and is replayed unchanged, and CurrentPlayer is what
+// the engine renders, shrouds, voices and builds the sidebar for.
+void ApplyViewPlayerToCurrentPlayer()
+{
+	const auto* const pConfig = GetConfig();
+	const int requested = pConfig ? pConfig->ReplayViewPlayer : -1;
+	const int playerSlot = ResolveViewPlayerIndex();
+
+	if (playerSlot <= 0)
+	{
+		// -1 and 0 are the two ways of asking for the recording player, and are silent. Anything
+		// else named a slot that cannot be watched from: out of range, an AI, an empty slot, or
+		// any slot at all in a campaign recording. This is the one place that runs once per
+		// scenario, so it is where that gets reported.
+		if (requested > 0 && ReplaySystem::IsPlaybackRequested())
+		{
+			Debug::Log("[Replay] ReplayViewPlayer=%d is not a human player slot; watching from the "
+				"recording player.\n", requested);
+		}
+
+		return;
+	}
+
+	auto& nodes = NodeNameType::Array;
+	const int nodeIndex = NodeIndexForPlayerSlot(playerSlot);
+
+	if (nodeIndex < 0 || nodeIndex >= nodes.Count)
+	{
+		Debug::Log("[Replay] ReplayViewPlayer=%d has no player node; watching from the recording player.\n",
+			playerSlot);
+		return;
+	}
+
+	const auto* const pNode = nodes.GetItem(nodeIndex);
+	if (!pNode || pNode->HouseIndex < 0 || pNode->HouseIndex >= HouseClass::Array.Count)
+	{
+		Debug::Log("[Replay] ReplayViewPlayer=%d did not resolve to a house; watching from the recording player.\n",
+			playerSlot);
+		return;
+	}
+
+	auto* const pHouse = HouseClass::Array.GetItem(pNode->HouseIndex);
+	if (!pHouse || !pHouse->IsHumanPlayer)
+	{
+		Debug::Log("[Replay] ReplayViewPlayer=%d resolved to a house that is not a human player; "
+			"watching from the recording player.\n", playerSlot);
+		return;
+	}
+
+	// Moved rather than just set: Assign_Houses gives both to the recording player's house, and
+	// leaving IsInPlayerControl behind would describe a state no peer ever had.
+	if (HouseClass::CurrentPlayer)
+		HouseClass::CurrentPlayer->IsInPlayerControl = false;
+
+	HouseClass::CurrentPlayer = pHouse;
+	pHouse->IsInPlayerControl = true;
+
+	Debug::Log("[Replay] Watching from spawn.ini player slot %d (%ls), house index %d.\n",
+		playerSlot, pHouse->UIName, pNode->HouseIndex);
+}
+
 // Network/timing events are recorded for diagnostics but not replayed.
 bool IsTimingEvent(EventType eventType)
 {
@@ -1596,6 +1699,17 @@ void StartReplayPlayback(const char* replayPath)
 	ReplayState.SpectatorView = pConfig ? pConfig->ReplaySpectator : false;
 	ReplayState.ShowChatAndBeacons = pConfig ? pConfig->ReplayShowChatAndBeacons : true;
 
+	// Both of these reproduce the recording player's own screen, and neither means anything once
+	// the viewpoint has been handed to someone else: the camera would be pinned to a base you are
+	// not watching, and the selection would be units the house you are watching does not own and
+	// mostly cannot see. Forced here rather than left to the caller so a hand-written spawn.ini
+	// cannot ask for the incoherent combination.
+	if (ResolveViewPlayerIndex() > 0)
+	{
+		ReplayState.LockViewport = false;
+		ReplayState.SelectUnits = false;
+	}
+
 	strncpy_s(ReplayState.PlaybackPath, sizeof(ReplayState.PlaybackPath), replayPath, _TRUNCATE);
 
 	if (!OpenPlaybackReplayStream(ReplayState.PlaybackPath))
@@ -1696,6 +1810,16 @@ bool ReplaySystem::IsPlaybackRequested()
 bool ReplaySystem::IsPlaybackActive()
 {
 	return ReplayState.Playback;
+}
+
+int ReplaySystem::GetViewPlayerIndex()
+{
+	return ResolveViewPlayerIndex();
+}
+
+void ReplaySystem::ApplyPlaybackViewPlayer()
+{
+	ApplyViewPlayerToCurrentPlayer();
 }
 
 void ReplaySystem::OnGameStartReset()
