@@ -22,6 +22,9 @@
 #include "NetHack.h"
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
+#include "FrameGate.h"
+#include "FastRetransmit.h"
+#include "PacketRedundancy.h"
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
 #include <Misc/Bugfixes.Desyncs.h>
@@ -412,6 +415,16 @@ void Spawner::InitNetwork()
 	Game::Network::GameStockKeepingUnit = 0x2901;
 
 	ProtocolZero::Enable = (pSpawnerConfig->Protocol == 0);
+	FrameGate::Enabled = pSpawnerConfig->FrameAwareGate;
+	FrameGate::Reset();
+
+	FastRetransmit::Enabled    = pSpawnerConfig->FastRetransmit;
+	FastRetransmit::Backoff    = pSpawnerConfig->FastRetransmit && pSpawnerConfig->RetransmitBackoff;
+	PacketRedundancy::Enabled  = pSpawnerConfig->PacketRedundancy;
+	PacketRedundancy::Copies   = PacketRedundancy::ClampCopies(pSpawnerConfig->RedundancyCopies);
+	PacketRedundancy::Adaptive = pSpawnerConfig->AdaptiveRedundancy;
+	FastRetransmit::Reset();
+	PacketRedundancy::Reset();
 	if (ProtocolZero::Enable)
 	{
 		Game::Network::FrameSendRate = 2;
