@@ -63,10 +63,18 @@ constexpr uintptr_t TACTICAL_RECALCULATE_VIEWPORT_ADDRESS = 0x6D8B30;
 // into _TacticalCoord, which is what actually gets drawn. Normally reached once a frame from inside
 // LogicClass::AI (0x55B667); see MainLoop_ReplayPause_SkipLogicAI for why pausing has to call it.
 constexpr uintptr_t TACTICAL_AI_ADDRESS = 0x6D2540;
-// GameCRC - the engine's own per-frame desync hash, as Compute_Game_CRC (0x64DAB0) leaves it.
+// Compute_Game_CRC - the engine's own per-frame desync hash calculator.
+constexpr uintptr_t COMPUTE_GAME_CRC_ADDRESS = 0x64DAB0;
+// GameCRC - the engine's own per-frame desync hash, as Compute_Game_CRC leaves it.
 // Queue_AI_Multiplayer calls that once per frame and then stores the result into CRC[Frame & 0xFF]
-// for the network sync check; the replay system reads the same value and never computes its own.
+// for the network sync check. True skirmish bypasses that path, so the replay hook computes it
+// explicitly after Queue_AI's skirmish Execute_DoList.
 constexpr uintptr_t GAME_CRC_ADDRESS = 0xAC51FC;
+// The two frame timers Sync_Delay sleeps on: DelayTime in 60Hz ticks for a skirmish,
+// Accumulated in milliseconds for a networked session. Playback writes these directly - see
+// ApplyPlaybackFramePacing.
+constexpr uintptr_t FRAME_TIMER_DELAY_TIME_ADDRESS = 0x887350;
+constexpr uintptr_t NFT_TIMER_ACCUMULATED_ADDRESS = 0x887330;
 // BeaconClass::Bitfield flag marking the beacon the local player placed.
 constexpr int BEACON_FLAG_LOCAL = 2;
 // Taunt commands are the low nibble of the command byte, so 16 of them.
@@ -82,11 +90,13 @@ struct PlaybackFrameRecord
 	std::vector<uint32_t> SelectedObjectIDs;
 	std::vector<SideChannelRecord> SideChannelEvents;
 	uint32_t GameCRC = 0;
+	FrameObjectCensus Census { 0, 0 };
+	int32_t GameSpeed = 0;
 	bool EndOfStream = false;
 };
 
 // One frame's worth of visible state, captured in the main loop and written out once
-// Queue_AI_Multiplayer knows how many events the frame carried.
+// the active queue hook knows how many events the frame carried.
 struct PendingRecordedFrameCapture
 {
 	int FrameNumber = 0;
@@ -96,6 +106,10 @@ struct PendingRecordedFrameCapture
 	// computed it, which happens after this struct is created. See CaptureGameCRCForCurrentFrame.
 	uint32_t GameCRC = 0;
 	bool HasGameCRC = false;
+	FrameObjectCensus Census { 0, 0 };
+	bool HasCensus = false;
+	int32_t GameSpeed = 0;
+	bool HasGameSpeed = false;
 };
 
 struct ReplayRuntimeState
@@ -118,6 +132,9 @@ struct ReplayRuntimeState
 	// viewer hotkeys walk runs past 60 FPS, which no game-speed index can express. 0 until
 	// playback starts. See Replay/ReplayControls.h.
 	int PlaybackFPS = 0;
+	// Performance-counter deadline for the next playback frame, in milliseconds. Zero means
+	// the pacing has not started yet, or needs resyncing to now.
+	double PlaybackNextFrameDue = 0.0;
 	// Set by the pause hotkey. While it is set the main loop still renders, scrolls and takes
 	// input, but LogicClass::AI, Queue_AI and the frame counter are all held.
 	bool PlaybackPaused = false;
@@ -131,6 +148,12 @@ struct ReplayRuntimeState
 	// simply not checked rather than checked against a stale value.
 	uint32_t ExpectedGameCRC = 0;
 	bool HasExpectedGameCRC = false;
+	FrameObjectCensus ExpectedCensus { 0, 0 };
+	bool HasExpectedCensus = false;
+	bool CensusMismatchReported = false;
+	// The game speed as last written into the stream, so only changes are recorded. -1 forces
+	// the first frame to establish the baseline.
+	int LastRecordedGameSpeed = -1;
 	bool DivergenceReported = false;
 
 	// Divergence diagnostics, all logged as a summary when playback ends.
@@ -151,6 +174,8 @@ struct ReplayRuntimeState
 	char PlaybackPath[MAX_PATH] = { 0 };
 	std::deque<PendingRecordedFrameCapture> PendingFrameStates;
 	std::deque<SideChannelRecord> PendingSideChannelEvents;
+	int CapturedFrameEventsFrame = -1;
+	std::vector<EventClass> CapturedFrameEvents;
 	ReplayHeader PlaybackHeader = {};
 	bool HasPlaybackHeader = false;
 
@@ -202,11 +227,18 @@ void StopReplaySystem();
 void ApplyPlaybackInitialState();
 bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader);
 
-// Per-frame work, driven from the main loop and from Queue_AI_Multiplayer.
+// Per-frame work, driven from the main loop and from the active queue event hook.
 void RecordFrameState();
 void RestoreFrameState();
 void CaptureGameCRCForCurrentFrame();
-void ApplyReplayTimingFromCurrentGameSpeed();
+FrameObjectCensus CurrentObjectCensus();
+void CheckObjectCensusForCurrentFrame();
+void ComputeAndCaptureGameCRCForCurrentFrame();
+int GetPlaybackTargetFPS();
+double PlaybackClockMilliseconds();
+void ApplyPlaybackFramePacing();
+void CaptureEventsForCurrentFrame();
+void RecordCapturedEventsForCurrentFrame();
 void RecordEventsForCurrentFrame();
 void RemoveReplayGameplayEventsFromDoList();
 void PlaybackFrameEvents();

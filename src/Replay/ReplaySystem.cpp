@@ -25,6 +25,7 @@
 #include <Ext/Event/Body.h>
 #include <Ext/INIClass/Body.h>
 
+#include <AbstractClass.h>
 #include <BeaconManagerClass.h>
 #include <ColorScheme.h>
 #include <EventClass.h>
@@ -97,32 +98,78 @@ void EnsureParentDirectoryExists(const char* path)
 	}
 }
 
-void ApplyReplayTimingFromCurrentGameSpeed()
+
+// The playback frame rate, in frames per second: whatever the viewer's speed controls last asked
+// for, falling back to the rate the recorded game speed implies.
+int GetPlaybackTargetFPS()
 {
-	if (ReplayState.Playback && ReplayState.HasPlaybackHeader)
+	if (ReplayState.PlaybackFPS > 0)
+		return ReplayState.PlaybackFPS;
+
+	return GetReplayFPSFromGameSpeed(GameOptionsClass::Instance.GameSpeed);
+}
+
+// Milliseconds off the performance counter. The engine's own clocks are either 60Hz ticks or
+// whole milliseconds, and neither can express the faster end of the playback speed ladder.
+double PlaybackClockMilliseconds()
+{
+	static double ticksPerMillisecond = 0.0;
+	if (ticksPerMillisecond == 0.0)
 	{
-		// Keep simulation speed locked to the replay's recorded speed.
-		const int recordedGameSpeed = std::clamp(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed), 0, MAX_GAME_SPEED_INDEX);
-		GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
-		GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
+		LARGE_INTEGER frequency {};
+		if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart == 0)
+			return 0.0;
+
+		ticksPerMillisecond = static_cast<double>(frequency.QuadPart) / 1000.0;
 	}
 
-	// Playback paces off its own target rate, which the viewer hotkeys can push past anything the
-	// game-speed slider can express; a recording game just follows the slider.
-	const int requestedFPS = (ReplayState.Playback && ReplayState.PlaybackFPS > 0)
-		? ReplayState.PlaybackFPS
-		: GetReplayFPSFromGameSpeed(GameOptionsClass::Instance.GameSpeed);
+	LARGE_INTEGER counter {};
+	if (!QueryPerformanceCounter(&counter))
+		return 0.0;
 
-	// RequestedFPS controls local pacing. Keep SessionClass::DesiredFrameRate
-	// owned by the game simulation to avoid altering deterministic logic.
-	//
-	// Main_Loop divides by it twice (0x55D501, 0x55D522): FrameTimer.DelayTime = 60 / RequestedFPS
-	// in 60Hz ticks, and NFTTimer.Accumulated = 1000 / RequestedFPS in milliseconds. Past 60 FPS the
-	// first goes to zero and stops capping anything, and the second - the one Sync_Delay actually
-	// waits on for a networked session (Session.Type is neither campaign nor skirmish for anything
-	// that can be recorded) - keeps its millisecond resolution all the way up. That is what lets
-	// playback run faster than a live game ever does.
-	Game::Network::RequestedFPS = requestedFPS;
+	return static_cast<double>(counter.QuadPart) / ticksPerMillisecond;
+}
+
+// Holds a frame back to the speed the viewer asked for, and then makes the engine's own wait a
+// no-op so the two do not add up.
+//
+// The deadline is accumulated as a double rather than recomputed from the current time, so a rate
+// that is not a whole number of milliseconds - 240 FPS is 4.1666 - comes out right on average
+// instead of drifting to the nearest millisecond. A frame that overruns its deadline by more than
+// one frame resets it: after a pause, a speed change, or a slow frame, playback should carry on
+// from where it is rather than sprint through a backlog.
+//
+// Zero, from a rate past a millisecond a frame, means no wait at all - the top of the ladder.
+void ApplyPlaybackFramePacing()
+{
+	if (!ReplayState.Playback || ReplayState.PlaybackFPS <= 0)
+		return;
+
+	const double frameMilliseconds = 1000.0 / ReplayState.PlaybackFPS;
+	const double now = PlaybackClockMilliseconds();
+
+	if (now > 0.0)
+	{
+		if (ReplayState.PlaybackNextFrameDue == 0.0
+			|| now > ReplayState.PlaybackNextFrameDue + frameMilliseconds)
+		{
+			ReplayState.PlaybackNextFrameDue = now;
+		}
+
+		for (double remaining = ReplayState.PlaybackNextFrameDue - PlaybackClockMilliseconds();
+			remaining > 0.0;
+			remaining = ReplayState.PlaybackNextFrameDue - PlaybackClockMilliseconds())
+		{
+			// Sleep(1) can overshoot by a whole scheduler tick, so it only covers the bulk and the
+			// last couple of milliseconds are given up with Sleep(0).
+			Sleep(remaining > 2.0 ? 1 : 0);
+		}
+
+		ReplayState.PlaybackNextFrameDue += frameMilliseconds;
+	}
+
+	*reinterpret_cast<int*>(FRAME_TIMER_DELAY_TIME_ADDRESS) = 0;
+	*reinterpret_cast<int*>(NFT_TIMER_ACCUMULATED_ADDRESS) = 0;
 }
 
 bool WriteRawToHandle(HANDLE file, const void* data, size_t size)
@@ -567,11 +614,23 @@ bool WriteInitialReplayFile()
 	// Must happen before the header is built - SpawnIniSize has to describe what actually gets written.
 	SanitizeSpawnIniForReplay(spawnIni);
 
-	if (!ReadRequiredFile("spawnmap.ini", spawnMap))
+	// spawnmap.ini is only this game's map when spawn.ini actually points at it. A campaign
+	// mission names its scenario inside the game's own mixes instead - Scenario=RA2->ALL02S.MAP -
+	// and whatever spawnmap.ini is sitting in the game directory then belongs to whichever game
+	// wrote it last. Embedding that names the replay after someone else's map and carries a
+	// couple of hundred kilobytes of the wrong one.
+	const auto* const pRecordingConfig = GetConfig();
+	const bool scenarioIsSpawnMap = pRecordingConfig
+		&& _stricmp(pRecordingConfig->ScenarioName, "spawnmap.ini") == 0;
+
+	if (scenarioIsSpawnMap && !ReadRequiredFile("spawnmap.ini", spawnMap))
 	{
 		Debug::Log("[Replay] Required file spawnmap.ini was not found or could not be read.\n");
 		return false;
 	}
+
+	if (!scenarioIsSpawnMap)
+		spawnMap.clear();
 
 	const ReplayHeader header = BuildReplayHeader(
 		spawnMap,
@@ -806,12 +865,17 @@ void ResetRuntimeFlagsForScenario()
 	ReplayState.Playback = false;
 	ReplayState.SpectatorView = false;
 	ReplayState.PlaybackFPS = 0;
+	ReplayState.PlaybackNextFrameDue = 0.0;
 	ReplayState.PlaybackPaused = false;
 	ReplayState.ExpectedEventsThisFrame = 0;
 	ReplayState.BytesAtLastDiskFlush = 0;
 	ReplayState.LastSyncFlushFrame = 0;
 	ReplayState.ExpectedGameCRC = 0;
 	ReplayState.HasExpectedGameCRC = false;
+	ReplayState.ExpectedCensus = { 0, 0 };
+	ReplayState.HasExpectedCensus = false;
+	ReplayState.CensusMismatchReported = false;
+	ReplayState.LastRecordedGameSpeed = -1;
 	ReplayState.DivergenceReported = false;
 	ReplayState.CheckedFrameCount = 0;
 	ReplayState.MismatchedFrameCount = 0;
@@ -823,6 +887,8 @@ void ResetRuntimeFlagsForScenario()
 	ReplayState.ProgressBarForcedComplete = false;
 	ReplayState.PendingFrameStates.clear();
 	ReplayState.PendingSideChannelEvents.clear();
+	ReplayState.CapturedFrameEventsFrame = -1;
+	ReplayState.CapturedFrameEvents.clear();
 	ReplayState.HasPlaybackHeader = false;
 	memset(&ReplayState.PlaybackHeader, 0, sizeof(ReplayState.PlaybackHeader));
 	ReplayState.HasPendingPlaybackFrame = false;
@@ -1055,7 +1121,6 @@ void RemoveReplayGameplayEventsFromDoList()
 		return;
 
 	const auto currentFrame = static_cast<unsigned int>(Unsorted::CurrentFrame);
-	bool playbackSpeedChanged = false;
 
 	// Treat local GameSpeed events as replay playback-speed changes.
 	for (int i = 0; i < EventClass::DoList.Count; ++i)
@@ -1066,16 +1131,9 @@ void RemoveReplayGameplayEventsFromDoList()
 			const int requestedFPS = GetReplayFPSFromGameSpeed(
 				std::clamp(event.GameSpeed.GameSpeed, 0, MAX_GAME_SPEED_INDEX));
 
-			if (requestedFPS != ReplayState.PlaybackFPS)
-			{
-				ReplayState.PlaybackFPS = requestedFPS;
-				playbackSpeedChanged = true;
-			}
+			ReplayState.PlaybackFPS = requestedFPS;
 		}
 	}
-
-	if (playbackSpeedChanged)
-		ApplyReplayTimingFromCurrentGameSpeed();
 
 	RemoveDoListEvents([](const EventClass& event)
 	{
@@ -1136,7 +1194,7 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 	const bool hasGameCRC = capture.HasGameCRC;
 
 	if (eventsThisFrame == 0 && !tacticalPosChanged && !selectionChanged && !hasSideChannelEvents
-		&& !hasGameCRC)
+		&& !hasGameCRC && !capture.HasCensus)
 	{
 		return true;
 	}
@@ -1153,6 +1211,10 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 		header.Flags |= FrameRecordFlag_SideChannel;
 	if (hasGameCRC)
 		header.Flags |= FrameRecordFlag_GameCRC;
+	if (capture.HasCensus)
+		header.Flags |= FrameRecordFlag_ObjectCensus;
+	if (capture.HasGameSpeed)
+		header.Flags |= FrameRecordFlag_GameSpeed;
 
 	if (!WriteRaw(&header, sizeof(header)))
 		return false;
@@ -1194,6 +1256,17 @@ bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThi
 
 	if (hasGameCRC && !WriteRaw(&capture.GameCRC, sizeof(capture.GameCRC)))
 		return false;
+
+	if (capture.HasCensus && !WriteRaw(&capture.Census, sizeof(capture.Census)))
+		return false;
+
+	if (capture.HasGameSpeed)
+	{
+		if (!WriteRaw(&capture.GameSpeed, sizeof(capture.GameSpeed)))
+			return false;
+
+		ReplayState.LastRecordedGameSpeed = capture.GameSpeed;
+	}
 
 	ReplayState.HasLastWrittenFrameState = true;
 	ReplayState.LastWrittenFrameNumber = capture.FrameNumber;
@@ -1259,6 +1332,14 @@ void RecordFrameState()
 		: Point2D { 0, 0 };
 
 	FillSelectedObjectIDs(capture.SelectedObjectIDs);
+
+	// In a single player game the options dialog writes Options.GameSpeed straight out, with no
+	// event queued - only multiplayer routes a speed change through EventClass::GAMESPEED. So
+	// there is nothing in the event stream for playback to replay, and the value has to be
+	// carried here instead. The simulation reads it through OptionsClass::Normalize_Delay, so a
+	// change the recording made and playback did not is a divergence from that frame on.
+	capture.GameSpeed = static_cast<int32_t>(GameOptionsClass::Instance.GameSpeed);
+	capture.HasGameSpeed = capture.GameSpeed != ReplayState.LastRecordedGameSpeed;
 }
 
 bool WriteReplayEndOfStreamMarker()
@@ -1423,6 +1504,18 @@ bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
 		return false;
 	}
 
+	if ((record.Flags & FrameRecordFlag_ObjectCensus) != 0u
+		&& !ReadRaw(&record.Census, sizeof(record.Census)))
+	{
+		return false;
+	}
+
+	if ((record.Flags & FrameRecordFlag_GameSpeed) != 0u
+		&& !ReadRaw(&record.GameSpeed, sizeof(record.GameSpeed)))
+	{
+		return false;
+	}
+
 	if ((record.Flags & FrameRecordFlag_Extensions) != 0u)
 	{
 		uint32_t extensionBytes = 0;
@@ -1543,6 +1636,48 @@ constexpr const wchar_t* DIVERGENCE_MESSAGE = L"Replay playback has diverged fro
 constexpr int MAX_LOGGED_DIVERGENCES = 10;
 constexpr int MAX_LOGGED_DIVERGENCE_RECOVERIES = 3;
 
+FrameObjectCensus CurrentObjectCensus()
+{
+	FrameObjectCensus census {};
+	census.AbstractCount = AbstractClass::Array.Count;
+	census.ScenarioUniqueID = ScenarioClass::Instance ? ScenarioClass::Instance->UniqueID : 0;
+	return census;
+}
+
+// Reports the first frame on which playback is not holding the same set of objects the recording
+// held. Reported once and then left alone: after the first mismatch the two runs are different
+// games, and every frame after it would say so again.
+//
+// This is the check that would have found the MoveFlash divergence immediately - it showed up as
+// AbstractCount off by one for the thirty frames the ring lived, on the very frame of the click,
+// while the frame hash stayed clean for thousands of frames afterwards.
+void CheckObjectCensusForCurrentFrame()
+{
+	if (!ReplayState.Playback || !ReplayState.HasExpectedCensus)
+		return;
+
+	ReplayState.HasExpectedCensus = false;
+
+	const FrameObjectCensus census = CurrentObjectCensus();
+	const FrameObjectCensus& expected = ReplayState.ExpectedCensus;
+	if (census.AbstractCount == expected.AbstractCount
+		&& census.ScenarioUniqueID == expected.ScenarioUniqueID)
+	{
+		return;
+	}
+
+	if (ReplayState.CensusMismatchReported)
+		return;
+
+	ReplayState.CensusMismatchReported = true;
+	Debug::Log("[Replay] Frame %d holds a different set of objects than the recording did "
+		"(objects %d, recorded %d; next unique ID %d, recorded %d). Something created or destroyed "
+		"an object on one side only - playback will diverge from here.\n",
+		Unsorted::CurrentFrame,
+		census.AbstractCount, expected.AbstractCount,
+		census.ScenarioUniqueID, expected.ScenarioUniqueID);
+}
+
 void CaptureGameCRCForCurrentFrame()
 {
 	if (!ReplayState.Recording && !ReplayState.Playback)
@@ -1562,8 +1697,12 @@ void CaptureGameCRCForCurrentFrame()
 		PendingRecordedFrameCapture& capture = ReplayState.PendingFrameStates.back();
 		capture.GameCRC = gameCRC;
 		capture.HasGameCRC = true;
+		capture.Census = CurrentObjectCensus();
+		capture.HasCensus = true;
 		return;
 	}
+
+	CheckObjectCensusForCurrentFrame();
 
 	if (!ReplayState.HasExpectedGameCRC)
 		return;
@@ -1619,6 +1758,16 @@ void CaptureGameCRCForCurrentFrame()
 	}
 }
 
+void ComputeAndCaptureGameCRCForCurrentFrame()
+{
+	if (!ReplayState.Recording && !ReplayState.Playback)
+		return;
+
+	using ComputeGameCRCFn = void(*)();
+	reinterpret_cast<ComputeGameCRCFn>(COMPUTE_GAME_CRC_ADDRESS)();
+	CaptureGameCRCForCurrentFrame();
+}
+
 void LogPlaybackDivergenceSummary()
 {
 	if (!ReplayState.Playback || ReplayState.CheckedFrameCount == 0)
@@ -1655,6 +1804,7 @@ void StopReplaySystem()
 
 			if (!StampCleanShutdownIntoHeader())
 				Debug::Log("[Replay] Failed to stamp the total frame count into the replay header.\n");
+
 		}
 	}
 
@@ -1796,30 +1946,63 @@ void RestoreFrameState()
 		ReplayState.HasExpectedGameCRC = true;
 	}
 
+	if ((frameRecord.Flags & FrameRecordFlag_ObjectCensus) != 0u)
+	{
+		ReplayState.ExpectedCensus = frameRecord.Census;
+		ReplayState.HasExpectedCensus = true;
+	}
+
+	// Applied from the same point in the frame the recording read it from.
+	if ((frameRecord.Flags & FrameRecordFlag_GameSpeed) != 0u)
+	{
+		const int gameSpeed = std::clamp(static_cast<int>(frameRecord.GameSpeed), 0, MAX_GAME_SPEED_INDEX);
+		GameOptionsClass::Instance.GameSpeed = gameSpeed;
+		GameModeOptionsClass::Instance.GameSpeed = gameSpeed;
+	}
+
 	ReplayState.HasPendingPlaybackFrame = false;
 }
 
-// Record every event on this frame; playback filters non-gameplay events later.
-void RecordEventsForCurrentFrame()
+// Capture every event on this frame before Execute_DoList can mutate it.
+void CaptureEventsForCurrentFrame()
 {
-	const int doListCount = EventClass::DoList.Count;
-	int eventsThisFrame = 0;
-
-	for (int i = 0; i < doListCount; ++i)
-	{
-		const auto& event = EventClass::DoList[i];
-		if (event.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame))
-			++eventsThisFrame;
-	}
-
-	FlushPendingRecordedFramesThrough(Unsorted::CurrentFrame, eventsThisFrame);
 	if (!ReplayState.Recording)
 		return;
 
+	const int frameNumber = Unsorted::CurrentFrame;
+	auto& capturedEvents = ReplayState.CapturedFrameEvents;
+	capturedEvents.clear();
+	ReplayState.CapturedFrameEventsFrame = frameNumber;
+
+	const int doListCount = EventClass::DoList.Count;
+	capturedEvents.reserve(static_cast<size_t>(doListCount));
 	for (int i = 0; i < doListCount; ++i)
 	{
 		const auto& event = EventClass::DoList[i];
-		if (event.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame))
+		if (event.Frame == static_cast<unsigned int>(frameNumber))
+			capturedEvents.push_back(event);
+	}
+}
+
+void RecordCapturedEventsForCurrentFrame()
+{
+	if (!ReplayState.Recording)
+		return;
+
+	const int frameNumber = Unsorted::CurrentFrame;
+	auto& capturedEvents = ReplayState.CapturedFrameEvents;
+	const bool hasCapturedEventsForFrame = ReplayState.CapturedFrameEventsFrame == frameNumber;
+	const int eventsThisFrame = hasCapturedEventsForFrame
+		? static_cast<int>(capturedEvents.size())
+		: 0;
+
+	FlushPendingRecordedFramesThrough(frameNumber, eventsThisFrame);
+	if (!ReplayState.Recording)
+		return;
+
+	if (hasCapturedEventsForFrame)
+	{
+		for (const auto& event : capturedEvents)
 		{
 			if (!WriteRaw(&event, sizeof(EventClass)))
 			{
@@ -1830,11 +2013,20 @@ void RecordEventsForCurrentFrame()
 		}
 	}
 
-	if (Unsorted::CurrentFrame - ReplayState.LastSyncFlushFrame >= REPLAY_SYNC_FLUSH_FRAME_INTERVAL)
+	capturedEvents.clear();
+	ReplayState.CapturedFrameEventsFrame = -1;
+
+	if (frameNumber - ReplayState.LastSyncFlushFrame >= REPLAY_SYNC_FLUSH_FRAME_INTERVAL)
 	{
-		ReplayState.LastSyncFlushFrame = Unsorted::CurrentFrame;
+		ReplayState.LastSyncFlushFrame = frameNumber;
 		SyncFlushRecordingStream();
 	}
+}
+
+void RecordEventsForCurrentFrame()
+{
+	CaptureEventsForCurrentFrame();
+	RecordCapturedEventsForCurrentFrame();
 }
 
 void PushSideChannelEvent(SideChannelRecord&& record)
@@ -1916,16 +2108,18 @@ void StartReplayPlayback(const char* replayPath)
 
 	const auto* pPlaybackConfig = GetConfig();
 
-	// GameOptionsClass::GameSpeed is only a fallback: it still holds what StartScenario applied
-	// from spawn.ini, and is overwritten with the recorded speed a few lines down. Reading the
-	// playback speed from its own key means this no longer depends on that ordering.
-	const int requestedSpeed = (pPlaybackConfig && pPlaybackConfig->ReplayPlaybackSpeed >= 0)
-		? pPlaybackConfig->ReplayPlaybackSpeed
-		: GameOptionsClass::Instance.GameSpeed;
+	// ReplayPlaybackSpeed is a frame rate in frames per second, and one of the rungs the in-game
+	// speed controls step through - see SPEED_LADDER in ReplayControls.h, which the client mirrors.
+	// It is a rate rather than a GameSpeed index because the two are not the same thing: a
+	// GameSpeed index sets how fast the recorded game itself ran, which playback has to reproduce
+	// exactly, while this only decides how fast the viewer watches it.
+	//
+	// Anything at or below zero means "at the speed it was recorded", which is what leaving
+	// PlaybackFPS at zero gets: GetPlaybackTargetFPS falls through to the recorded game speed.
+	const int requestedFPS = pPlaybackConfig ? pPlaybackConfig->ReplayPlaybackSpeed : 0;
+	ReplayState.PlaybackFPS = requestedFPS > 0 ? requestedFPS : 0;
 
-	ReplayState.PlaybackFPS = GetReplayFPSFromGameSpeed(std::clamp(requestedSpeed, 0, MAX_GAME_SPEED_INDEX));
-
-	int recordedGameSpeed = std::clamp(requestedSpeed, 0, MAX_GAME_SPEED_INDEX);
+	int recordedGameSpeed = std::clamp(GameOptionsClass::Instance.GameSpeed, 0, MAX_GAME_SPEED_INDEX);
 	if (!ReplayState.HasPlaybackHeader)
 	{
 		ReplayHeader header {};
@@ -1939,10 +2133,14 @@ void StartReplayPlayback(const char* replayPath)
 	if (ReplayState.HasPlaybackHeader)
 		recordedGameSpeed = std::clamp(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed), 0, MAX_GAME_SPEED_INDEX);
 
+	// The speed the recording started at. Any change the player made during the game is in the
+	// event stream as an EventClass::GAMESPEED and is replayed like any other event, so this is
+	// applied once here and never re-pinned: re-pinning it every frame was exactly what undid
+	// those replayed changes on the following frame, and the simulation reads Options.GameSpeed
+	// through OptionsClass::Normalize_Delay.
 	GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 	GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 
-	ApplyReplayTimingFromCurrentGameSpeed();
 
 	const auto* pConfig = GetConfig();
 	ReplayState.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;

@@ -113,9 +113,11 @@ public:
 	bool ReplayShroudEnabled;
 	bool ReplayLockedViewport;
 	bool ReplaySelectUnits;
-	// Index into the engine's game speed table to play back at, or -1 to use whatever the recording
-	// ran at. Separate from GameSpeed so playback pacing does not depend on the order in which
-	// StartScenario and the replay system touch GameOptionsClass.
+	// How fast to watch a replay, in frames per second - a rung of SPEED_LADDER in
+	// ReplayControls.h, which the client mirrors. Zero or less watches it at the speed it was
+	// recorded at. Deliberately a rate and not a GameSpeed index: GameSpeed says how fast the
+	// recorded game ran and playback has to reproduce it exactly, this only says how fast the
+	// viewer watches.
 	int  ReplayPlaybackSpeed;
 	// Watch as an observer: reveals the whole map and makes cloaked/disguised units and radar blips
 	// visible. Off by default, so playback stays from the recorded player's point of view.
@@ -211,7 +213,7 @@ public:
 		, ReplayShroudEnabled { false }
 		, ReplayLockedViewport { true }
 		, ReplaySelectUnits { true }
-		, ReplayPlaybackSpeed { -1 }
+		, ReplayPlaybackSpeed { 0 }
 		, ReplaySpectator { false }
 		, ReplayShowChatAndBeacons { true }
 		, ReplayViewPlayer { -1 }

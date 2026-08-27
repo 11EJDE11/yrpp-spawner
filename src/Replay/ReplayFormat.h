@@ -73,14 +73,21 @@ enum FrameRecordFlags : uint32_t
 	FrameRecordFlag_Selection = 1u << 1,
 	FrameRecordFlag_SideChannel = 1u << 2,
 	FrameRecordFlag_GameCRC = 1u << 3,
-	FrameRecordFlag_Extensions = 1u << 4
+	FrameRecordFlag_Extensions = 1u << 4,
+	FrameRecordFlag_ObjectCensus = 1u << 5,
+	// The game speed changed on this frame; an int32 index follows. Written only when it
+	// changes, because it almost never does - and a single player game changes it without any
+	// event, so the stream is the only place playback can learn about it.
+	FrameRecordFlag_GameSpeed = 1u << 6
 };
 
 constexpr uint32_t KNOWN_FRAME_RECORD_FLAGS = FrameRecordFlag_TacticalPos
 	| FrameRecordFlag_Selection
 	| FrameRecordFlag_SideChannel
 	| FrameRecordFlag_GameCRC
-	| FrameRecordFlag_Extensions;
+	| FrameRecordFlag_Extensions
+	| FrameRecordFlag_ObjectCensus
+	| FrameRecordFlag_GameSpeed;
 
 constexpr uint32_t MAX_FRAME_EXTENSION_BYTES = 1u << 20;
 
@@ -147,6 +154,12 @@ struct ReplayHeader
 	uint32_t Reserved[16];
 };
 
+struct FrameObjectCensus
+{
+	int32_t AbstractCount;
+	int32_t ScenarioUniqueID;
+};
+
 struct FrameRecordHeader
 {
 	int32_t FrameNumber;         // -1 indicates end-of-stream marker
@@ -160,6 +173,7 @@ struct FrameRecordHeader
 // silent on the reading side, so pin it here and make the mismatch a build error instead.
 static_assert(sizeof(ReplayHeader) == 1452, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
 static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
+static_assert(sizeof(FrameObjectCensus) == 8, "FrameObjectCensus layout changed; update docs/replay-format.md");
 static_assert(sizeof(SideChannelRecord) == 329, "SideChannelRecord layout changed; update docs/replay-format.md");
 
 // Size alone does not pin a layout: swapping two fields of the same width, or shortening one array

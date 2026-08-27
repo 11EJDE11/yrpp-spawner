@@ -31,11 +31,48 @@
 #include <HouseClass.h>
 #include <ProgressScreenClass.h>
 #include <ScenarioClass.h>
+#include <SessionClass.h>
 
 #include <algorithm>
 #include <limits>
 
 using namespace ReplaySystem::Internal;
+
+// FootClass::Active_Click_With(cell), the ACTION_MOVE case, at its `mov al, AllowVoice` gate.
+//
+// This is the local click handler: it runs on the machine that gave the order and nowhere else.
+// Its one side effect beyond queueing the MEGAMISSION event is the MoveFlash - the ring dropped
+// under the cursor - and playback never runs this function at all, because it injects the recorded
+// event straight into the DoList. So a recording carries one extra AbstractClass for the ~30 frames
+// that ring lives and a playback of the same game does not.
+//
+// That is enough to desynchronise them. Measured repeatedly against a full-precision state dump:
+// on the frame the ring expires, exactly one object misses exactly one frame of movement in the
+// recording - an infantryman one step short of his destination - and everything downstream follows
+// from there. Nothing else diverges first: object IDs, injected events and the scenario RNG stay
+// byte-identical for thousands of frames after it, which is why Compute_Game_CRC never pointed
+// here. It excludes the MoveFlash by design (What_Am_I() == Anim and the fake -2 UniqueID the
+// engine gives it), and being absent from the frame hash is not the same as being absent from the
+// simulation.
+//
+// AllowVoice == 0 is vanilla's own "no MoveFlash" route and jumps the entire block - the fake
+// UniqueID, the allocation, the restore, and the Anims remove-and-reappend at the end. Taking a
+// path the engine already takes is what makes this safe: skipping only the allocation would leave
+// the multiplayer restore branch appending a null into Anims, and skipping only the allocation and
+// the restore would leave ScenarioClass::UniqueID stranded at -3.
+//
+// The cost is the move ring while a replay is being recorded or watched. Restoring it means having
+// playback create the same anim when it injects a MEGAMISSION, so both sides carry it.
+DEFINE_HOOK(0x4D7EB5, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x5)
+{
+	enum { SkipMoveFlashBlock = 0x4D8065 };
+
+	if (ReplayState.Recording || ReplayState.Playback)
+		return SkipMoveFlashBlock;
+
+	R->AL(*reinterpret_cast<const BYTE*>(0x822CF2));
+	return 0x4D7EBA;
+}
 
 DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
 {
@@ -172,8 +209,6 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 
 	if (ReplayState.Playback)
 	{
-		ApplyReplayTimingFromCurrentGameSpeed();
-
 		// A paused iteration must leave the replay stream exactly where it was. RestoreFrameState
 		// clears ExpectedEventsThisFrame before it looks at the pending record, so running it a
 		// second time on a frame whose events have not been pumped yet would drop that frame's
@@ -191,6 +226,22 @@ DEFINE_HOOK(0x647689, Queue_AI_Multiplayer_ReplayGameCRC, 0x6)
 {
 	CaptureGameCRCForCurrentFrame();
 	return 0;
+}
+
+DEFINE_HOOK(0x6475B3, Queue_AI_Singleplayer_ReplayGameCRC, 0x8)
+{
+	const int executeResult = R->EAX<int>();
+	const bool executeSucceeded = executeResult != 0;
+
+	if (SessionClass::IsSingleplayer() && (ReplayState.Recording || ReplayState.Playback))
+	{
+		ComputeAndCaptureGameCRCForCurrentFrame();
+		if (ReplayState.Recording)
+			RecordCapturedEventsForCurrentFrame();
+	}
+
+	R->EAX(executeResult);
+	return executeSucceeded ? 0x6474B8 : 0x6475BB;
 }
 
 // The hooked `test AttractBitfield, 1` gates the engine's own Queue_Record call. Returning past
@@ -217,11 +268,56 @@ DEFINE_HOOK(0x64820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
 	return SkipQueueRecord;
 }
 
+// Neither a skirmish nor a campaign reaches Queue_AI_Multiplayer: Queue_AI's switch sends both
+// GAME_CAMPAIGN and GAME_SKIRMISH through the same OutList -> DoList -> Queue_Record ->
+// Execute_DoList block, which is why one pair of hooks covers the two of them. Hook the matching
+// Queue_Record gate there so recording copies pre-execution event bytes and playback injects events
+// before that Execute_DoList call.
+DEFINE_HOOK(0x647586, Queue_AI_Singleplayer_RecordPlaybackEvents, 0x7)
+{
+	enum { SkipQueueRecord = 0x647594 };
+
+	if (!SessionClass::IsSingleplayer())
+		return 0;
+
+	if (!ReplayState.Recording && !ReplayState.Playback)
+		return 0;
+
+	if (ReplayState.Recording)
+		CaptureEventsForCurrentFrame();
+
+	if (ReplayState.Playback)
+	{
+		RemoveReplayGameplayEventsFromDoList();
+		PlaybackFrameEvents();
+	}
+
+	return SkipQueueRecord;
+}
+
 // Spawner/Statistics.cpp jumps to this hook's address (0x64820E) to skip the statistics packet
 // during playback, so playback still reaches the event pump below. Moving this hook means moving
 // that jump target with it.
 //
 // Replay playback does not pump live network traffic.
+// Sync_Delay, at its entry, before it has read either of the timers it waits on.
+//
+// Playback does its own waiting here rather than steering the engine's. Main_Loop rewrites
+// FrameTimer.DelayTime three times and NFTTimer.Accumulated eight, the last of them well past any
+// convenient hook site, so a value written earlier does not survive to be used. And the timers are
+// too coarse besides: a skirmish waits in whole 60Hz ticks, where 60/45 truncates to one tick and
+// every rate above 60 truncates to none.
+//
+// So the wait is done against the performance counter and both timers are then zeroed, which is a
+// no-op in each of Sync_Delay's two branches - it falls straight through to the frame-rate
+// bookkeeping at the end, which still runs. SpareTicks ends up counting zero for the frame; nothing
+// outside this function reads it.
+DEFINE_HOOK(0x55E160, SyncDelay_PaceReplayPlayback, 0x6)
+{
+	ApplyPlaybackFramePacing();
+	return 0;
+}
+
 DEFINE_HOOK(0x55D8E3, MainLoop_SkipIPXPumpDuringReplayPlayback, 0x5)
 {
 	if (ReplayState.Playback)
@@ -245,6 +341,22 @@ DEFINE_HOOK(0x55CF13, GameExit_Sell_FlushReplayBuffers, 0x5)
 }
 
 DEFINE_HOOK(0x6BEC60, Game_Exit_FlushReplayBuffers, 0x5)
+{
+	StopReplaySystem();
+	return 0;
+}
+
+// Main_Game's frame loop is the `call Main_Loop` at 0x48CE8A, and it exits here - the one point
+// every way of ending a match converges on, whether the player won, lost or aborted, and before
+// the score screen and stats dump that follow. Nothing else covers a true skirmish: its only other
+// finaliser is Aux_Loop's abort branch, so a skirmish that ended in victory or defeat never
+// stamped its frame count and left every replay reading as zero frames long.
+//
+// Main_Loop itself runs a single frame and returns, so the spawner's own hook on that call site
+// (Spawner.Hook.cpp, SomeFunc_InterceptMainLoop) fires once per frame and is not a loop exit.
+// 0x48CEAF - `mov ecx, offset Session` - is used instead of the loop-exit instruction at 0x48CEAA
+// because that one is a relative call, which cannot be relocated into a hook's saved bytes.
+DEFINE_HOOK(0x48CEAF, MainGame_GameLoopFinished_FlushReplayBuffers, 0x5)
 {
 	StopReplaySystem();
 	return 0;

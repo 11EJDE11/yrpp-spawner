@@ -167,7 +167,6 @@ void StepPlaybackSpeed(int direction)
 	if (nextFPS != ReplayState.PlaybackFPS)
 	{
 		ReplayState.PlaybackFPS = nextFPS;
-		ApplyReplayTimingFromCurrentGameSpeed();
 	}
 
 	ReportPlaybackSpeed();
@@ -201,7 +200,6 @@ int GetPlaybackGameSpeedIndex()
 void SetPlaybackGameSpeedIndex(int gameSpeedIndex)
 {
 	ReplayState.PlaybackFPS = GetReplayFPSFromGameSpeed(std::clamp(gameSpeedIndex, 0, MAX_GAME_SPEED_INDEX));
-	ApplyReplayTimingFromCurrentGameSpeed();
 }
 
 void RegisterReplayCommands()
