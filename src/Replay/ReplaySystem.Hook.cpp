@@ -215,7 +215,7 @@ DEFINE_HOOK(0x64820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
 
 	if (ReplayState.Recording)
 	{
-		RecordEventsForCurrentFrame();
+		CaptureEventsForCurrentFrame();
 	}
 
 	if (ReplayState.Playback)
@@ -225,6 +225,26 @@ DEFINE_HOOK(0x64820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
 	}
 
 	return SkipQueueRecord;
+}
+
+// Queue_AI_Multiplayer, immediately after Execute_DoList has returned and before the queue's spent
+// entries are dropped: write out the events that actually executed. The singleplayer branch below
+// already writes from here, at the matching point in Queue_AI.
+//
+// Recording cannot be done at the gate above, where the events are picked out, because
+// Execute_DoList reschedules before it executes - see CaptureEventsForCurrentFrame. Vanilla's own
+// test of the return value is what this stands on, so it does that test itself.
+DEFINE_HOOK(0x648234, Queue_AI_Multiplayer_RecordExecutedEvents, 0x8)
+{
+	enum { ExecuteSucceeded = 0x6482BD, ExecuteFailed = 0x64823C };
+
+	const int executeResult = R->EAX<int>();
+
+	if (ReplayState.Recording)
+		RecordCapturedEventsForCurrentFrame();
+
+	R->EAX(executeResult);
+	return executeResult != 0 ? ExecuteSucceeded : ExecuteFailed;
 }
 
 // The same gate in Queue_AI's own branch, which is where campaign and skirmish sessions run their

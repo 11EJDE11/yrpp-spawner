@@ -238,11 +238,45 @@ Then, in order, whichever blocks the flags select:
 - **Extensions** — `uint32 length` (max 1 MiB), then that many opaque bytes. Nothing writes one
   yet; see below.
 - **Events** — `EventCountThisFrame` × `sizeof(EventClass)` (111 bytes, static-asserted in
-  `YRpp/EventClass.h`).
+  `YRpp/EventClass.h`). The events that *executed* on this frame, which is not the same as the
+  events stamped with it - see below.
 
-Blocks are stored bare and in flag order, so a reader that meets a flag it does not know cannot
-find the end of that block - the length is written down nowhere - and `ReadNextPlaybackFrameRecord`
-rejects the record.
+### Which events a frame holds
+
+Recording an event on the frame its `Frame` field names would be wrong, because `Execute_DoList`
+(0x64C380) rewrites that field before it executes anything: any event sitting between
+`NewMaxAheadFrame1` and `NewMaxAheadFrame2` is moved to the latter and left in the queue unexecuted,
+to run on that later frame instead. The engine logs each one as `DoList: Moving event from frame %d
+to frame %d`.
+
+So recording is split across the call. `CaptureEventsForCurrentFrame`, at the event pump (0x64820E
+for multiplayer, 0x647586 for campaign and skirmish), takes the *address* of every `DoList` entry
+not yet consumed, without judging which of them this frame will reach. Once `Execute_DoList` has
+returned (0x648234, and 0x6475B3 respectively) and before `Queue_AI` drops the spent entries,
+`RecordCapturedEventsForCurrentFrame` copies out the ones the engine has now marked `IsExecuted`.
+
+Two kinds of event are therefore absent from a frame that a naive capture would have put there: one
+the engine rescheduled, which is recorded on the frame it finally runs on, and one it discarded as
+`Packet received too late!`, which is never recorded because it never ran. Capturing before the call
+recorded a rescheduled event *twice* - once where it was moved from, once where it ran - and
+playback then executed an order the game never made.
+
+`IsExecuted` is the marker to use here, and hooking `EventClass::Execute` (0x4C6CB0) instead - which
+looks like the more direct way to record what ran - is a trap. `Execute_DoList` handles `FRAMEINFO`,
+and `EXIT` and `OPTIONS` belonging to another player, inline and never calls `Execute` for them, so
+that recording would lose every network timing sample and every remote quit. All of those paths do
+reach `IsExecuted`, because all eleven of them end at the same place (`0x64CAA8`).
+
+Events are written unexecuted, whichever side of execution they were copied from, so the same event
+is always the same bytes on disk.
+
+Blocks are stored bare, so a reader that meets a flag it does not know cannot find the end of that
+block - the length is written down nowhere - and `ReadNextPlaybackFrameRecord` rejects the record.
+
+They are written in the order listed above, which is *not* the numeric order of their flag bits:
+`ObjectCensus` (bit 5) and `GameSpeed` (bit 6) are written ahead of `Extensions` (bit 4), because
+the extension block has to stay physically last. Read them in the written order, not by walking the
+flag bits.
 
 The extension block is the exception, and the only way per-frame data gets added later without
 invalidating recordings made before it. It carries its own length, so a reader skips it whole
