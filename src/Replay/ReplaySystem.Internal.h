@@ -59,16 +59,13 @@ constexpr uintptr_t BEACON_MANAGER_MESSAGE_ADDRESS = 0x431450;
 constexpr uintptr_t TAUNTS_ADDRESS = 0x752B70;
 // TacticalClass::RecalculateViewport - recomputes TacticalPos and the visible area.
 constexpr uintptr_t TACTICAL_RECALCULATE_VIEWPORT_ADDRESS = 0x6D8B30;
-// Tactical::AI - commits _DesiredTacticalCoord, which is what Scroll_Map and edge scrolling write,
-// into _TacticalCoord, which is what actually gets drawn. Normally reached once a frame from inside
-// LogicClass::AI (0x55B667); see MainLoop_ReplayPause_SkipLogicAI for why pausing has to call it.
+// Tactical::AI - commits the desired viewport position into the one that gets drawn. Normally
+// reached from LogicClass::AI, which a paused playback frame skips.
 constexpr uintptr_t TACTICAL_AI_ADDRESS = 0x6D2540;
 // Compute_Game_CRC - the engine's own per-frame desync hash calculator.
 constexpr uintptr_t COMPUTE_GAME_CRC_ADDRESS = 0x64DAB0;
-// GameCRC - the engine's own per-frame desync hash, as Compute_Game_CRC leaves it.
-// Queue_AI_Multiplayer calls that once per frame and then stores the result into CRC[Frame & 0xFF]
-// for the network sync check. True skirmish bypasses that path, so the replay hook computes it
-// explicitly after Queue_AI's skirmish Execute_DoList.
+// GameCRC - the engine's own per-frame desync hash. A networked game fills it once a frame for
+// the sync check; a skirmish never does, so the replay hooks compute it themselves.
 constexpr uintptr_t GAME_CRC_ADDRESS = 0xAC51FC;
 // The two frame timers Sync_Delay sleeps on: DelayTime in 60Hz ticks for a skirmish,
 // Accumulated in milliseconds for a networked session. Playback writes these directly - see
@@ -117,14 +114,10 @@ struct ReplayRuntimeState
 	bool Recording = false;
 	bool Playback = false;
 	bool InitRandomHandled = false;
-	// Latched by FinishRecordingAtMissionEnd once a campaign mission's recording has been closed
-	// out, and refuses every later StartReplayRecording for the rest of the game. A campaign
-	// advances to [Basic] NextScenario from inside Do_Win, without leaving Main_Game's loop, so the
-	// next mission would otherwise re-enter Clear_Scenario and overwrite the finished recording -
-	// with a header built from the first mission's spawn.ini, which is what makes the result
-	// unplayable. Deliberately not cleared by ResetRuntimeFlagsForScenario, which runs for every
-	// scenario including the ones being suppressed; ReplaySystem::OnGameStartReset clears it, and
-	// that runs once per game started out of Select_Game.
+	// Latched once a campaign mission's recording has been closed out, and refuses every later
+	// StartReplayRecording for the rest of the game - see FinishRecordingAtMissionEnd. Deliberately
+	// not cleared by ResetRuntimeFlagsForScenario, which runs for every scenario including the
+	// suppressed ones; ReplaySystem::OnGameStartReset clears it, once per game.
 	bool RecordingFinishedForSession = false;
 	// Set once the load-progress bar has been force-completed for this scenario (playback,
 	// skirmish, or campaign) instead of animating. See WaitForPlayers_SkipProgressAnimation.
@@ -210,10 +203,8 @@ extern ReplayRuntimeState ReplayState;
 
 const SpawnerConfig* GetConfig();
 
-// Why a replay could not be opened for playback. Playback failure is fatal - StartScenario has
-// already skipped CreateConnections, so there is no live session to fall back on - which makes the
-// message the last thing anyone sees. Version trouble is the failure a format change produces most
-// of, so it says so rather than being folded into a generic read error.
+// Why a replay could not be opened for playback. Failure is fatal and the message is the last
+// thing the player sees, so a version mismatch - the likeliest cause - says so on its own.
 enum class ReplayOpenFailure
 {
 	None,

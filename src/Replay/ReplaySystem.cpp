@@ -130,16 +130,11 @@ double PlaybackClockMilliseconds()
 	return static_cast<double>(counter.QuadPart) / ticksPerMillisecond;
 }
 
-// Holds a frame back to the speed the viewer asked for, and then makes the engine's own wait a
-// no-op so the two do not add up.
-//
-// The deadline is accumulated as a double rather than recomputed from the current time, so a rate
-// that is not a whole number of milliseconds - 240 FPS is 4.1666 - comes out right on average
-// instead of drifting to the nearest millisecond. A frame that overruns its deadline by more than
-// one frame resets it: after a pause, a speed change, or a slow frame, playback should carry on
-// from where it is rather than sprint through a backlog.
-//
-// Zero, from a rate past a millisecond a frame, means no wait at all - the top of the ladder.
+// Holds a frame back to the speed the viewer asked for, then makes the engine's own wait a no-op so
+// the two do not add up. The deadline is accumulated rather than recomputed from the current time,
+// so rates that are not a whole number of milliseconds come out right on average; overrunning it by
+// more than a frame resets it, so playback carries on from where it is instead of sprinting through
+// a backlog after a pause or a slow frame.
 void ApplyPlaybackFramePacing()
 {
 	if (!ReplayState.Playback || ReplayState.PlaybackFPS <= 0)
@@ -306,11 +301,9 @@ bool EqualsIgnoreCase(const char* a, size_t aLength, const char* b)
 	return true;
 }
 
-// Reads one key out of a raw INI buffer, without building an INI object over it. Used for the
-// embedded spawnmap.ini, which is the whole map file: handing a couple of megabytes to CCINIClass
-// just to read the map name is the most expensive thing recording start does. Handles what a map
-// file's [Basic] section actually contains - case-insensitive section and key names, whitespace
-// around either, and ';' comments - and nothing more.
+// Reads one key out of a raw INI buffer without building an INI object over it: handing the whole
+// map file to CCINIClass just to read its name is the most expensive thing recording start does.
+// Handles only what a map file's [Basic] section contains - case, whitespace and ';' comments.
 bool TryReadIniValueFromBuffer(const std::vector<char>& text, const char* sectionName,
 	const char* keyName, char* outBuffer, size_t outBufferSize)
 {
@@ -614,11 +607,9 @@ bool WriteInitialReplayFile()
 	// Must happen before the header is built - SpawnIniSize has to describe what actually gets written.
 	SanitizeSpawnIniForReplay(spawnIni);
 
-	// spawnmap.ini is only this game's map when spawn.ini actually points at it. A campaign
-	// mission names its scenario inside the game's own mixes instead - Scenario=RA2->ALL02S.MAP -
-	// and whatever spawnmap.ini is sitting in the game directory then belongs to whichever game
-	// wrote it last. Embedding that names the replay after someone else's map and carries a
-	// couple of hundred kilobytes of the wrong one.
+	// spawnmap.ini is only this game's map when spawn.ini points at it. A campaign names its scenario
+	// inside the game's own mixes instead, and whatever spawnmap.ini sits in the game directory then
+	// belongs to whichever game wrote it last - embedding that names the replay after someone else's map.
 	const auto* const pRecordingConfig = GetConfig();
 	const bool scenarioIsSpawnMap = pRecordingConfig
 		&& _stricmp(pRecordingConfig->ScenarioName, "spawnmap.ini") == 0;
@@ -923,10 +914,9 @@ void ApplyPlaybackInitialState()
 	}
 }
 
-// Which spawn.ini player slot playback reproduces the screen of. Slot 0 - [Settings], the player
-// who made the recording - is both the default and the fallback, so this always names a slot that
-// exists. Deliberately a pure function of spawn.ini rather than of ReplayState: it is read once
-// before the replay system has started and twice after, and all three have to agree.
+// Which spawn.ini player slot playback reproduces the screen of; slot 0, the recording player, is
+// both the default and the fallback. Deliberately a pure function of spawn.ini rather than of
+// ReplayState: it is read once before the replay system has started and twice after.
 int ResolveViewPlayerIndex()
 {
 	const auto* pConfig = GetConfig();
@@ -975,10 +965,8 @@ void ApplyViewPlayerToCurrentPlayer()
 
 	if (playerSlot <= 0)
 	{
-		// -1 and 0 are the two ways of asking for the recording player, and are silent. Anything
-		// else named a slot that cannot be watched from: out of range, an AI, an empty slot, or
-		// any slot at all in a campaign recording. This is the one place that runs once per
-		// scenario, so it is where that gets reported.
+		// -1 and 0 both mean the recording player and are silent. Anything else named a slot that cannot
+		// be watched from, and this is the one place that runs once per scenario, so it reports it.
 		if (requested > 0 && ReplaySystem::IsPlaybackRequested())
 		{
 			Debug::Log("[Replay] ReplayViewPlayer=%d is not a human player slot; watching from the "
@@ -1055,10 +1043,9 @@ bool IsReplayableGameplayEvent(const EventClass& event)
 	return event.Type != EventType::Options && !IsTimingEvent(event.Type);
 }
 
-// Allow these to remain in DoList during playback so local controls work. GameSpeed is deliberately
-// not among them: its requested value is harvested before the removal pass, and letting the engine
-// execute it would write Options.GameSpeed - which simulation code reads and playback pins to the
-// recorded speed - for the remainder of the frame.
+// Allow these to remain in DoList during playback so local controls work. GameSpeed is not among
+// them: its requested value is harvested before the removal pass, and executing it would overwrite
+// the game speed that simulation code reads and playback pins to the recorded one.
 bool IsLocalPlaybackControlEvent(const EventClass& event)
 {
 	switch (event.Type)
@@ -1333,11 +1320,9 @@ void RecordFrameState()
 
 	FillSelectedObjectIDs(capture.SelectedObjectIDs);
 
-	// In a single player game the options dialog writes Options.GameSpeed straight out, with no
-	// event queued - only multiplayer routes a speed change through EventClass::GAMESPEED. So
-	// there is nothing in the event stream for playback to replay, and the value has to be
-	// carried here instead. The simulation reads it through OptionsClass::Normalize_Delay, so a
-	// change the recording made and playback did not is a divergence from that frame on.
+	// A single player game's options dialog writes the game speed straight out with no event queued,
+	// so there is nothing in the event stream for playback to replay and the value has to be carried
+	// here instead. The simulation reads it, so a change playback missed diverges from that frame on.
 	capture.GameSpeed = static_cast<int32_t>(GameOptionsClass::Instance.GameSpeed);
 	capture.HasGameSpeed = capture.GameSpeed != ReplayState.LastRecordedGameSpeed;
 }
@@ -1646,11 +1631,8 @@ FrameObjectCensus CurrentObjectCensus()
 
 // Reports the first frame on which playback is not holding the same set of objects the recording
 // held. Reported once and then left alone: after the first mismatch the two runs are different
-// games, and every frame after it would say so again.
-//
-// This is the check that would have found the MoveFlash divergence immediately - it showed up as
-// AbstractCount off by one for the thirty frames the ring lived, on the very frame of the click,
-// while the frame hash stayed clean for thousands of frames afterwards.
+// games, and every frame after would say so again. It is a sharper check than the frame hash,
+// which can stay clean for thousands of frames after a divergence has already happened.
 void CheckObjectCensusForCurrentFrame()
 {
 	if (!ReplayState.Playback || !ReplayState.HasExpectedCensus)
@@ -1852,16 +1834,9 @@ void MaintainFullMapReveal()
 	if (!pPlayer || pPlayer->Visionary)
 		return;
 
-	// Clear_Shroud's first act, ahead of every guard in it, is to set the house's MapIsClear - and
-	// that byte is one of the things Compute_Game_CRC folds in, once per house. This reveal is not
-	// part of the recorded simulation, so letting it write there would make the frame hash differ
-	// from the recording's for a reason that has nothing to do with the simulation, on this frame
-	// and every frame after. Put it back.
-	//
-	// Safe because nothing plays off this flag: MapIsClear is written by the shroud reveal and
-	// reshroud paths and read by exactly three functions, all of them hashes or diagnostics -
-	// Compute_Game_CRC (0x64DCCA), HouseClass::Compute_CRC (0x502FFF) and
-	// Print_CRCs_Current_Player (0x64E250). No gameplay code reads it.
+	// Clear_Shroud sets the house's MapIsClear, which Compute_Game_CRC hashes. This reveal is not part
+	// of the recorded simulation, so letting it write there would diverge the frame hashes for a purely
+	// local reason - put it back. Nothing but hashes and diagnostics ever read the flag.
 	const bool mapIsClear = pPlayer->MapIsClear;
 
 	MapClass::Instance.Reveal(pPlayer);
@@ -2070,16 +2045,10 @@ void PlaybackFrameEvents()
 	}
 }
 
-// Closes out the recording of a mission that has just ended, and stops the game from recording any
-// scenario that follows it. Called from the Do_Win hook, which is where a campaign both finishes a
-// mission and starts the next one.
-//
-// One replay file per launch is the whole of what the format can carry: the file embeds the
-// spawn.ini and spawnmap.ini the client wrote before the game started, and those describe the first
-// mission only - the game reads [Basic] NextScenario out of the mission's own map and loads it from
-// the mixes, without the client or spawn.ini ever hearing about it. Recording the next mission into
-// the same file would leave its events sitting behind the previous mission's scenario, which is
-// exactly what playback then reproduces: the wrong map, and events that mean nothing on it.
+// Closes out the recording of a mission that has just ended, and stops any scenario after it from
+// being recorded. A replay embeds the spawn.ini and spawnmap.ini the client wrote before the game
+// started, and those describe the launched mission only: the next mission comes out of the game's
+// own mixes, so recording it into the same file would leave its events behind the wrong scenario.
 void FinishRecordingAtMissionEnd()
 {
 	if (!ReplayState.Recording)
@@ -2140,14 +2109,9 @@ void StartReplayPlayback(const char* replayPath)
 
 	const auto* pPlaybackConfig = GetConfig();
 
-	// ReplayPlaybackSpeed is a frame rate in frames per second, and one of the rungs the in-game
-	// speed controls step through - see SPEED_LADDER in ReplayControls.h, which the client mirrors.
-	// It is a rate rather than a GameSpeed index because the two are not the same thing: a
-	// GameSpeed index sets how fast the recorded game itself ran, which playback has to reproduce
-	// exactly, while this only decides how fast the viewer watches it.
-	//
-	// Anything at or below zero means "at the speed it was recorded", which is what leaving
-	// PlaybackFPS at zero gets: GetPlaybackTargetFPS falls through to the recorded game speed.
+	// ReplayPlaybackSpeed is a frame rate, one of the rungs the in-game speed controls step through -
+	// not a game speed index, which is how fast the recorded game itself ran and has to be reproduced
+	// exactly. Zero or less means "at the speed it was recorded".
 	const int requestedFPS = pPlaybackConfig ? pPlaybackConfig->ReplayPlaybackSpeed : 0;
 	ReplayState.PlaybackFPS = requestedFPS > 0 ? requestedFPS : 0;
 
@@ -2165,11 +2129,9 @@ void StartReplayPlayback(const char* replayPath)
 	if (ReplayState.HasPlaybackHeader)
 		recordedGameSpeed = std::clamp(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed), 0, MAX_GAME_SPEED_INDEX);
 
-	// The speed the recording started at. Any change the player made during the game is in the
-	// event stream as an EventClass::GAMESPEED and is replayed like any other event, so this is
-	// applied once here and never re-pinned: re-pinning it every frame was exactly what undid
-	// those replayed changes on the following frame, and the simulation reads Options.GameSpeed
-	// through OptionsClass::Normalize_Delay.
+	// The speed the recording started at, applied once and never re-pinned: a change the player made
+	// during the game is in the event stream and is replayed like any other event, and re-pinning the
+	// value every frame was exactly what undid those changes on the following frame.
 	GameOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 	GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 
@@ -2181,11 +2143,9 @@ void StartReplayPlayback(const char* replayPath)
 	ReplayState.SpectatorView = pConfig ? pConfig->ReplaySpectator : false;
 	ReplayState.ShowChatAndBeacons = pConfig ? pConfig->ReplayShowChatAndBeacons : true;
 
-	// Both of these reproduce the recording player's own screen, and neither means anything once
-	// the viewpoint has been handed to someone else: the camera would be pinned to a base you are
-	// not watching, and the selection would be units the house you are watching does not own and
-	// mostly cannot see. Forced here rather than left to the caller so a hand-written spawn.ini
-	// cannot ask for the incoherent combination.
+	// Both of these reproduce the recording player's own screen, and neither means anything once the
+	// viewpoint has been handed to someone else. Forced here rather than left to the caller so a
+	// hand-written spawn.ini cannot ask for the incoherent combination.
 	if (ResolveViewPlayerIndex() > 0)
 	{
 		ReplayState.LockViewport = false;
@@ -2199,10 +2159,8 @@ void StartReplayPlayback(const char* replayPath)
 	{
 		StopReplaySystem();
 
-		// StartScenario already skipped CreateConnections because ReplayFile was set, so there is no
-		// live session to fall back to - carrying on leaves a game that can never advance a frame.
-		// This message is the whole of what the player gets, so it names the reason: a format change
-		// makes UnsupportedVersion much the most likely of them.
+		// StartScenario already skipped CreateConnections, so there is no live session to fall back to and
+		// a failure here can only end the game. This message is all the player gets, so it names the reason.
 		Debug::FatalErrorAndExit("[Replay] Cannot play %s: %s.",
 			ReplayState.PlaybackPath, DescribeReplayOpenFailure(failure));
 	}

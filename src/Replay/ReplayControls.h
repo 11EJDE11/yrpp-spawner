@@ -19,13 +19,9 @@
 
 #pragma once
 
-// The viewer-side controls for replay playback: pause, and a playback speed that is allowed to run
-// past the 60 FPS ceiling the in-game speed slider tops out at. Both are plain CommandClass
-// commands, so they are bound from the in-game keyboard options like any other command and ship
-// with no binding of their own.
-//
-// Nothing here is part of the replay file format - a recording says what speed it was played at,
-// never what speed someone watched it back at.
+// The viewer-side controls for replay playback: pause, and a playback speed allowed to run past the
+// 60 FPS ceiling the in-game speed slider tops out at. Both are plain CommandClass commands, bound
+// from the in-game keyboard options like any other, and neither is part of the replay file format.
 
 namespace ReplaySystem
 {
@@ -33,18 +29,13 @@ namespace ReplaySystem
 namespace Controls
 {
 
-// Playback speed ladder, in frames per second. The first seven rungs are exactly the rates the
-// engine's own game-speed slider produces (index 6 -> 10 FPS, ..., index 0 -> 60 FPS), so the
-// options dialog and these hotkeys agree wherever their ranges overlap. The rungs past 60 FPS have
-// no slider position and exist only for playback: a live game paces itself against the other
-// players and has no way to ask for them.
+// Playback speed ladder, in frames per second. The first seven rungs are the rates the engine's own
+// game-speed slider produces, so the options dialog and these hotkeys agree where they overlap; the
+// rest exist only for playback, which is not pacing itself against other players.
 //
-// The top of the ladder is spaced by what the engine can actually distinguish rather than by round
-// numbers. Main_Loop paces a frame off `NFTTimer.Accumulated = 1000 / RequestedFPS` milliseconds
-// (0x55D522), so above 240 FPS only the rungs that land on a different millisecond mean anything -
-// 300 -> 3ms, 500 -> 2ms, 1000 -> 1ms - and anything past 1000 divides to 0, which Sync_Delay reads
-// as "do not wait at all". 2000 is that uncapped rung: what it delivers is however fast the machine
-// can simulate and draw a frame, which is the real ceiling well before the timer is.
+// The top of the ladder is spaced by what the engine can tell apart: it paces a frame in whole
+// milliseconds, so above 240 FPS only rungs that land on a different millisecond mean anything, and
+// 2000 divides to no wait at all - as fast as the machine can simulate and draw.
 constexpr int SPEED_LADDER[] = { 10, 12, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 500, 1000, 2000 };
 constexpr int SPEED_LADDER_COUNT = static_cast<int>(sizeof(SPEED_LADDER) / sizeof(SPEED_LADDER[0]));
 

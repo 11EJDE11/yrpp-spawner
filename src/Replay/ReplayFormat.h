@@ -21,27 +21,11 @@
 
 // On-disk layout of a .yrrp replay file, and nothing else - no engine state, no hooks.
 //
-// The CnCNet client mirrors this by hand in DXMainClient/Domain/ReplayGame.cs, and the layout is
-// written out in docs/replay-format.md. There is no compile-time link between the three, so a
-// change here has to be made in all of them together; the static_asserts below turn a size change
-// - or a field moving without the size changing - into a build error rather than a silent
-// misparse on the reading side.
-//
-// How to change this format without invalidating everyone's existing replays:
-//
-//   Additive change - keep Version at 1. Take space out of ReplayHeader::Reserved, or append to
-//   the header and let HeaderSize grow, or hang per-frame data off an Extensions block. A reader
-//   built before the change skips all three and keeps working, because the skipping is what the
-//   version below already ships.
-//
-//   Incompatible change - moving or repurposing an existing field, changing what an existing one
-//   means - bump REPLAY_VERSION. Old readers then refuse the file, which is the point. Leave
-//   MIN_SUPPORTED_REPLAY_VERSION where it is so this build still reads everything written before
-//   the break.
-//
-// Only the first twelve bytes - Magic, Version, HeaderSize - are guaranteed to mean the same thing
-// in every version there will ever be. Everything else is only readable once Version has been
-// checked. Nothing may be inserted ahead of them.
+// The client mirrors this by hand in DXMainClient/Domain/ReplayGame.cs, and docs/replay-format.md
+// writes it out; there is no compile-time link between the three, so a change here has to be made
+// in all of them together. The static_asserts below turn a layout change into a build error rather
+// than a silent misparse on the reading side. Read "Changing the format" in that doc first:
+// additive changes keep the version where it is, and only a moved or repurposed field bumps it.
 
 #include <GeneralStructures.h>
 
@@ -176,9 +160,8 @@ static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed
 static_assert(sizeof(FrameObjectCensus) == 8, "FrameObjectCensus layout changed; update docs/replay-format.md");
 static_assert(sizeof(SideChannelRecord) == 329, "SideChannelRecord layout changed; update docs/replay-format.md");
 
-// Size alone does not pin a layout: swapping two fields of the same width, or shortening one array
-// and lengthening another, leaves sizeof untouched and misparses every field from the point of
-// divergence on. These are the offsets ReplayGame.cs hardcodes, so pin each one individually.
+// Size alone does not pin a layout - swapping two fields of the same width leaves sizeof untouched
+// and misparses everything after them - so pin each offset the client hardcodes individually.
 static_assert(offsetof(ReplayHeader, Magic) == 0, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 static_assert(offsetof(ReplayHeader, Version) == 4, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 static_assert(offsetof(ReplayHeader, HeaderSize) == 8, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");

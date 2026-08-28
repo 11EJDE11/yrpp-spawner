@@ -17,8 +17,8 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
-// Every hook the replay system installs. The work itself lives in ReplaySystem.cpp; this file is
-// the list of engine sites it is wired into, and the reasoning for each one.
+// Every engine site the replay system is wired into. The work itself lives in ReplaySystem.cpp;
+// docs/replay-format.md has the detail behind the trickier hooks.
 
 #include "ReplayControls.h"
 #include "ReplaySystem.h"
@@ -38,31 +38,9 @@
 
 using namespace ReplaySystem::Internal;
 
-// FootClass::Active_Click_With(cell), the ACTION_MOVE case, at its `mov al, AllowVoice` gate.
-//
-// This is the local click handler: it runs on the machine that gave the order and nowhere else.
-// Its one side effect beyond queueing the MEGAMISSION event is the MoveFlash - the ring dropped
-// under the cursor - and playback never runs this function at all, because it injects the recorded
-// event straight into the DoList. So a recording carries one extra AbstractClass for the ~30 frames
-// that ring lives and a playback of the same game does not.
-//
-// That is enough to desynchronise them. Measured repeatedly against a full-precision state dump:
-// on the frame the ring expires, exactly one object misses exactly one frame of movement in the
-// recording - an infantryman one step short of his destination - and everything downstream follows
-// from there. Nothing else diverges first: object IDs, injected events and the scenario RNG stay
-// byte-identical for thousands of frames after it, which is why Compute_Game_CRC never pointed
-// here. It excludes the MoveFlash by design (What_Am_I() == Anim and the fake -2 UniqueID the
-// engine gives it), and being absent from the frame hash is not the same as being absent from the
-// simulation.
-//
-// AllowVoice == 0 is vanilla's own "no MoveFlash" route and jumps the entire block - the fake
-// UniqueID, the allocation, the restore, and the Anims remove-and-reappend at the end. Taking a
-// path the engine already takes is what makes this safe: skipping only the allocation would leave
-// the multiplayer restore branch appending a null into Anims, and skipping only the allocation and
-// the restore would leave ScenarioClass::UniqueID stranded at -3.
-//
-// The cost is the move ring while a replay is being recorded or watched. Restoring it means having
-// playback create the same anim when it injects a MEGAMISSION, so both sides carry it.
+// FootClass::Active_Click_With creates an animation when the player clicks to move units. This doesn't
+// happen on playback as there's no click. So we need to skip it while recording/watching otherwise 
+// playback would diverge from the recording. Should be safe as multiplayer does the same.
 DEFINE_HOOK(0x4D7EB5, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x5)
 {
 	enum { SkipMoveFlashBlock = 0x4D8065 };
@@ -74,6 +52,8 @@ DEFINE_HOOK(0x4D7EB5, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x5)
 	return 0x4D7EBA;
 }
 
+// Init_Random. Playback seeds the game from the replay header rather than from the clock, so the
+// simulation starts from the RNG state the recording started from.
 DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
 {
 	if (ReplayState.InitRandomHandled)
@@ -111,12 +91,10 @@ DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
 	return 0x52FDF9;
 }
 
-// Hooks Clear_Scenario's ten byte `mov [edx+214h], 1000000`; a 0x5 hook would split the immediate.
-// Return 0, not 0x685663 - Phobos hooks this address too.
-//
-// Syringe re-executes that reset after every hook here has run, so this body still sees the
-// previous scenario's counter and applies the reset by hand for BuildReplayHeader's benefit.
-// Nothing written to UniqueID here survives; the playback restore is in the 0x686B6A hook below.
+// Clear_Scenario, which runs at the start of every scenario: open the replay for playback or
+// recording, or make sure the system is off. The hook covers the whole scenario UniqueID reset,
+// which Syringe re-executes afterwards, so the counter is applied by hand here for the header's
+// benefit. Phobos hooks this address too, so return 0 rather than an address.
 DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
 {
 	auto* const pScenario = R->EDX<ScenarioClass*>();
@@ -144,12 +122,9 @@ DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
 	return 0;
 }
 
-// Read_Scenario_INI, just after its `call Clear_Scenario`. Order is
-// Select_Game -> Init_Random -> ... -> Read_Scenario_INI -> Clear_Scenario, so this is the first
-// point past the UniqueID reset and before any object exists - every earlier restore is undone.
-// It has to be pinned because object UniqueIDs come from ++ScenarioClass::UniqueID and the
-// recorded selection is stored by them. The hooked `cmp Session, ebx` is also the `jnz` target
-// that skips Clear_Scenario, so both paths are covered.
+// Read_Scenario_INI, just past Clear_Scenario - the first point where a restored RNG and object ID
+// counter survive, and before any object exists. Object IDs come from that counter and the recorded
+// selection is stored by them, so playback has to re-apply its initial state here.
 DEFINE_HOOK(0x686B6A, ReadScenarioINI_ReplayApplyState, 0x6)
 {
 	if (ReplayState.Playback)
@@ -158,38 +133,17 @@ DEFINE_HOOK(0x686B6A, ReadScenarioINI_ReplayApplyState, 0x6)
 	return 0;
 }
 
-// MapClass::Reset_Shroud (thiscall; EAX holds `house` by this point, from the `mov eax,
-// [esp+house]` at the function's true entry, 0x577AB0). Gameplay reshrouds the local player
-// constantly during a normal match - gap generators, spy satellite loss, shroud crates, map
-// triggers - and whenever it targets PlayerPtr (or a null house, which it treats the same way
-// after logging a debug warning) its body is a full map-cell walk plus a forced full-screen redraw
-// and radar rebuild. During full-map-reveal playback (ReplayShroudEnabled=false or spectator view)
-// MaintainFullMapReveal notices the resulting Visionary==false on the very next frame and
-// immediately re-runs the equally expensive Reveal (0x577D90), so every reshroud event in the
-// recording pays for two full-map passes - the intermittent CPU spikes during playback. Skipping
-// the reshroud for the local player in that mode removes both: the map simply never leaves
-// "revealed", which is what the setting asks for anyway. Other houses' cheap MapIsClear
-// bookkeeping (the only work this function does for house != PlayerPtr) is left untouched.
-//
-// Size is 6, not 2: Syringe's injected jump needs a full 5 bytes regardless of what's declared
-// here, and a too-small size just means it silently overwrites bytes beyond what it was told about
-// (this exact mistake, on a different hook, produced a same-session access-violation crash 5 bytes
-// past its declared 3-byte hook). 2 only covers `cmp eax, ebx`; 6 is the next instruction-aligned
-// boundary at or past 5, covering `cmp eax, ebx; mov esi, ecx; jz loc_577AD0` as a whole (ending
-// exactly at 0x577ABE, the start of `mov ecx, [eax+30h]`) - confirmed none of those three
-// instructions are themselves a jump target from elsewhere in the function, so claiming them is
-// safe.
+// MapClass::Reset_Shroud. During full-map-reveal playback every reshroud of the local player is
+// undone by MaintainFullMapReveal on the next frame, so both full-map passes are wasted work -
+// the CPU spikes reported during playback. Skip the reshroud for that house; other houses keep it.
 DEFINE_HOOK(0x577AB8, MapClass_ResetShroud_SkipDuringFullRevealPlayback, 0x6)
 {
 	HouseClass* const house = R->EAX<HouseClass*>();
 	if (ReplayState.Playback && PlaybackWantsFullMapReveal()
 		&& (house == HouseClass::CurrentPlayer || house == nullptr))
 	{
-		// Everything skipped below is shroud, radar and redraw work - except the one write at
-		// 0x577ACA, which clears the house's MapIsClear, and that byte is hashed by
-		// Compute_Game_CRC once per house. Skipping it would leave the flag reading as revealed
-		// while the recording had it reshrouded, and the frame hashes would differ from here on
-		// for a purely local reason. Do that one write by hand; the reshroud itself stays skipped.
+		// Everything skipped is shroud, radar and redraw work except this flag, which
+		// Compute_Game_CRC hashes - leaving it unwritten would diverge the frame hashes.
 		if (house)
 			house->MapIsClear = false;
 
@@ -199,7 +153,8 @@ DEFINE_HOOK(0x577AB8, MapClass_ResetShroud_SkipDuringFullRevealPlayback, 0x6)
 	return 0;
 }
 
-// Capture visible replay state before dialog handling can skip the normal replay path.
+// Main_Loop, ahead of the dialog handling that can skip the rest of the frame. Captures the frame's
+// visible state while recording and restores it during playback.
 DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 {
 	if (ReplayState.Recording)
@@ -209,12 +164,9 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 
 	if (ReplayState.Playback)
 	{
-		// A paused iteration must leave the replay stream exactly where it was. RestoreFrameState
-		// clears ExpectedEventsThisFrame before it looks at the pending record, so running it a
-		// second time on a frame whose events have not been pumped yet would drop that frame's
-		// event count while the events themselves stay in the file - and every later frame would
-		// then read the wrong bytes. The three hooks below hold Queue_AI and the frame counter to
-		// match, so a paused iteration touches no replay state at all.
+		// A paused iteration must leave the stream where it was, or the frame's event count and its
+		// events part company and every later frame reads the wrong bytes. The pause hooks below
+		// hold the event pump and the frame counter to match.
 		if (!ReplaySystem::Controls::IsPlaybackPaused())
 			RestoreFrameState();
 	}
@@ -222,12 +174,16 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 	return 0;
 }
 
+// Queue_AI_Multiplayer, once the engine has computed its own per-frame hash: take a copy for the
+// diverge check.
 DEFINE_HOOK(0x647689, Queue_AI_Multiplayer_ReplayGameCRC, 0x6)
 {
 	CaptureGameCRCForCurrentFrame();
 	return 0;
 }
 
+// Queue_AI's campaign and skirmish branch, which never computes that hash - so compute it here,
+// and write out the frame's events while the recorded copies are still to hand.
 DEFINE_HOOK(0x6475B3, Queue_AI_Singleplayer_ReplayGameCRC, 0x8)
 {
 	const int executeResult = R->EAX<int>();
@@ -244,9 +200,12 @@ DEFINE_HOOK(0x6475B3, Queue_AI_Singleplayer_ReplayGameCRC, 0x8)
 	return executeSucceeded ? 0x6474B8 : 0x6475BB;
 }
 
-// The hooked `test AttractBitfield, 1` gates the engine's own Queue_Record call. Returning past
-// it is how playback keeps that from running, so only do it when the replay system is actually
-// active - otherwise a plain multiplayer game silently loses vanilla's recording path.
+// Queue_AI_Multiplayer, at the gate for vanilla's own recording: write this frame's events out, or
+// inject the recorded ones, and take vanilla's recorder out of the picture. Only while the replay
+// system is active, so a normal multiplayer game keeps it.
+//
+// Spawner/Statistics.cpp jumps to this address to skip the statistics packet during playback, so
+// moving this hook means moving that jump target with it.
 DEFINE_HOOK(0x64820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
 {
 	enum { SkipQueueRecord = 0x64821C };
@@ -268,11 +227,8 @@ DEFINE_HOOK(0x64820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
 	return SkipQueueRecord;
 }
 
-// Neither a skirmish nor a campaign reaches Queue_AI_Multiplayer: Queue_AI's switch sends both
-// GAME_CAMPAIGN and GAME_SKIRMISH through the same OutList -> DoList -> Queue_Record ->
-// Execute_DoList block, which is why one pair of hooks covers the two of them. Hook the matching
-// Queue_Record gate there so recording copies pre-execution event bytes and playback injects events
-// before that Execute_DoList call.
+// The same gate in Queue_AI's own branch, which is where campaign and skirmish sessions run their
+// events - neither of them ever reaches Queue_AI_Multiplayer.
 DEFINE_HOOK(0x647586, Queue_AI_Singleplayer_RecordPlaybackEvents, 0x7)
 {
 	enum { SkipQueueRecord = 0x647594 };
@@ -295,29 +251,16 @@ DEFINE_HOOK(0x647586, Queue_AI_Singleplayer_RecordPlaybackEvents, 0x7)
 	return SkipQueueRecord;
 }
 
-// Spawner/Statistics.cpp jumps to this hook's address (0x64820E) to skip the statistics packet
-// during playback, so playback still reaches the event pump below. Moving this hook means moving
-// that jump target with it.
-//
-// Replay playback does not pump live network traffic.
-// Sync_Delay, at its entry, before it has read either of the timers it waits on.
-//
-// Playback does its own waiting here rather than steering the engine's. Main_Loop rewrites
-// FrameTimer.DelayTime three times and NFTTimer.Accumulated eight, the last of them well past any
-// convenient hook site, so a value written earlier does not survive to be used. And the timers are
-// too coarse besides: a skirmish waits in whole 60Hz ticks, where 60/45 truncates to one tick and
-// every rate above 60 truncates to none.
-//
-// So the wait is done against the performance counter and both timers are then zeroed, which is a
-// no-op in each of Sync_Delay's two branches - it falls straight through to the frame-rate
-// bookkeeping at the end, which still runs. SpareTicks ends up counting zero for the frame; nothing
-// outside this function reads it.
+// Sync_Delay, where the game waits out the rest of a frame. Playback does its own waiting against
+// the performance counter instead: the engine's frame timers are rewritten later in Main_Loop, and
+// they are too coarse for the rates the viewer's speed ladder asks for.
 DEFINE_HOOK(0x55E160, SyncDelay_PaceReplayPlayback, 0x6)
 {
 	ApplyPlaybackFramePacing();
 	return 0;
 }
 
+// Main_Loop's network pump. Playback has no live session to service.
 DEFINE_HOOK(0x55D8E3, MainLoop_SkipIPXPumpDuringReplayPlayback, 0x5)
 {
 	if (ReplayState.Playback)
@@ -328,45 +271,35 @@ DEFINE_HOOK(0x55D8E3, MainLoop_SkipIPXPumpDuringReplayPlayback, 0x5)
 	return 0;
 }
 
-DEFINE_HOOK(0x55D25C, GameExit_FlushReplayBuffers, 0x6)
+// The ways a game can end, all of which have to close the replay file out. StopReplaySystem does
+// nothing once the system is already stopped, so overlapping paths are harmless.
+
+// Aux_Loop's abort branch: the player quit the mission from the menu.
+DEFINE_HOOK(0x55D25C, AuxLoop_PlayerAborted_FlushReplayBuffers, 0x6)
 {
 	StopReplaySystem();
 	return 0;
 }
 
-DEFINE_HOOK(0x55CF13, GameExit_Sell_FlushReplayBuffers, 0x5)
+// Disconnect_Gracefully, the teardown a networked session goes through.
+DEFINE_HOOK(0x55CF13, DisconnectGracefully_FlushReplayBuffers, 0x5)
 {
 	StopReplaySystem();
 	return 0;
 }
 
+// Game_Exit, the last point before the process goes away.
 DEFINE_HOOK(0x6BEC60, Game_Exit_FlushReplayBuffers, 0x5)
 {
 	StopReplaySystem();
 	return 0;
 }
 
-// Do_Win, at its entry (`mov eax, Session` - an absolute load, so it relocates into the hook's
-// saved bytes safely, and nothing jumps to the instruction after it). Aux_Loop calls this the
-// moment a mission is won, ahead of the win movie and the score screen.
-//
-// This is where a campaign chains: Do_Win reads [Basic] NextScenario / AltNextScenario through
-// Map_Select_Advance and then loops on Start_Scenario itself, all without Main_Game's frame loop
-// exiting. So none of the StopReplaySystem hooks below ever ran between two missions - the second
-// mission simply reached Clear_Scenario, called StartReplayRecording, and CREATE_ALWAYS'd its
-// events over the first mission's file while the header still described the first mission's
-// spawn.ini. That file plays back as the first mission's map driven by the second mission's
-// events, which is nonsense from the first frame.
-//
-// Finishing the recording here instead stamps the frame count and the clean-shutdown flag at the
-// point the mission actually ended, so a player who alt-F4s at the score screen still keeps a
-// complete file, and latches recording off for everything that follows.
-//
-// Campaign only. In a skirmish or a multiplayer game Do_Win means the session is over and the
-// existing loop-exit hook already covers it, and gating this to campaigns keeps a defeat that
-// leaves the local player watching from cutting a multiplayer recording short. A loss or a restart
-// is deliberately not hooked: both re-enter the same scenario, and re-recording over it - what
-// happens today - leaves a file that describes the attempt the player actually finished with.
+// Do_Win, as a mission ends. A campaign starts its next mission from inside this function without
+// the game loop ever exiting, so the recording is closed out here and switched off for the rest of
+// the launch: a replay embeds the spawn.ini the client wrote for the mission it launched, and
+// nothing describes the ones after it. Campaign only - a skirmish or multiplayer game ends at the
+// loop-exit hook below, and a loss or restart re-enters the same scenario and may record again.
 DEFINE_HOOK(0x685670, DoWin_FinishReplayRecording, 0x5)
 {
 	if (SessionClass::IsCampaign())
@@ -375,39 +308,15 @@ DEFINE_HOOK(0x685670, DoWin_FinishReplayRecording, 0x5)
 	return 0;
 }
 
-// --- Ending a playback session at the end of the mission -----------------------------------------
-// A campaign mission ends by running Do_Win or Do_Lose, and both of them, once the session-level
-// bookkeeping is done - timers stopped, in-game movies ended, mouse released, audio faded, the
-// video mode already switched back to shell resolution - present the outcome and then start the
-// next scenario. The mission's own presentation begins at `mov eax, Scen`: loc_685915 in Do_Win,
-// loc_686060 in Do_Lose.
-//
-// Playback has to get off that path before the chain. The score screen's only way out is Continue,
-// which runs Start_Scenario for the next mission - a mission this session has no recorded events
-// for, and whose houses do not match the ones playback set up, so what it starts is neither a
-// replay nor a playable game. There is no Exit button to offer instead; the screen is built on the
-// assumption that a campaign always continues.
-//
-// The score screen itself is worth keeping - it is the mission's result, which is the thing being
-// watched - so playback keeps it and takes Continue as the way out. The victory and defeat movies
-// are not: they are minutes of full-screen video between the viewer and the end of the replay.
-//
-// Each exit jumps to its own function's existing "the game is over, do not chain" tail: the one
-// vanilla itself takes for a one-time-only mission (Do_Win) or a declined replay prompt (Do_Lose).
-// Both sit at the same stack depth as the hooked instruction and end in the function's own
-// epilogue, so this is the engine's own early-out rather than a new one. They clear GameActive,
-// which is what Aux_Loop returns (`return GameActive == 0`), so Main_Game's frame loop breaks, its
-// patched Select_Game call - Spawner::StartGame - returns false because Spawner::Active is set, and
-// the process exits back to the client. StopReplaySystem still runs on the way out, from the
-// loop-exit hook below, so the divergence summary is still logged.
-//
-// All three are gated on the spawn.ini key rather than on ReplayState.Playback: a session launched
-// to watch a replay must never chain into another scenario even if playback itself was stopped
-// early by a read error partway through the file.
+// --- Ending a playback session when the mission ends ---------------------------------------------
+// A replay must not follow a campaign into its next mission: the score screen's only way out is
+// Continue, which starts a scenario the replay has no events for. The score screen is the mission's
+// result and worth keeping, so playback shows it and treats Continue as the exit; the victory and
+// defeat movies are skipped. Each hook jumps to its own function's existing "game over, do not
+// chain" tail, which clears GameActive and so ends the game loop and the process. They are gated
+// on the spawn.ini key, so a replay stopped early by a read error still cannot chain.
 
-// Do_Win, loc_685915 - the argument setup for Play_Movie(Scen->WinMovie). Jumping past the call
-// lands on the keyboard clear that precedes the score screen, so the three pushes the movie call
-// would have consumed are skipped along with it and the stack stays balanced.
+// Skips the victory movie.
 DEFINE_HOOK(0x685915, DoWin_SkipWinMovieDuringPlayback, 0x5)
 {
 	enum { AfterWinMovie = 0x68593A };
@@ -415,69 +324,37 @@ DEFINE_HOOK(0x685915, DoWin_SkipWinMovieDuringPlayback, 0x5)
 	return ReplaySystem::IsPlaybackRequested() ? AfterWinMovie : 0;
 }
 
-// Do_Win, loc_685965 - where the two score-screen branches meet again: the one that presented it,
-// and the one a map with [Basic] SkipScore takes past it. Hooking the merge point means playback
-// quits whether or not the mission wanted a score screen at all. Everything after it is the
-// post-score and pre-map-select movies, end-of-campaign handling, map selection, and the
-// Start_Scenario chain.
+// Where the branches that showed and skipped the score screen meet again, so playback leaves either
+// way. Everything past it is movies, map selection and the next mission.
 DEFINE_HOOK(0x685965, DoWin_EndGameAfterScoreScreen, 0x6)
 {
-	// Do_Win's own IsOneTimeOnly / failed-validation exit: clears GameActive, shows the mouse.
 	enum { EndGameWithoutContinuing = 0x685B2D };
 
 	return ReplaySystem::IsPlaybackRequested() ? EndGameWithoutContinuing : 0;
 }
 
-// Do_Lose, loc_686060 - the argument setup for Play_Movie(Scen->LoseMovie). A campaign defeat has
-// no score screen to keep: what follows the movie is the "replay this mission?" prompt and then
-// Start_Scenario for the same mission again, so playback leaves here directly.
+// Do_Lose. A campaign defeat has no score screen - what follows the movie is the "replay this
+// mission?" prompt and a restart - so playback leaves at the movie.
 DEFINE_HOOK(0x686060, DoLose_EndGameAfterPlayback, 0x5)
 {
-	// Do_Lose's own "player declined to replay the mission" exit: clears GameActive.
 	enum { EndGameWithoutRestarting = 0x6863C3 };
 
 	return ReplaySystem::IsPlaybackRequested() ? EndGameWithoutRestarting : 0;
 }
 
-// Main_Game's frame loop is the `call Main_Loop` at 0x48CE8A, and it exits here - the one point
-// every way of ending a match converges on, whether the player won, lost or aborted, and before
-// the score screen and stats dump that follow. Nothing else covers a true skirmish: its only other
-// finaliser is Aux_Loop's abort branch, so a skirmish that ended in victory or defeat never
-// stamped its frame count and left every replay reading as zero frames long.
-//
-// Main_Loop itself runs a single frame and returns, so the spawner's own hook on that call site
-// (Spawner.Hook.cpp, SomeFunc_InterceptMainLoop) fires once per frame and is not a loop exit.
-// 0x48CEAF - `mov ecx, offset Session` - is used instead of the loop-exit instruction at 0x48CEAA
-// because that one is a relative call, which cannot be relocated into a hook's saved bytes.
+// Main_Game, where the frame loop exits - the one point every ending converges on, and the only one
+// a skirmish reaches at all. Hooked next to the loop's own call rather than on it, since a relative
+// call cannot be relocated into a hook's saved bytes.
 DEFINE_HOOK(0x48CEAF, MainGame_GameLoopFinished_FlushReplayBuffers, 0x5)
 {
 	StopReplaySystem();
 	return 0;
 }
 
-// TechnoClass::Create_Gap (thiscall, no stack args - hooked at the true entry, before any
-// prologue runs, so 0x6FB460 - this function's own bare `retn` - is reachable directly).
-// Whenever an enemy gap generator/jammer comes online, this walks every cell in its jam radius and,
-// for each cell not allied with PlayerPtr, bumps that cell's ShroudCounter and GapsCoveringCell -
-// directly re-shrouding patches of the map around itself from PlayerPtr's point of view. That is
-// per-cell state, not the house-wide Visionary flag MaintainFullMapReveal watches, so an enemy gap
-// generator re-fogs the ground around itself during full-map-reveal playback regardless of the
-// Reset_Shroud fix above, and keeps doing it every time the generator's power flips back on (its
-// own GeneratingGap latch only blocks re-entry while power stays up) - matching what was reported:
-// fine until the first gap generator goes up, and recurring from then on as power fluctuates.
-// Skip the function outright for the local player during full-map-reveal playback, so nothing can
-// re-shroud PlayerPtr's view in the first place.
-//
-// This also skips the bookkeeping Create_Gap does for the player's own or an allied gap generator
-// (the field_13C_gapgen coverage counter used by radar's jam-radius check, plus the unconditional
-// RadarClass_Update_Map_/Flag_To_Redraw at the end) - not just the enemy-shroud effect this hook
-// exists to suppress. Accepted deliberately: in full-map-reveal playback that bookkeeping only
-// feeds a jam-radius indicator nobody is looking at with the whole map already shown, redraw state
-// still catches up on the next unrelated frame, and a per-cell hook that preserves it would need
-// to duplicate this function's own ally checks from a raw, pre-prologue entry point - meaningfully
-// more risk for a cosmetic gap. Revisit with a hook inside the loop (skip only the write block
-// gated on "not allied with PlayerPtr", landing on its own existing skip target loc_6FB3C1) if that
-// indicator turns out to matter.
+// TechnoClass::Create_Gap. A gap generator re-shrouds cells directly rather than through the flag
+// MaintainFullMapReveal watches, so it keeps re-fogging the map during full-map-reveal playback -
+// skip it for that mode. The cost is the radar's jam-radius bookkeeping, which nothing is looking
+// at with the whole map already shown.
 DEFINE_HOOK(0x6FB170, TechnoClass_CreateGap_SkipDuringFullRevealPlayback, 0x5)
 {
 	if (ReplayState.Playback && PlaybackWantsFullMapReveal())
@@ -497,28 +374,10 @@ DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 	return 0;
 }
 
-// Force-complete the load-progress bar for playback, skirmish and campaign, instead of letting it
-// animate. This is SessionClass::Callback's true entry point, but the function is also the generic
-// progress-tick/pump callback threaded through the entire scenario-load pipeline (Read_Scenario_INI,
-// Init_Theaters, MapGeneratorClass_*, Wait_For_Players, and more - confirmed via its xrefs), not
-// just the multiplayer wait screen. A single call here just nudges progress toward a target and
-// gets re-invoked repeatedly as loading proceeds, which - for any session without a real network
-// peer pacing it - means the bar genuinely animates 0->100 over many real loading-screen frames.
-//
-// REVERTED to playback-only (2026-08-22): this was briefly widened to SessionClass::IsSingleplayer()
-// (skirmish/campaign) on the theory that Sync_Delay (0x55E160) - called every loading-screen frame -
-// routes GAME_SKIRMISH sessions through a real Sleep(FrameTimer.DelayTime) frame-rate cap, and that
-// the animation was costing wall-clock time paying for it. That measured a real speedup (~3.3s ->
-// ~1.1s on a live skirmish load), but the mechanism was wrong: Scenario_Load_Wait (0x684370), the
-// actual driver of that Sync_Delay-paced loop, returns immediately for GAME_CAMPAIGN/GAME_SKIRMISH
-// and never runs it. What this hook actually did instead: forcing PlayerProgresses[] directly means
-// ProgressScreenClass_callback_643C50 never again sees current < target on a later call, so it never
-// reaches its own redraw trigger (SendMessageA(hWnd, WM_PAINT, ...) or the fullscreen draw path
-// ProgressScreenClass_LoadTextColor2) - the loading screen stops repainting entirely (reported as a
-// black screen), and the speedup is a side effect of skipping those draws rather than an animation.
-// The general loading slowdown is fixed in Misc/LoadingScreen.cpp by replacing the legacy fixed
-// blit delay with an actual completion check. This direct completion remains playback-only because
-// that path already accepts skipping the live progress animation.
+// SessionClass::Callback, the progress callback used throughout scenario loading. With no network
+// peer to pace it the bar genuinely animates 0->100 over the whole load, so playback forces it
+// complete. Playback only - forcing it stops the loading screen repainting, which a normal load
+// needs.
 DEFINE_HOOK(0x69AE90, WaitForPlayers_SkipProgressAnimation, 0x5)
 {
 	if (ReplayState.Playback && !ReplayState.ProgressBarForcedComplete)
@@ -533,19 +392,9 @@ DEFINE_HOOK(0x69AE90, WaitForPlayers_SkipProgressAnimation, 0x5)
 	return 0;
 }
 
-// SessionClass::Callback, at `cmp dword ptr [this+284Ch], 1` (loc_69AF0F) - the check the function
-// itself uses to decide whether to run its per-player network-sync dance at all. offset 0x284C is
-// SessionClass::Instance.StartSpots.Count (DynamicVectorClass<NodeNameType*>: vtable +0, Items +4,
-// Capacity +8, IsAllocated +0xC, Count +0x10 -> 0x283C + 0x10 = 0x284C; StartSpots sits at 0x283C
-// per YRpp/SessionClass.h, confirmed by the next field, unknown_2854, landing exactly one vector
-// later). When Count == 1 it jumps straight to 0x69B14E and skips the whole dance; otherwise, once
-// player 0's progress crosses 99.95%, it broadcasts a "guaranteed progress" message to every other
-// player over IPX/NullModem and busy-waits (Sleep(20) in a loop) up to 240 SystemTimerClass ticks -
-// about 4 seconds - for the send queue to drain below 5. Playback has no real peer to drain that
-// queue, and the broadcast loop only sends anything when Players.ActiveCount > 1, so a multi-player
-// replay's session takes the "do the dance" path and burns the full ~4 seconds - the load-in stall
-// right after the progress bar reaches 100%. Forcing the skip-to-0x69B14E branch the game already
-// takes for StartSpots.Count == 1 sessions removes exactly that stall.
+// The same function's end-of-load handshake, which broadcasts to the other players and then waits
+// about four seconds for a send queue playback will never drain - the stall right after the
+// progress bar fills. Take the branch the engine already uses for single-player sessions.
 DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 {
 	if (ReplayState.Playback)
@@ -555,19 +404,12 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 }
 
 // --- In-game options dialog, game speed ------------------------------------------------------
-// Options.GameSpeed (0xA8EB60) is read by simulation code - AnimClass, BuildingClass::Animation_AI,
-// InfantryClass::Do_Action and HouseClass::AI all scale off it through GameOptionsClass::GetAnimSpeed
-// - so playback pins it to the speed the game was recorded at and must keep it there. The ESC ->
-// Options dialog binds its speed slider to that same variable, which is why, before these hooks, the
-// slider always showed the recorded speed and picking that speed did nothing at all.
-//
-// These three hooks give the dialog a view of ReplayState.PlaybackSpeedIndex instead, without ever
-// letting it write to the pinned value. Each hooks exactly one instruction that loads or stores
-// Options.GameSpeed, and returns past it.
+// The simulation scales off the game speed option, so playback pins it to the speed the game was
+// recorded at. The ESC options dialog binds its slider to that same option, which left the slider
+// showing the recorded speed and doing nothing. These three give the dialog the viewer's playback
+// speed instead, without ever letting it write to the pinned value.
 
-// GameControlsClass::someDialog, WM_INITDIALOG. `mov edx, Options.GameSpeed`, which becomes the
-// slider position as `6 - GameSpeed`. Feed it the playback speed so the slider opens where the
-// replay is actually running.
+// Opens the slider at the speed playback is running.
 DEFINE_HOOK(0x4E209E, GameControlsDialog_ShowPlaybackSpeed, 0x6)
 {
 	if (ReplayState.Playback && ReplayState.PlaybackFPS > 0)
@@ -579,9 +421,8 @@ DEFINE_HOOK(0x4E209E, GameControlsDialog_ShowPlaybackSpeed, 0x6)
 	return 0;
 }
 
-// GameControls_4E1DE0, the dialog's apply handler. `mov eax, Options.GameSpeed`, compared against
-// the slider's new value; when they match the handler returns without doing anything. Comparing
-// against the recorded speed is what made "set playback back to the recorded speed" a no-op.
+// The apply handler does nothing when the slider matches the current speed; compare against the
+// playback speed, or picking the recorded speed back would be a no-op.
 DEFINE_HOOK(0x4E1E1B, GameControlsApply_ComparePlaybackSpeed, 0x5)
 {
 	if (ReplayState.Playback && ReplayState.PlaybackFPS > 0)
@@ -593,9 +434,8 @@ DEFINE_HOOK(0x4E1E1B, GameControlsApply_ComparePlaybackSpeed, 0x5)
 	return 0;
 }
 
-// Same handler, the branch it takes when there is no session to broadcast a GameSpeed event to -
-// campaign and skirmish, so any replay of a skirmish game. `mov Options.GameSpeed, ecx` applies the
-// new speed directly. Take the value for playback and skip the store, so the pinned value survives.
+// The branch campaign and skirmish take, which applies the new speed directly. Take the value for
+// playback and skip the write, so the pinned value survives.
 DEFINE_HOOK(0x4E1EBA, GameControlsApply_ApplyPlaybackSpeedDirectly, 0x6)
 {
 	if (ReplayState.Playback)
@@ -607,13 +447,9 @@ DEFINE_HOOK(0x4E1EBA, GameControlsApply_ApplyPlaybackSpeedDirectly, 0x6)
 	return 0;
 }
 
-// --- Viewer controls: pause and playback speed ---------------------------------------------------
-// Init_Commands, at the first command it creates. Registering them here is all the binding side
-// needs: the commands turn up in the in-game keyboard options under "Replay" and are bound from
-// there, or by hand in KEYBOARDMD.INI's [Hotkey] section by command name. They ship with no key of
-// their own - every plausible default is already spoken for by vanilla, and taking one of those
-// away would reach normal games too, since Init_Commands runs once per process rather than per
-// session. Phobos and Ares hook this same address; all three run, because none returns an address.
+// Init_Commands. Registers the viewer's commands so they appear in the in-game keyboard options and
+// can be bound there or in KEYBOARDMD.INI. They ship unbound: every plausible default is already
+// taken, and this runs once per process, so a stolen key would reach normal games too.
 DEFINE_HOOK(0x533066, Init_Commands_RegisterReplayCommands, 0x6)
 {
 	ReplaySystem::Controls::RegisterReplayCommands();
@@ -621,27 +457,13 @@ DEFINE_HOOK(0x533066, Init_Commands_RegisterReplayCommands, 0x6)
 }
 
 // --- Pause -------------------------------------------------------------------------------------
-// Pausing playback means holding the simulation while the rest of Main_Loop carries on, so that the
-// viewer can still scroll the map, drag-select, open the options dialog and press the unpause key.
-// That rules out the engine's own pause (Scen->someloopcount_62C, honoured at 0x55D821): it is
-// campaign/skirmish-only, locks user input and never reaches Keyboard_Process, so nothing could
-// unpause it. It also rules out standing in for the whole function the way Phobos's frame-step
-// mode does at 0x55D360, which loses the dialog and scroll handling with it.
-//
-// Instead three hooks cut exactly the three things that advance the game out of an otherwise normal
-// iteration - LogicClass::AI, Queue_AI and the frame counter. Everything before them (input,
-// keyboard commands, rendering, arrow-key and edge scrolling, the message list) still runs, and
-// Sync_Delay at the end still paces the loop, so a paused replay does not spin the CPU.
-//
-// The three have to move together. Queue_AI is what pumps the recorded events for the current
-// frame, so leaving it in would replay the same frame's events once per paused iteration; and
-// leaving the frame counter in would walk Frame past the record RestoreFrameState is holding,
-// which it reports as a frame mismatch and stops playback over.
+// Pausing playback holds the simulation while the rest of Main_Loop carries on, so the viewer can
+// still scroll, select and reach the menus - the engine's own pause locks input and could never be
+// undone. The three hooks below cut the only things that advance the game, and have to move
+// together: leaving the event pump in would replay the frame's events once per paused iteration,
+// and leaving the frame counter in would run it past the record playback is holding.
 
-// `mov ecx, offset Logic`, the argument setup for the `call LogicClass::AI` at 0x55DC9E. Hooked
-// here rather than on the call itself, which is relative and so cannot be safely re-executed from
-// a trampoline on the not-paused path. Two branches jump to 0x55DC99 (0x55DBD3, 0x55DBE0, both
-// skipping the campaign autosave) but both land on the first byte, which is where the hook is.
+// Holds the logic tick.
 DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
 {
 	enum { SkipLogicAI = 0x55DCA3 };
@@ -649,9 +471,7 @@ DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
 	return ReplaySystem::Controls::IsPlaybackPaused() ? SkipLogicAI : 0;
 }
 
-// `mov ProcessingFrames, ecx`, the last instruction before `call Queue_AI` at 0x55DE40. Skipping
-// the store as well only costs the frame-time statistics a sample, which is right anyway - no frame
-// was processed.
+// Holds the event pump, and with it the recorded events for the frame.
 DEFINE_HOOK(0x55DE3A, MainLoop_ReplayPause_SkipQueueAI, 0x6)
 {
 	enum { SkipQueueAI = 0x55DE45 };
@@ -659,11 +479,7 @@ DEFINE_HOOK(0x55DE3A, MainLoop_ReplayPause_SkipQueueAI, 0x6)
 	return ReplaySystem::Controls::IsPlaybackPaused() ? SkipQueueAI : 0;
 }
 
-// `mov edx, Frame`, the load feeding the `inc edx; mov Frame, edx` at 0x55DE7E. Returning past it
-// to Sync_Delay holds the frame counter and skips the Session::Frame_Plus_3 input-unlock check with
-// it, which playback never sets.
-//
-// This is also where a paused iteration gets its viewport committed and drawn.
+// Holds the frame counter, and is where a paused iteration gets its viewport committed and drawn.
 DEFINE_HOOK(0x55DE73, MainLoop_ReplayPause_SkipFrameAdvance, 0x6)
 {
 	enum { SyncDelay = 0x55DE9A };
@@ -702,9 +518,8 @@ bool ResolveFlaggedBeaconSlot(int& house, int& slot)
 
 } // namespace
 
-// BeaconManagerClass::Place. __thiscall(ECX=this); stack (relative to ESP at entry, before the
-// prologue's `sub esp` runs): +0 retaddr, +4 house, +8 coord.X, +0xC coord.Y, +0x10 coord.Z,
-// +0x14 houseBeaconId (-1 = auto-assign a free slot).
+// BeaconManagerClass::Place. Arguments come off the stack: house, coordinate, and the beacon slot,
+// where -1 asks the engine to pick a free one.
 DEFINE_HOOK(0x430BA0, BeaconManagerClass_Place_RecordPlacement, 0x6)
 {
 	if (ReplayState.Recording)
@@ -722,7 +537,7 @@ DEFINE_HOOK(0x430BA0, BeaconManagerClass_Place_RecordPlacement, 0x6)
 	return 0;
 }
 
-// Beacon delete. Stack: +4 house, +8 slot; -1/-1 means the active local beacon.
+// Beacon delete, with house and slot on the stack; -1/-1 means the local player's own beacon.
 DEFINE_HOOK(0x4311C0, BeaconPlacement_Delete_RecordDeletion, 0x6)
 {
 	if (ReplayState.Recording)
@@ -742,7 +557,6 @@ DEFINE_HOOK(0x4311C0, BeaconPlacement_Delete_RecordDeletion, 0x6)
 }
 
 // Beacon text. Skip local compose previews; record final and remote-applied text.
-// Stack: +4 text, +8 house, +0xC slot, +0x10 broadcast.
 DEFINE_HOOK(0x431450, BeaconPlacement_Message_RecordText, 0x6)
 {
 	if (ReplayState.Recording)
@@ -764,7 +578,7 @@ DEFINE_HOOK(0x431450, BeaconPlacement_Message_RecordText, 0x6)
 	return 0;
 }
 
-// Taunts_752B70. __fastcall(ECX=command).
+// Taunt playback, which happens outside the event system.
 DEFINE_HOOK(0x752B70, Taunts_RecordPlayback, 0x5)
 {
 	if (ReplayState.Recording)

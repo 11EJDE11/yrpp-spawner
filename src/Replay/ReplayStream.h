@@ -32,10 +32,9 @@
 namespace Replay
 {
 
-// Recording. A single deflate stream, punctuated by sync flushes: everything written before a
-// sync flush is decodable on its own, so a game that crashes mid-recording loses only what was
-// recorded since the last one. Independent blocks would cost a whole block instead, and compress
-// worse for the same exposure, because each block restarts the dictionary.
+// Recording. A single deflate stream punctuated by sync flushes, so a crash mid-recording loses
+// only what was recorded since the last one. Independent blocks would cost more and compress worse
+// for the same exposure, since each one restarts the dictionary.
 class DeflateWriter
 {
 public:

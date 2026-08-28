@@ -113,11 +113,9 @@ public:
 	bool ReplayShroudEnabled;
 	bool ReplayLockedViewport;
 	bool ReplaySelectUnits;
-	// How fast to watch a replay, in frames per second - a rung of SPEED_LADDER in
-	// ReplayControls.h, which the client mirrors. Zero or less watches it at the speed it was
-	// recorded at. Deliberately a rate and not a GameSpeed index: GameSpeed says how fast the
-	// recorded game ran and playback has to reproduce it exactly, this only says how fast the
-	// viewer watches.
+	// How fast to watch a replay, in frames per second - a rung of SPEED_LADDER in ReplayControls.h,
+	// which the client mirrors. Zero or less watches it at the speed it was recorded at. A rate rather
+	// than a GameSpeed index, which is how fast the recorded game ran and has to be reproduced exactly.
 	int  ReplayPlaybackSpeed;
 	// Watch as an observer: reveals the whole map and makes cloaked/disguised units and radar blips
 	// visible. Off by default, so playback stays from the recorded player's point of view.
@@ -125,9 +123,8 @@ public:
 	// Playback-only: whether recorded chat, beacons and taunts get reproduced. Recording them is
 	// unconditional - there is no record-side option.
 	bool ReplayShowChatAndBeacons;
-	// Which spawn.ini player slot playback is watched from: 0 = [Settings] (the player who made the
-	// recording), N = [OtherN]. -1 means the recorded player, which is the same slot as 0 and is the
-	// default. Only human slots are accepted; anything else falls back to the recorded player.
+	// Which spawn.ini player slot playback is watched from: 0 or -1 is the recording player, N is
+	// [OtherN]. Only human slots are accepted; anything else falls back to the recording player.
 	int  ReplayViewPlayer;
 
 	// Scenario Options
