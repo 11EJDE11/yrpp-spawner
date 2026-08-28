@@ -17,6 +17,7 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <Replay/ReplaySystem.h>
 #include <Spawner/Spawner.h>
 #include <Utilities/Macro.h>
 #include <HouseClass.h>
@@ -144,12 +145,11 @@ DEFINE_HOOK(0x642BC3, ProgressScreenClass__GetPlayerColorSchemes, 0x5)
 		: NotAllowObserver;
 }
 
-// Enable observer sidebar in skirmish
 DEFINE_HOOK(0x6A557A, SidebarClass__InitIO, 0x5)
 {
 	enum { AllowObserver = 0x6A558D, NotAllowObserver = 0x6A5830 };
 
-	return !SessionClass::IsCampaign()
+	return !SessionClass::IsCampaign() || ReplaySystem::IsSpectatorPlayback()
 		? AllowObserver
 		: NotAllowObserver;
 }
@@ -162,7 +162,9 @@ bool inline ShowHouseOnObserverSidebar(HouseClass* pHouse)
 	if (pHouse->Type->MultiplayPassive)
 		return false;
 
-	const bool bShowAI = (Spawner::Enabled && Spawner::GetConfig()->Observer_ShowAIOnSidebar);
+	const bool bShowAI = (Spawner::Enabled && Spawner::GetConfig()->Observer_ShowAIOnSidebar)
+		|| (SessionClass::IsCampaign() && ReplaySystem::IsSpectatorPlayback());
+
 	if (!bShowAI && !pHouse->IsHumanPlayer)
 		return false;
 

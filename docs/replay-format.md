@@ -372,7 +372,7 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayShroudEnabled` | `false` | Keep the recording player's shroud instead of revealing the map. |
 | `ReplayLockedViewport` | `true` | Pin the camera to the recorded position. |
 | `ReplaySelectUnits` | `true` | Reproduce the recorded unit selection. |
-| `ReplaySpectator` | `false` | Watch as an observer. Suppressed when `IsCampaign`. |
+| `ReplaySpectator` | `false` | Watch from an observer's seat rather than a player's. See below. |
 | `ReplayShowChatAndBeacons` | `true` | Playback only; recording of this data is unconditional. |
 | `ReplayPlaybackSpeed` | `-1` | Game speed index to pace playback at. `-1` falls back to `GameSpeed`. Does not affect the simulation, which stays pinned to `RecordedGameSpeed`. |
 | `ReplayViewPlayer` | `-1` | Which player's screen to watch the recording from. See below. |
@@ -501,6 +501,43 @@ at all.
 Everything ahead of those three still runs — input, keyboard commands, rendering, arrow-key and edge
 scrolling, the message list — and `Sync_Delay` still paces the loop, so a paused replay does not spin
 the CPU.
+
+## Watching as a spectator
+
+`ReplaySpectator` hands the local screen to the engine's own observer - the same
+`HouseClass::Observer` a spectator in a live match gets - so the whole presentation follows without
+a hook per symptom: the observer sidebar with every player's score, the full map, cloaked and
+disguised units visible, pips on everything, and no "you have been defeated" message. All of it is
+presentation. The recording player's house is left exactly as the recording has it, so the
+simulation is unchanged and the frame hashes still match.
+
+Two things about the timing, both in `ReplaySystem::ApplyPlaybackSpectator`:
+
+- It runs **after** the scenario has loaded. The observer sidebar's player list is built during the
+  load and leaves out whichever house is the observer, so setting this earlier would drop the
+  player being watched out of their own scoreboard.
+- `Game::ObserverMode`, which the loading screen reads, is set **before** the scenario starts, next
+  to where a real observer's slot sets it.
+
+It is applied from `Spawner::StartGame` rather than from inside `Spawner::StartScenario`, which is
+what it took to make it work for a skirmish replay: `StartScenario` returns from a different branch
+for each session type, and the spectator setup used to sit in the multiplayer one. It has to happen
+after house assignment either way, since that clears the observer itself.
+
+EVA is silenced while spectating (the `Speak` hook). Those lines - "construction complete", "our
+base is under attack" - are addressed to the player who recorded the game, and were the loudest
+remaining sign that playback was still sitting in that player's seat.
+
+A campaign replay can be spectated too. `Misc/Observers.cpp` otherwise refuses the observer sidebar
+outright for a campaign - a mission has no observers - so that one hook now makes an exception for a
+replay being watched from an observer's seat, and the scoreboard lists the mission's AI houses,
+which are all it has to list. The rest of the campaign-gated observer hooks are loading-screen
+cosmetics and are left alone.
+
+The shroud setting has nothing to act on while spectating: an observer sees the whole map by
+definition, and `PlaybackWantsFullMapReveal` reveals it whether or not `ReplayShroudEnabled` is set.
+The client greys the shroud box and the "Watch as" drop-down out when Spectator view is ticked, and
+launches with no perspective, rather than leaving controls that do nothing.
 
 ## Watching from another player
 

@@ -89,6 +89,9 @@ bool Spawner::StartGame()
 
 	bool result = StartScenario(pScenarioName);
 
+	if (result)
+		ReplaySystem::ApplyPlaybackSpectator();
+
 	if (Main::GetConfig()->DumpTypes)
 		DumperTypes::Dump();
 
@@ -310,6 +313,9 @@ bool Spawner::StartScenario(const char* pScenarioName)
 			pSession->GameMode = GameMode::Skirmish;
 	}
 
+	if (ReplaySystem::IsSpectatorPlayback())
+		Game::ObserverMode = true;
+
 	Game::InitRandom();
 
 	// StartScenario
@@ -376,13 +382,6 @@ bool Spawner::StartScenario(const char* pScenarioName)
 			Game::ChatMask[5] = false;
 			Game::ChatMask[6] = false;
 			Game::ChatMask[7] = false;
-		}
-
-		if (isReplayPlayback && Spawner::Config->ReplaySpectator
-			&& !Spawner::Config->IsCampaign && HouseClass::CurrentPlayer)
-		{
-			Game::ObserverMode = true;
-			HouseClass::CurrentPlayer->MakeObserver();
 		}
 
 		return true;

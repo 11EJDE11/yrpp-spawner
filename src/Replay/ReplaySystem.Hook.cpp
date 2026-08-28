@@ -39,7 +39,7 @@
 using namespace ReplaySystem::Internal;
 
 // FootClass::Active_Click_With creates an animation when the player clicks to move units. This doesn't
-// happen on playback as there's no click. So we need to skip it while recording/watching otherwise 
+// happen on playback as there's no click. So we need to skip it while recording/watching otherwise
 // playback would diverge from the recording. Should be safe as multiplayer does the same.
 DEFINE_HOOK(0x4D7EB5, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x5)
 {
@@ -573,6 +573,21 @@ DEFINE_HOOK(0x431450, BeaconPlacement_Message_RecordText, 0x6)
 
 		if (shouldRecord)
 			ReplaySystem::RecordBeaconText(house, slot, text);
+	}
+
+	return 0;
+}
+
+// Speak, the one entry point every EVA announcement goes through. Those lines belong to the player
+// who recorded the game - "construction complete", "our base is under attack" - and someone
+// watching from an observer's seat is not that player. Zeroing the EVA stream handle sends the
+// function down its own "nothing to speak on" route rather than skipping it by hand.
+DEFINE_HOOK(0x752480, Speak_SilenceDuringSpectatorPlayback, 0x5)
+{
+	if (ReplaySystem::IsSpectatorPlayback())
+	{
+		R->EAX(0);
+		return 0x752485;
 	}
 
 	return 0;

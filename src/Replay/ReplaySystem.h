@@ -25,9 +25,11 @@ namespace ReplaySystem
 {
 	bool IsPlaybackRequested();
 	bool IsPlaybackActive();
+	bool IsSpectatorPlayback();
 	void OnGameStartReset();
 	int GetViewPlayerIndex();
 	void ApplyPlaybackViewPlayer();
+	void ApplyPlaybackSpectator();
 
 	// Recording taps for side-channel replay data. Safe to call when not recording.
 	void RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex);

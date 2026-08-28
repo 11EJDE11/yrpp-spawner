@@ -34,6 +34,7 @@
 #include <HouseClass.h>
 #include <MapClass.h>
 #include <MessageListClass.h>
+#include <MouseClass.h>
 #include <RulesClass.h>
 #include <SessionClass.h>
 #include <TacticalClass.h>
@@ -2140,7 +2141,7 @@ void StartReplayPlayback(const char* replayPath)
 	ReplayState.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
 	ReplayState.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
 	ReplayState.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
-	ReplayState.SpectatorView = pConfig ? pConfig->ReplaySpectator : false;
+	ReplayState.SpectatorView = ReplaySystem::IsSpectatorPlayback();
 	ReplayState.ShowChatAndBeacons = pConfig ? pConfig->ReplayShowChatAndBeacons : true;
 
 	// Both of these reproduce the recording player's own screen, and neither means anything once the
@@ -2263,6 +2264,29 @@ int ReplaySystem::GetViewPlayerIndex()
 void ReplaySystem::ApplyPlaybackViewPlayer()
 {
 	ApplyViewPlayerToCurrentPlayer();
+}
+
+bool ReplaySystem::IsSpectatorPlayback()
+{
+	const auto* pConfig = GetConfig();
+
+	return pConfig && IsPlaybackRequested() && pConfig->ReplaySpectator;
+}
+
+void ReplaySystem::ApplyPlaybackSpectator()
+{
+	if (!IsSpectatorPlayback())
+		return;
+
+	HouseClass* const pPlayer = HouseClass::CurrentPlayer;
+	if (!pPlayer)
+		return;
+
+	Game::ObserverMode = true;
+	if (pPlayer->MakeObserver())
+		TabClass::Instance.ThumbActive = false;
+
+	Debug::Log("[Replay] Watching the replay from an observer seat.\n");
 }
 
 void ReplaySystem::OnGameStartReset()
