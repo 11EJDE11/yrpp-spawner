@@ -2070,8 +2070,40 @@ void PlaybackFrameEvents()
 	}
 }
 
+// Closes out the recording of a mission that has just ended, and stops the game from recording any
+// scenario that follows it. Called from the Do_Win hook, which is where a campaign both finishes a
+// mission and starts the next one.
+//
+// One replay file per launch is the whole of what the format can carry: the file embeds the
+// spawn.ini and spawnmap.ini the client wrote before the game started, and those describe the first
+// mission only - the game reads [Basic] NextScenario out of the mission's own map and loads it from
+// the mixes, without the client or spawn.ini ever hearing about it. Recording the next mission into
+// the same file would leave its events sitting behind the previous mission's scenario, which is
+// exactly what playback then reproduces: the wrong map, and events that mean nothing on it.
+void FinishRecordingAtMissionEnd()
+{
+	if (!ReplayState.Recording)
+		return;
+
+	Debug::Log("[Replay] Mission over at frame %d; finishing the recording in %s. Later missions in "
+		"this campaign are not recorded.\n", ReplayState.LastWrittenFrameNumber, GetRecordingOutputPath());
+
+	StopReplaySystem();
+	ReplayState.RecordingFinishedForSession = true;
+}
+
 void StartReplayRecording()
 {
+	// A campaign mission that has already been recorded owns the output file for the rest of the
+	// launch; see FinishRecordingAtMissionEnd.
+	if (ReplayState.RecordingFinishedForSession)
+	{
+		Debug::Log("[Replay] Not recording this scenario: %s already holds this campaign's first "
+			"mission.\n", GetRecordingOutputPath());
+		StopReplaySystem();
+		return;
+	}
+
 	AbortReplaySystem();
 	ReplayState.Recording = true;
 
@@ -2279,5 +2311,6 @@ void ReplaySystem::OnGameStartReset()
 {
 	StopReplaySystem();
 	ReplayState.InitRandomHandled = false;
+	ReplayState.RecordingFinishedForSession = false;
 	ReplayState.PlaybackPath[0] = '\0';
 }

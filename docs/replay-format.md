@@ -159,6 +159,63 @@ all present verbatim, so a reader can reconstruct the full lobby state from this
 Sanitization runs *before* `SpawnIniSize` is computed, so the size always describes what was
 actually written.
 
+## Campaigns: one mission per recording
+
+**A campaign recording covers the mission that was launched, and nothing after it.** Finish a
+mission and the game moves straight on to the next one; that next mission is not recorded, and the
+replay already on disk is the one that was just played.
+
+The chain is the reason. `Do_Win` (0x685670) reads `[Basic] NextScenario` / `AltNextScenario` out of
+the mission's own map, hands it to `Map_Select_Advance`, and calls `Start_Scenario` itself - all
+without `Main_Game`'s frame loop exiting, and without the client or spawn.ini ever hearing about it.
+A replay file, though, is built around the `spawn.ini` and `spawnmap.ini` the client wrote *before
+the game started*, and those describe the launched mission only: its scenario name, its map, its
+player. Recording the second mission would either need a second file the client knows nothing about,
+or would leave the second mission's events sitting behind the first mission's scenario - which is
+what used to happen, and plays back as the first mission's map driven by events that mean nothing on
+it.
+
+So `FinishRecordingAtMissionEnd` closes the recording out from the `Do_Win` hook - stamping
+`TotalFrames` and `CleanShutdown` at the moment the mission ended, so quitting at the score screen
+still leaves a complete file - and latches recording off for the rest of the launch
+(`RecordingFinishedForSession`). `ReplaySystem::OnGameStartReset`, which runs once per game started
+out of `Select_Game`, clears the latch.
+
+Losing or restarting a mission is not the same case and is not hooked: both re-enter the *same*
+scenario, whose spawn.ini is still the right one, so the retry records over the previous attempt and
+the file describes the attempt the player actually finished with.
+
+### Playback ends when the mission does
+
+The same chain is why **watching** a campaign replay ends the game when the mission does. The score
+screen still shows, and `Continue` is the way out of the replay - but `Continue` normally means
+`Start_Scenario` for the next mission, a mission the replay has no events for and whose houses do
+not match the ones playback set up. There is no Exit button to offer instead: the screen assumes a
+campaign always continues. The victory and defeat movies are skipped; the score screen is the
+mission's result and worth watching, minutes of full-screen video are not.
+
+Three hooks handle it, all gated on `ReplayFile` being set:
+
+| Hook | Site | Effect |
+|---|---|---|
+| `DoWin_SkipWinMovieDuringPlayback` | `loc_685915` | jumps to `0x68593A`, past `Play_Movie(WinMovie)` |
+| `DoWin_EndGameAfterScoreScreen` | `loc_685965` | jumps to `0x685B2D` once the score screen is done |
+| `DoLose_EndGameAfterPlayback` | `loc_686060` | jumps to `0x6863C3`, past the defeat movie and the replay prompt |
+
+`loc_685965` is where the two score-screen branches meet - the one that presented it and the one a
+map with `[Basic] SkipScore` takes past it - so playback leaves whether or not the mission wanted a
+score screen. A campaign defeat has no score screen at all, which is why `Do_Lose` leaves at the
+movie.
+
+The two exit addresses are the functions' own tails, the ones vanilla takes for a one-time-only
+mission and for a declined replay prompt. Both clear `GameActive`, which is what `Aux_Loop` returns,
+so `Main_Game`'s loop breaks, `Spawner::StartGame` returns false on the next `Select_Game` call, and
+the process exits back to the client. `StopReplaySystem` still runs on the way out, so the
+divergence summary is still logged.
+
+The gate is the `ReplayFile` key rather than `ReplayState.Playback`: a session launched to watch a
+replay must not chain into another scenario even if playback itself stopped early on a read error.
+
 ## Frame records
 
 `FrameRecordHeader` (12 bytes):

@@ -346,6 +346,99 @@ DEFINE_HOOK(0x6BEC60, Game_Exit_FlushReplayBuffers, 0x5)
 	return 0;
 }
 
+// Do_Win, at its entry (`mov eax, Session` - an absolute load, so it relocates into the hook's
+// saved bytes safely, and nothing jumps to the instruction after it). Aux_Loop calls this the
+// moment a mission is won, ahead of the win movie and the score screen.
+//
+// This is where a campaign chains: Do_Win reads [Basic] NextScenario / AltNextScenario through
+// Map_Select_Advance and then loops on Start_Scenario itself, all without Main_Game's frame loop
+// exiting. So none of the StopReplaySystem hooks below ever ran between two missions - the second
+// mission simply reached Clear_Scenario, called StartReplayRecording, and CREATE_ALWAYS'd its
+// events over the first mission's file while the header still described the first mission's
+// spawn.ini. That file plays back as the first mission's map driven by the second mission's
+// events, which is nonsense from the first frame.
+//
+// Finishing the recording here instead stamps the frame count and the clean-shutdown flag at the
+// point the mission actually ended, so a player who alt-F4s at the score screen still keeps a
+// complete file, and latches recording off for everything that follows.
+//
+// Campaign only. In a skirmish or a multiplayer game Do_Win means the session is over and the
+// existing loop-exit hook already covers it, and gating this to campaigns keeps a defeat that
+// leaves the local player watching from cutting a multiplayer recording short. A loss or a restart
+// is deliberately not hooked: both re-enter the same scenario, and re-recording over it - what
+// happens today - leaves a file that describes the attempt the player actually finished with.
+DEFINE_HOOK(0x685670, DoWin_FinishReplayRecording, 0x5)
+{
+	if (SessionClass::IsCampaign())
+		FinishRecordingAtMissionEnd();
+
+	return 0;
+}
+
+// --- Ending a playback session at the end of the mission -----------------------------------------
+// A campaign mission ends by running Do_Win or Do_Lose, and both of them, once the session-level
+// bookkeeping is done - timers stopped, in-game movies ended, mouse released, audio faded, the
+// video mode already switched back to shell resolution - present the outcome and then start the
+// next scenario. The mission's own presentation begins at `mov eax, Scen`: loc_685915 in Do_Win,
+// loc_686060 in Do_Lose.
+//
+// Playback has to get off that path before the chain. The score screen's only way out is Continue,
+// which runs Start_Scenario for the next mission - a mission this session has no recorded events
+// for, and whose houses do not match the ones playback set up, so what it starts is neither a
+// replay nor a playable game. There is no Exit button to offer instead; the screen is built on the
+// assumption that a campaign always continues.
+//
+// The score screen itself is worth keeping - it is the mission's result, which is the thing being
+// watched - so playback keeps it and takes Continue as the way out. The victory and defeat movies
+// are not: they are minutes of full-screen video between the viewer and the end of the replay.
+//
+// Each exit jumps to its own function's existing "the game is over, do not chain" tail: the one
+// vanilla itself takes for a one-time-only mission (Do_Win) or a declined replay prompt (Do_Lose).
+// Both sit at the same stack depth as the hooked instruction and end in the function's own
+// epilogue, so this is the engine's own early-out rather than a new one. They clear GameActive,
+// which is what Aux_Loop returns (`return GameActive == 0`), so Main_Game's frame loop breaks, its
+// patched Select_Game call - Spawner::StartGame - returns false because Spawner::Active is set, and
+// the process exits back to the client. StopReplaySystem still runs on the way out, from the
+// loop-exit hook below, so the divergence summary is still logged.
+//
+// All three are gated on the spawn.ini key rather than on ReplayState.Playback: a session launched
+// to watch a replay must never chain into another scenario even if playback itself was stopped
+// early by a read error partway through the file.
+
+// Do_Win, loc_685915 - the argument setup for Play_Movie(Scen->WinMovie). Jumping past the call
+// lands on the keyboard clear that precedes the score screen, so the three pushes the movie call
+// would have consumed are skipped along with it and the stack stays balanced.
+DEFINE_HOOK(0x685915, DoWin_SkipWinMovieDuringPlayback, 0x5)
+{
+	enum { AfterWinMovie = 0x68593A };
+
+	return ReplaySystem::IsPlaybackRequested() ? AfterWinMovie : 0;
+}
+
+// Do_Win, loc_685965 - where the two score-screen branches meet again: the one that presented it,
+// and the one a map with [Basic] SkipScore takes past it. Hooking the merge point means playback
+// quits whether or not the mission wanted a score screen at all. Everything after it is the
+// post-score and pre-map-select movies, end-of-campaign handling, map selection, and the
+// Start_Scenario chain.
+DEFINE_HOOK(0x685965, DoWin_EndGameAfterScoreScreen, 0x6)
+{
+	// Do_Win's own IsOneTimeOnly / failed-validation exit: clears GameActive, shows the mouse.
+	enum { EndGameWithoutContinuing = 0x685B2D };
+
+	return ReplaySystem::IsPlaybackRequested() ? EndGameWithoutContinuing : 0;
+}
+
+// Do_Lose, loc_686060 - the argument setup for Play_Movie(Scen->LoseMovie). A campaign defeat has
+// no score screen to keep: what follows the movie is the "replay this mission?" prompt and then
+// Start_Scenario for the same mission again, so playback leaves here directly.
+DEFINE_HOOK(0x686060, DoLose_EndGameAfterPlayback, 0x5)
+{
+	// Do_Lose's own "player declined to replay the mission" exit: clears GameActive.
+	enum { EndGameWithoutRestarting = 0x6863C3 };
+
+	return ReplaySystem::IsPlaybackRequested() ? EndGameWithoutRestarting : 0;
+}
+
 // Main_Game's frame loop is the `call Main_Loop` at 0x48CE8A, and it exits here - the one point
 // every way of ending a match converges on, whether the player won, lost or aborted, and before
 // the score screen and stats dump that follow. Nothing else covers a true skirmish: its only other

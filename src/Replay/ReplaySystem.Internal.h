@@ -117,6 +117,15 @@ struct ReplayRuntimeState
 	bool Recording = false;
 	bool Playback = false;
 	bool InitRandomHandled = false;
+	// Latched by FinishRecordingAtMissionEnd once a campaign mission's recording has been closed
+	// out, and refuses every later StartReplayRecording for the rest of the game. A campaign
+	// advances to [Basic] NextScenario from inside Do_Win, without leaving Main_Game's loop, so the
+	// next mission would otherwise re-enter Clear_Scenario and overwrite the finished recording -
+	// with a header built from the first mission's spawn.ini, which is what makes the result
+	// unplayable. Deliberately not cleared by ResetRuntimeFlagsForScenario, which runs for every
+	// scenario including the ones being suppressed; ReplaySystem::OnGameStartReset clears it, and
+	// that runs once per game started out of Select_Game.
+	bool RecordingFinishedForSession = false;
 	// Set once the load-progress bar has been force-completed for this scenario (playback,
 	// skirmish, or campaign) instead of animating. See WaitForPlayers_SkipProgressAnimation.
 	bool ProgressBarForcedComplete = false;
@@ -224,6 +233,7 @@ const char* DescribeReplayOpenFailure(ReplayOpenFailure failure);
 void StartReplayRecording();
 void StartReplayPlayback(const char* replayPath);
 void StopReplaySystem();
+void FinishRecordingAtMissionEnd();
 void ApplyPlaybackInitialState();
 bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader);
 
