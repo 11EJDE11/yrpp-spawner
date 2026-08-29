@@ -385,33 +385,22 @@ Nothing in this path may call `Compute_Game_CRC` itself: its last act is to draw
 simulation. An extra call would pull the RNG out of step and cause the very divergence it is there
 to report.
 
-### What the hash reads, and why full-map-reveal has to put a flag back
+### What the hash reads
 
 `Compute_Game_CRC` folds in every infantry, unit and building's coordinates and facings, the
 `DisplayClass::Layer` and logic-queue objects' coordinates and types, that RNG draw - and, once per
 house, the single byte at `HouseClass+0x241`, which is `MapIsClear`.
 
-That last one is a trap for anything playback does to the local view. `MapClass::Reveal` (0x577D90,
-`Clear_Shroud`) sets `house->MapIsClear = 1` as its very first statement, ahead of every guard in
-it, and `MapClass::Reset_Shroud` (0x577AB0) clears it at 0x577ACA. So full-map-reveal playback
-touches a hashed byte twice over: `MaintainFullMapReveal` calls Reveal, which sets the flag the
-recording never had set, and the reshroud skip at 0x577AB8 bypasses the write that would have
-cleared it again. Left alone, that makes the frame hash differ from the recording's from the first
-frame onward, for a reason with nothing to do with the simulation - a permanent false positive on
-the default playback settings.
+That last one is a trap for anything playback does to the local view, because `MapClass::Reveal`
+(0x577D90, `Clear_Shroud`) sets `house->MapIsClear = 1` as its very first statement, ahead of every
+guard in it, and `MapClass::Reset_Shroud` (0x577AB0) clears it at 0x577ACA. The viewer's reveal
+never calls either function (see "Showing the whole map" below), so the flag is left where the
+recorded simulation put it. Nothing plays off it in any case: `MapIsClear` is read by exactly three
+functions - `Compute_Game_CRC` (0x64DCCA), `HouseClass::Compute_CRC` (0x502FFF) and
+`Print_CRCs_Current_Player` (0x64E250) - all hashes or diagnostics.
 
-Both sites therefore keep the flag at what the recorded simulation would have had: the reveal
-snapshots it and puts it back, and the reshroud skip performs that one write by hand. This is safe
-because nothing plays off the flag. `MapIsClear` is written only by the shroud reveal and reshroud
-paths, and read by exactly three functions - `Compute_Game_CRC` (0x64DCCA), `HouseClass::Compute_CRC`
-(0x502FFF) and `Print_CRCs_Current_Player` (0x64E250). All three are hashes or diagnostics; no
-gameplay code reads it.
-
-The rest of the playback options are clear of the hash: `MakeObserver` only sets
-`HouseClass::Observer`, and the remaining shroud and gap-generator work that full-map-reveal skips
-(0x6FB170, and the body of 0x577AB0) touches cell shroud counters, the radar and redraw flags -
-never the RNG, and nothing else the hash reads. Anything added here that writes house state must be
-checked against `HouseClass+0x241` specifically.
+`MakeObserver` is clear of the hash too; it only sets `HouseClass::Observer`. Anything added here
+that writes house state must be checked against `HouseClass+0x241` specifically.
 
 A hash costs 4 bytes plus, on frames that would otherwise have gone unrecorded, a 12-byte frame
 header. The hashes themselves do not compress; the headers do.
@@ -575,6 +564,126 @@ Everything ahead of those three still runs — input, keyboard commands, renderi
 scrolling, the message list — and `Sync_Delay` still paces the loop, so a paused replay does not spin
 the CPU.
 
+## Showing the whole map
+
+`ReplayShroudEnabled = false`, and spectating, both ask playback to reveal the map. Doing that the
+obvious way - calling `MapClass::Reveal` on the local house - **breaks campaign playback**, and the
+reason is worth stating plainly because it is not obvious: *in a campaign the local player's shroud
+is simulation state.*
+
+Two separate mechanisms make it so.
+
+1. `HouseClass::Visionary` (`HouseClass+0x240`), which `Clear_Shroud` sets, is read at the top of
+   four trigger actions, each of which returns immediately while it is set:
+   `TActionClass::Reveal_Around_Waypoint` (0x6E0FE0), `Reveal_Zone_Of_Waypoint` (0x6E11C0),
+   `Reveal_All_Map` (0x6E1330) and `Reshroud_Map_At` (0x6E1A70).
+2. Those actions exist to call `MapClass::Sight_From` (0x5678E0), and revealing a cell is what
+   discovers the objects standing on it:
+   `Sight_From` -> `DisplayClass::Map_Cell2` (0x4A9CA0) -> `MapClass::reveal_check` (0x5865F0) ->
+   `TechnoClass::Revealed` (0x6F4960) -> `TagClass::RaiseEvent(TEVENT_DISCOVERED, techno)`.
+   `Map_Cell2` only reaches `reveal_check` when the cell's visibility actually *changed*, so a
+   pre-revealed map produces no discovery callbacks at all.
+
+`TechnoClass::Revealed` is simulation code: besides that tag spring it assigns `MISSION_HUNT` to an
+AI unit sitting on `MISSION_AMBUSH`. And the spring is not merely a reordering - a trigger whose
+event is already satisfiable fires the moment anything springs its tag, so a discovery can fire a
+trigger *in the middle of another trigger's action list*. Allied Mission 1 does exactly this: the
+`Create Thugs` action list enables `Change House 5` (elapsed-time-0) and then reveals waypoint 68,
+and the GI discovered by that reveal springs `Change House 5` on the same frame. With the map
+already revealed it waits for the next global tag pass instead, one frame later, and the campaign
+drifts from there.
+
+So the viewer must not touch the shroud the simulation sees - and the cleanest way to honour that
+is to never write to it at all. The reveal is a lie told at draw time: every cell keeps exactly the
+shroud the simulation gave it, and five hooks make the *drawing* behave as though the map were
+clear. Nothing has to be restored, so no ordering between the render and the logic has to hold, and
+a playback that stops mid-frame cannot leave a revealed map behind.
+
+The shroud only ever becomes visible through two places, both of them pure render code:
+
+- `CellClass::Cell_Shadow_Update` (0x4801F0) is the only caller of `CellClass::Draw_Shroud`
+  (0x47EFE0) and `CellClass::Draw_Fog` (0x47F250), and is itself only reached from
+  `Tactical::Render_Shroud` (0x6D3660) and `Render_Shroud2` (0x6D71E0), both only from
+  `Tactical::Render`. Nothing else paints the black. The two hooks at 0x48022B and 0x480249 skip the
+  shroud blit and the fog blit respectively, and deliberately leave the `Tactical::Cell_Shadow`
+  (0x6D8700) calls above them in place, so the cell's `Visibility` and `Foggedness` caches are
+  refreshed exactly as they would be in an untouched game. That matters: those two fields are inputs
+  to the `changed?` test in `Map_Cell`, so writing them - as an earlier attempt did - is itself a
+  way to lose a discovery.
+- `CellClass::Is_Shrouded` (0x487950) is the cull each object draw performs on itself. All nine
+  callers are `AnimClass::Draw_It`, `BuildingClass::Draw_It`, `Draw_Door_And_Turret`,
+  `InfantryClass::Draw_It`, `Tactical::Draw_Pixel_Effects`, `TechnoClass::Draw_Extras`,
+  `Techno_Draw_Object` and `UnitClass::Draw_Object` - every one a draw routine - so the hook at
+  0x487950 shows every object on the revealed map.
+
+Terrain needs no hook: `Tactical::Render_Tiles`, `Render_Layers`, `Render_Buildings`,
+`Render_Terrain_Objects` and `Render_Cell` read no cell shroud state at all. Unexplored ground is
+drawn like any other and then covered by the shroud shape, so not painting the shape is the whole
+job.
+
+Do **not** be tempted to hook `MapClass::Is_Mapped` (0x586360), the function
+`CellClass::Is_Shrouded` wraps. It has around twenty-five other callers and a good half of them are
+simulation code - `TechnoClass::Fire_At`, `AircraftClass::Fire_At`, `FootClass::Per_Cell_Process`,
+`Tiberium_Check`, `Weed_Check`, `JumpjetLocomotionClass::Process`, `AircraftClass::Can_Enter_Cell`
+and `DisplayClass::Passes_Proximity_Check2` among them. The `CellClass` wrapper is the chokepoint
+that is draw-only; the `MapClass` one is not.
+
+### The minimap
+
+Each minimap pixel is blacked out by the same `MapClass::Is_Mapped` test, in
+`RadarClass_draw_655C50` (0x655C50) - which is also why only player-controlled units show through
+shroud there. The routine resolves the cell into two stack locals, `[esp+0x44]` (shrouded) and
+`[esp+0x13]` (covered by a gap generator), and reads neither until 0x655D87. The hook there clears
+both during a revealing playback, so the pixel is copied from the terrain image instead of blacked
+out and enemy blips are let through.
+
+Being a per-pixel lie rather than a cell edit, this needs no cache management of its own. The
+minimap is a cached surface that `RadarClass::Draw_It` only repaints where something called
+`Push_Cell`, but the full repaint it gets from `Read_Scenario_INI` (`RadarClass::Update_Map`
+0x657CE0, called at 0x687C84) already runs with the hook live - `StartReplayPlayback` happens
+earlier, in `Clear_Scenario` - and every later engine-driven full repaint (`Reset_Shroud`,
+`Create_Gap`, `Delete_Gap`) goes through the same hooked routine.
+
+Blips are gated once more, separately. `TechnoClass::Radar_Tracking_AI` (0x70D990) only calls
+`Radar_Track_Object` when the object's virtual `Is_Visible_On_Radar` says so, and that test is
+shroud-based - see `BuildingClass::Is_Visible_On_Radar` (0x457020). It runs inside the logic frame,
+so the hook at 0x70DA48 forces the answer during full-map playback, for anything not flagged
+`Invisible` or `RadarInvisible`.
+
+Note `MapClass::Is_Mapped` is named backwards in the IDB: it returns `(AltFlags & Mapped) == 0`, so
+it is true when a cell is *shrouded*.
+
+### Clicking on what the reveal shows
+
+`ScrollClass::Coords_To_Click_Info` (0x692300) resolves the cursor into a cell, then writes a
+`shrouded` flag and a `fogged` flag for its caller and only picks an object when both are clear:
+
+```
+*shrouded = MapClass::Is_Mapped(coord) && MainWindow;
+*fogged   = <building IsFogged, else MapClass::Is_Location_Fogged(coord)>;
+if (!*shrouded && !*fogged) *object = Tactical::Select_At(point);
+```
+
+The hook at 0x6924FC clears both flags during a revealing playback and then re-implements the two
+tests, so the viewer can click and hover anything the reveal has drawn. It composes with the
+`Is_Shrouded` hook rather than duplicating it: `Tactical::Select_At` (0x6DA380) picks out of
+`TacticalSelectables`, which is filled during the draw pass, so an object only becomes clickable
+because it was drawn in the first place.
+
+Letting local clicks through cannot reach the simulation. `RemoveReplayGameplayEventsFromDoList`
+strips every locally generated gameplay event from `EventClass::DoList` before it executes, so a
+click can change what this machine has selected and nothing else. Cloaked units stay unpickable
+either way - `Select_At` and `Coords_To_Click_Info` both test `CellClass::SensedByHouses`, which the
+reveal does not touch, and revealing the map is not the same as detecting cloak.
+
+Two things the reveal deliberately does not change. Buildings that the recording player left under
+fog still draw from their `FoggedObjectClass` snapshot rather than live, because `Tactical::
+Draw_Buildings` skips a building whose `IsFogged` flag is set and that flag is written by logic, not
+by drawing - it is the remembered building, which is also what the state-swapping version showed.
+And the cursor's *action* over unexplored ground still comes from the shroud-based tests in
+`FootClass::What_Action` and friends; playback discards the resulting orders regardless, so only the
+cursor glyph is affected.
+
 ## Watching as a spectator
 
 `ReplaySpectator` hands the local screen to the engine's own observer - the same
@@ -631,7 +740,9 @@ here as they did on the recording machine.
 This does not put the simulation at risk of drifting off the recording. `PlayerPtr` is the engine's
 *local* viewpoint: it decides what is rendered, what the shroud covers (`MapClass::Sight_From`
 resolves a sighting house to `PlayerPtr` before clearing any cell), whose sidebar is built, and
-which EVA lines play. A live multiplayer game already runs the identical simulation on every peer
+which EVA lines play. The one caveat is the shroud, which is not purely local in a campaign - see
+"Showing the whole map" - but `ReplayViewPlayer` only ever resolves to another *human* slot, so a
+campaign recording, which has one, always falls back to the recording player. A live multiplayer game already runs the identical simulation on every peer
 with `PlayerPtr` pointing at a different house, so anything that leaked from it into the simulation
 would desync ordinary games. The recorded event stream is house indexed and is replayed unchanged.
 

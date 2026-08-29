@@ -216,7 +216,9 @@ namespace ReplaySystem
 		void RemoveReplayGameplayEventsFromDoList();
 		void PlaybackFrameEvents();
 
-		// True while playback shows the whole map rather than the recording player's shroud.
+		// True while playback shows the whole map rather than the recording player's shroud. The
+		// reveal is applied by the draw-time hooks in ReplaySystem.Hook.cpp and never writes cell
+		// state, so the simulation sees the recording player's real shroud at all times.
 		bool PlaybackWantsFullMapReveal();
 	}
 }

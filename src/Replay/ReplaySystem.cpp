@@ -1812,29 +1812,8 @@ namespace ReplaySystem
 		// Whether playback should show the whole map instead of the recording player's shroud.
 		bool PlaybackWantsFullMapReveal()
 		{
-			return ReplayState.Playback && (!ReplayState.ShroudEnabled || ReplayState.SpectatorView);
-		}
-
-		// Revealing once does not hold. HouseClass::Visionary gates MapClass::Reveal, and every path
-		// that re-shrouds - startup, spy satellite loss, crates, gap generators, triggers - clears it
-		// first, so re-testing the flag each frame re-reveals when something took the reveal away.
-		void MaintainFullMapReveal()
-		{
-			if (!PlaybackWantsFullMapReveal())
-				return;
-
-			HouseClass* const pPlayer = HouseClass::CurrentPlayer;
-			if (!pPlayer || pPlayer->Visionary)
-				return;
-
-			// Clear_Shroud sets the house's MapIsClear, which Compute_Game_CRC hashes. This reveal is
-			// not part of the recorded simulation, so put the flag back rather than diverge the frame
-			// hashes for a purely local reason.
-			const bool mapIsClear = pPlayer->MapIsClear;
-
-			MapClass::Instance.Reveal(pPlayer);
-
-			pPlayer->MapIsClear = mapIsClear;
+			return ReplayState.Playback
+				&& (!ReplayState.ShroudEnabled || ReplayState.SpectatorView);
 		}
 
 		void RestoreFrameState()
@@ -1847,8 +1826,6 @@ namespace ReplaySystem
 
 			// Keep the viewport locked on frames without replay records.
 			ApplyLockedViewport();
-
-			MaintainFullMapReveal();
 
 			if (!ReplayState.HasPendingPlaybackFrame && !ReplayState.PlaybackStreamEnded)
 			{

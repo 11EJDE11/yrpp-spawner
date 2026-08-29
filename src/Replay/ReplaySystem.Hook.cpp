@@ -30,10 +30,15 @@
 #include <BeaconManagerClass.h>
 #include <EventClass.h>
 #include <HouseClass.h>
+#include <ObjectClass.h>
 #include <ProgressScreenClass.h>
 #include <ScenarioClass.h>
 #include <SessionClass.h>
+#include <TActionClass.h>
 #include <Timer.h>
+#include <TechnoClass.h>
+#include <TriggerClass.h>
+#include <TriggerTypeClass.h>
 #include <Unsorted.h>
 
 #include <algorithm>
@@ -141,26 +146,6 @@ DEFINE_HOOK(0x686B6A, ReadScenarioINI_ReplayApplyState, 0x6)
 {
 	if (ReplayState.Playback)
 		ApplyPlaybackInitialState();
-
-	return 0;
-}
-
-// MapClass::Reset_Shroud. During full-map-reveal playback MaintainFullMapReveal undoes every
-// reshroud of the local player on the next frame, so both full-map passes are wasted work. Skip the
-// reshroud for that house; other houses keep it.
-DEFINE_HOOK(0x577AB8, MapClass_ResetShroud_SkipDuringFullRevealPlayback, 0x6)
-{
-	HouseClass* const house = R->EAX<HouseClass*>();
-	if (ReplayState.Playback && PlaybackWantsFullMapReveal()
-		&& (house == HouseClass::CurrentPlayer || house == nullptr))
-	{
-		// Everything skipped is shroud, radar and redraw work except this flag, which
-		// Compute_Game_CRC hashes - leaving it unwritten would diverge the frame hashes.
-		if (house)
-			house->MapIsClear = false;
-
-		return 0x577B9F;
-	}
 
 	return 0;
 }
@@ -407,17 +392,88 @@ DEFINE_HOOK(0x686060, DoLose_EndGameAfterPlayback, 0x5)
 
 #pragma endregion Ending playback when the mission ends
 
-// TechnoClass::Create_Gap. A gap generator re-shrouds cells directly rather than through the flag
-// MaintainFullMapReveal watches, so it keeps re-fogging the map during full-map-reveal playback.
-// The cost of skipping it is the radar's jam-radius bookkeeping, which nothing is looking at with
-// the whole map already shown.
-DEFINE_HOOK(0x6FB170, TechnoClass_CreateGap_SkipDuringFullRevealPlayback, 0x5)
+// Triggers can run off the player discovering an area. If enableShroud=false then
+// they are pre-discovered which leads to divergence.
+// Show enemy units on the minimap when the playback reveals the map.
+DEFINE_HOOK(0x70DA48, TechnoClass_RadarTrackingAI_ShowAllOnViewerRadar, 0x8)
 {
-	if (ReplayState.Playback && PlaybackWantsFullMapReveal())
-		return 0x6FB460;
+	if (!PlaybackWantsFullMapReveal())
+		return 0;
+
+	GET(TechnoClass*, pTechno, ESI);
+	if (!pTechno)
+		return 0;
+
+	const auto* const pType = pTechno->GetTechnoType();
+	if (!pType || pType->Invisible || pType->RadarInvisible)
+		return 0;
+
+	R->AL(1);
+	return 0;
+}
+
+#pragma region Viewer map reveal
+
+// No shroud
+DEFINE_HOOK(0x48022B, CellShadowUpdate_ReplaySkipShroudBlit, 0xA)
+{
+	enum { SkipShroudBlit = 0x480235 };
+
+	return PlaybackWantsFullMapReveal() ? SkipShroudBlit : 0;
+}
+
+// The same function's fog half, at the fog-of-war test. Foggedness has already been written at this
+// point, so jumping to the epilogue only skips the fog shape. The function's return value is unused
+// by both callers.
+DEFINE_HOOK(0x480249, CellShadowUpdate_ReplaySkipFogBlit, 0x6)
+{
+	enum { SkipFogBlit = 0x480295 };
+
+	return PlaybackWantsFullMapReveal() ? SkipFogBlit : 0;
+}
+
+// No fog
+DEFINE_HOOK(0x487950, CellClass_IsShrouded_ReplayNeverShroudedForDrawing, 0x6)
+{
+	enum { ReturnNotShrouded = 0x4879A5 };
+
+	if (!PlaybackWantsFullMapReveal())
+		return 0;
+
+	R->EAX(0);
+	return ReturnNotShrouded;
+}
+
+// Fix radar drawing
+DEFINE_HOOK(0x655D87, RadarClass_DrawPixel_ReplayRevealCell, 0x7)
+{
+	if (PlaybackWantsFullMapReveal())
+	{
+		R->Stack8(0x44, 0); // not shrouded
+		R->Stack8(0x13, 0); // not covered by a gap generator
+	}
 
 	return 0;
 }
+
+// Allow clicking through the shroud (we don't blit it so it's still "there")
+DEFINE_HOOK(0x6924FC, ScrollClass_ClickInfo_ReplayClickThroughShroud, 0x12)
+{
+	enum { HiddenCell = 0x6925F0, PickObject = 0x69250E };
+
+	GET(bool*, pShrouded, ESI);
+	GET(bool*, pFogged, EDI);
+
+	if (PlaybackWantsFullMapReveal())
+	{
+		*pShrouded = false;
+		*pFogged = false;
+	}
+
+	return (*pShrouded || *pFogged) ? HiddenCell : PickObject;
+}
+
+#pragma endregion Viewer map reveal
 
 // Queue_AI_Multiplayer, just past where it starts its own skip-CRC timer. Playback is not being
 // compared against anyone, so let that timer never run out.
@@ -511,14 +567,10 @@ DEFINE_HOOK(0x533066, Init_Commands_RegisterReplayCommands, 0x6)
 	ReplaySystem::Controls::RegisterReplayCommands();
 	return 0;
 }
-
 #pragma region Playback pause
 
-// Pausing playback holds the simulation while the rest of Main_Loop carries on, so the viewer can
-// still scroll, select and reach the menus - the engine's own pause locks input and could never be
-// undone. The three hooks below cut the only things that advance the game, and have to move
-// together: leaving the event pump in would replay the frame's events once per paused iteration,
-// and leaving the frame counter in would run it past the record playback is holding.
+// Pause replay simulation without blocking input or menus. The related hooks stop event processing,
+// logic and the frame counter together so the current frame remains unchanged.
 
 // Holds the logic tick.
 DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
