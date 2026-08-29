@@ -38,7 +38,10 @@
 #include <RulesClass.h>
 #include <SessionClass.h>
 #include <TacticalClass.h>
+#include <Timer.h>
+#include <Unsorted.h>
 #include <VocClass.h>
+#include <VoxClass.h>
 
 #include <algorithm>
 #include <cctype>
@@ -164,8 +167,8 @@ void ApplyPlaybackFramePacing()
 		ReplayState.PlaybackNextFrameDue += frameMilliseconds;
 	}
 
-	*reinterpret_cast<int*>(FRAME_TIMER_DELAY_TIME_ADDRESS) = 0;
-	*reinterpret_cast<int*>(NFT_TIMER_ACCUMULATED_ADDRESS) = 0;
+	GameTimers::FrameTimer.TimeLeft = 0;
+	GameTimers::NetFrameTimer.TimeLeft = 0;
 }
 
 bool WriteRawToHandle(HANDLE file, const void* data, size_t size)
@@ -1400,9 +1403,9 @@ bool SanitizeSideChannelRecord(SideChannelRecord& record)
 			&& record.Aux >= 0 && record.Aux < MAX_BEACON_SLOTS;
 
 	case SideChannelEventType::Taunt:
-		// Taunts_752B70 range-checks the command itself, but do not rely on a function we do not
-		// own to be the only bound on a value that came off disk.
-		return record.Aux >= 0 && record.Aux < MAX_TAUNT_COMMAND_COUNT;
+		// VoxClass::PlayTaunt range-checks the command itself, but do not rely on a function
+		// we do not own to be the only bound on a value that came off disk.
+		return VoxClass::IsValidTauntCommand(record.Aux);
 
 	default:
 		return false;
@@ -1599,19 +1602,12 @@ void ApplySideChannelEvent(const SideChannelRecord& record)
 		break;
 
 	case SideChannelEventType::BeaconText:
-	{
-		using BeaconMessageFn = char(__thiscall*)(BeaconManagerClass*, const wchar_t*, int, int, char);
-		reinterpret_cast<BeaconMessageFn>(BEACON_MANAGER_MESSAGE_ADDRESS)(
-			&BeaconManagerClass::Instance, record.Text, record.House, record.Aux, 1);
+		BeaconManagerClass::Instance.EditBeaconMessage(record.Text, record.House, record.Aux, true);
 		break;
-	}
 
 	case SideChannelEventType::Taunt:
-	{
-		using TauntsFn = int(__fastcall*)(int);
-		reinterpret_cast<TauntsFn>(TAUNTS_ADDRESS)(record.Aux);
+		VoxClass::PlayTaunt(record.Aux);
 		break;
-	}
 
 	default:
 		break;
@@ -1667,7 +1663,7 @@ void CaptureGameCRCForCurrentFrame()
 	if (!ReplayState.Recording && !ReplayState.Playback)
 		return;
 
-	const uint32_t gameCRC = *reinterpret_cast<const uint32_t*>(GAME_CRC_ADDRESS);
+	const uint32_t gameCRC = static_cast<uint32_t>(EventClass::CurrentFrameCRC);
 	const int frameNumber = Unsorted::CurrentFrame;
 
 	if (ReplayState.Recording)
@@ -1747,8 +1743,7 @@ void ComputeAndCaptureGameCRCForCurrentFrame()
 	if (!ReplayState.Recording && !ReplayState.Playback)
 		return;
 
-	using ComputeGameCRCFn = void(*)();
-	reinterpret_cast<ComputeGameCRCFn>(COMPUTE_GAME_CRC_ADDRESS)();
+	Game::ComputeFrameCRC();
 	CaptureGameCRCForCurrentFrame();
 }
 
@@ -1811,9 +1806,7 @@ void ApplyLockedViewport()
 	tc->TacticalCoord1 = target;
 	tc->TacticalCoord2 = target;
 
-	const auto RecalcViewport
-		= reinterpret_cast<void(__thiscall*)(TacticalClass*)>(TACTICAL_RECALCULATE_VIEWPORT_ADDRESS);
-	RecalcViewport(tc);
+	tc->RecalculateViewport();
 
 	tc->Redrawing = true;
 }

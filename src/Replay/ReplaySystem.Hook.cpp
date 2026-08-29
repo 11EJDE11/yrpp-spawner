@@ -32,6 +32,8 @@
 #include <ProgressScreenClass.h>
 #include <ScenarioClass.h>
 #include <SessionClass.h>
+#include <Timer.h>
+#include <Unsorted.h>
 
 #include <algorithm>
 #include <limits>
@@ -48,7 +50,7 @@ DEFINE_HOOK(0x4D7EB5, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x5)
 	if (ReplayState.Recording || ReplayState.Playback)
 		return SkipMoveFlashBlock;
 
-	R->AL(*reinterpret_cast<const BYTE*>(0x822CF2));
+	R->AL(static_cast<BYTE>(Unsorted::MoveFeedback));
 	return 0x4D7EBA;
 }
 
@@ -383,12 +385,13 @@ DEFINE_HOOK(0x6FB170, TechnoClass_CreateGap_SkipDuringFullRevealPlayback, 0x5)
 	return 0;
 }
 
-// Playback is not waiting on anyone, so the network delay budget never has to expire.
+// Queue_AI_Multiplayer, just past where it starts its own skip-CRC timer. Playback is not being
+// compared against anyone, so let that timer never run out.
 DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 {
 	if (ReplayState.Playback)
 	{
-		*reinterpret_cast<int*>(NETWORK_DELAY_TIME_ADDRESS) = std::numeric_limits<int>::max();
+		GameTimers::QueueAIMultiplayerSkipCRC.TimeLeft = std::numeric_limits<int>::max();
 	}
 
 	return 0;
@@ -524,7 +527,7 @@ bool ResolveFlaggedBeaconSlot(int& house, int& slot)
 		for (int s = 0; s < 3; ++s)
 		{
 			BeaconClass* pBeacon = BeaconManagerClass::Instance.Beacons[h][s];
-			if (pBeacon && (pBeacon->Bitfield & BEACON_FLAG_LOCAL) != 0)
+			if (pBeacon && pBeacon->IsSelected())
 			{
 				house = h;
 				slot = s;

@@ -177,8 +177,7 @@ void RenderPausedFrame()
 	if (!TacticalClass::Instance)
 		return;
 
-	const auto TacticalAI = reinterpret_cast<void(__thiscall*)(TacticalClass*)>(TACTICAL_AI_ADDRESS);
-	TacticalAI(TacticalClass::Instance);
+	TacticalClass::Instance->AI();
 
 	MapClass::Instance.Render();
 }

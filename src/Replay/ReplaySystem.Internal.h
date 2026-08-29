@@ -49,34 +49,6 @@ constexpr int REPLAY_SYNC_FLUSH_FRAME_INTERVAL = 60;
 constexpr uint64_t REPLAY_FLUSH_INTERVAL_BYTES = 50ull * 1024 * 1024;
 constexpr const char* DEFAULT_RECORDING_PATH = "replay.dat";
 
-// Engine entry points and globals the replay system reaches directly. They belong in YRpp; until
-// they are declared there, keep every raw address in one place rather than inline at the call sites.
-// Queue_AI_Multiplayer's network delay budget.
-constexpr uintptr_t NETWORK_DELAY_TIME_ADDRESS = 0x00AFA458;
-// BeaconManagerClass::Message - sets the text of an existing beacon.
-constexpr uintptr_t BEACON_MANAGER_MESSAGE_ADDRESS = 0x431450;
-// Taunts - resolves a taunt command byte and plays the matching sound.
-constexpr uintptr_t TAUNTS_ADDRESS = 0x752B70;
-// TacticalClass::RecalculateViewport - recomputes TacticalPos and the visible area.
-constexpr uintptr_t TACTICAL_RECALCULATE_VIEWPORT_ADDRESS = 0x6D8B30;
-// Tactical::AI - commits the desired viewport position into the one that gets drawn. Normally
-// reached from LogicClass::AI, which a paused playback frame skips.
-constexpr uintptr_t TACTICAL_AI_ADDRESS = 0x6D2540;
-// Compute_Game_CRC - the engine's own per-frame desync hash calculator.
-constexpr uintptr_t COMPUTE_GAME_CRC_ADDRESS = 0x64DAB0;
-// GameCRC - the engine's own per-frame desync hash. A networked game fills it once a frame for
-// the sync check; a skirmish never does, so the replay hooks compute it themselves.
-constexpr uintptr_t GAME_CRC_ADDRESS = 0xAC51FC;
-// The two frame timers Sync_Delay sleeps on: DelayTime in 60Hz ticks for a skirmish,
-// Accumulated in milliseconds for a networked session. Playback writes these directly - see
-// ApplyPlaybackFramePacing.
-constexpr uintptr_t FRAME_TIMER_DELAY_TIME_ADDRESS = 0x887350;
-constexpr uintptr_t NFT_TIMER_ACCUMULATED_ADDRESS = 0x887330;
-// BeaconClass::Bitfield flag marking the beacon the local player placed.
-constexpr int BEACON_FLAG_LOCAL = 2;
-// Taunt commands are the low nibble of the command byte, so 16 of them.
-constexpr int MAX_TAUNT_COMMAND_COUNT = 16;
-
 struct PlaybackFrameRecord
 {
 	int32_t FrameNumber = 0;
