@@ -43,8 +43,12 @@ using namespace ReplaySystem::Internal;
 
 static const EventClass* EventFromScaledDoListSlot(unsigned int scaledSlot)
 {
-	return reinterpret_cast<const EventClass*>(
-		reinterpret_cast<uintptr_t>(EventClass::DoList.GetArray()) + static_cast<size_t>(scaledSlot) * 3u);
+	static_assert(sizeof(EventClass) % 3 == 0,
+		"Execute_DoList scales its slot index by sizeof(EventClass) / 3 and relies on the x86 "
+		"[reg + reg*2] addressing mode for the rest; a size not divisible by 3 breaks that.");
+	constexpr unsigned int ScaleFactor = sizeof(EventClass) / 3;
+
+	return &EventClass::DoList.GetArray()[scaledSlot / ScaleFactor];
 }
 
 // FootClass::Active_Click_With creates an animation when the player clicks to move units. This doesn't
