@@ -883,7 +883,6 @@ void ResetRuntimeFlagsForScenario()
 	ReplayState.PendingFrameStates.clear();
 	ReplayState.PendingSideChannelEvents.clear();
 	ReplayState.CapturedFrameEventsFrame = -1;
-	ReplayState.CandidateEvents.clear();
 	ReplayState.CapturedFrameEvents.clear();
 	ReplayState.HasPlaybackHeader = false;
 	memset(&ReplayState.PlaybackHeader, 0, sizeof(ReplayState.PlaybackHeader));
@@ -1933,79 +1932,43 @@ void RestoreFrameState()
 	ReplayState.HasPendingPlaybackFrame = false;
 }
 
-// Take note of every event the queue is still holding, before Execute_DoList gets to it. Addresses
-// only: what those entries hold is not final yet, because Execute_DoList's first act is to
-// reschedule - anything sitting between NewMaxAheadFrame1 and NewMaxAheadFrame2 has its Frame
-// rewritten to the latter and is left in the queue unexecuted, to run on that later frame instead.
-//
-// Copying the events here, as this used to, recorded such an event twice: once on the frame it was
-// about to be moved off, and again on the frame it was moved to and actually ran. Playback then
-// executed it on both, so the replay produced an order, a build or a placement the game never made
-// - a divergence starting one frame after the first copy, and only when the move lands on the
-// current frame, which is why it took a laggy game to surface it.
+// Opens a fresh capture buffer for the frame. The events themselves are appended by
+// RecordExecutedEvent as the engine consumes them - see the hook on Execute_DoList's marking site.
 void CaptureEventsForCurrentFrame()
 {
 	if (!ReplayState.Recording)
 		return;
 
-	auto& candidates = ReplayState.CandidateEvents;
-	candidates.clear();
 	ReplayState.CapturedFrameEvents.clear();
 	ReplayState.CapturedFrameEventsFrame = Unsorted::CurrentFrame;
-
-	const int doListCount = EventClass::DoList.Count;
-	candidates.reserve(static_cast<size_t>(doListCount));
-	for (int i = 0; i < doListCount; ++i)
-	{
-		// Everything not yet consumed, without judging which of them this frame will reach. The
-		// engine's own IsExecuted, checked below, is what decides that - and it is the only thing
-		// that can, because the frame an event carries is not the frame it necessarily runs on.
-		const auto& event = EventClass::DoList[i];
-		if (!event.IsExecuted)
-			candidates.push_back(&event);
-	}
 }
 
-// Copy out the ones the engine consumed. Runs once Execute_DoList has returned and before Queue_AI
-// drops the spent entries, while IsExecuted still says which of the candidates it took.
-//
-// IsExecuted rather than hooking EventClass::Execute, which would look like the more direct way to
-// record what ran and is not: Execute_DoList handles FrameInfo, and EXIT and OPTIONS belonging to
-// another player, inline and never calls Execute for them. Those events would go unrecorded, taking
-// every network timing sample and every remote quit with them. IsExecuted is set on all of those
-// paths, because they all end at the same place.
-//
-// What this leaves out is what should be left out: an event that was rescheduled instead of run is
-// not marked, and is recorded on the frame it finally runs on; one the engine discarded as too late
-// is never marked at all, and is never recorded.
-void MaterialiseExecutedEventsForCurrentFrame()
+// Called from the one instruction where Execute_DoList marks a queue entry consumed (0x64CAC0), so
+// the recording is taken from the engine's own decision rather than inferred from a before/after
+// comparison of IsExec.
+void RecordExecutedEvent(const EventClass* pEvent)
 {
-	if (!ReplayState.Recording)
+	if (!ReplayState.Recording || !pEvent)
 		return;
 
+	// Execute_DoList runs inside the frame's Queue_AI, after CaptureEventsForCurrentFrame has opened
+	// the buffer. Re-opening it here keeps the frame attribution right even if a future hook order
+	// change means the engine reaches this site first.
 	if (ReplayState.CapturedFrameEventsFrame != Unsorted::CurrentFrame)
-		return;
-
-	auto& capturedEvents = ReplayState.CapturedFrameEvents;
-	capturedEvents.clear();
-	capturedEvents.reserve(ReplayState.CandidateEvents.size());
-
-	for (const EventClass* const pEvent : ReplayState.CandidateEvents)
 	{
-		if (!pEvent->IsExecuted)
-			continue;
-
-		auto& recorded = capturedEvents.emplace_back(*pEvent);
-		recorded.IsExecuted = false;
+		ReplayState.CapturedFrameEvents.clear();
+		ReplayState.CapturedFrameEventsFrame = Unsorted::CurrentFrame;
 	}
+
+	auto& recorded = ReplayState.CapturedFrameEvents.emplace_back(*pEvent);
+	// Events are stored unexecuted so the same event is always the same bytes on disk.
+	recorded.IsExecuted = false;
 }
 
 void RecordCapturedEventsForCurrentFrame()
 {
 	if (!ReplayState.Recording)
 		return;
-
-	MaterialiseExecutedEventsForCurrentFrame();
 
 	const int frameNumber = Unsorted::CurrentFrame;
 	auto& capturedEvents = ReplayState.CapturedFrameEvents;
@@ -2032,7 +1995,6 @@ void RecordCapturedEventsForCurrentFrame()
 	}
 
 	capturedEvents.clear();
-	ReplayState.CandidateEvents.clear();
 	ReplayState.CapturedFrameEventsFrame = -1;
 
 	if (frameNumber - ReplayState.LastSyncFlushFrame >= REPLAY_SYNC_FLUSH_FRAME_INTERVAL)

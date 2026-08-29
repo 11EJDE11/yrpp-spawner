@@ -149,11 +149,7 @@ struct ReplayRuntimeState
 	std::deque<PendingRecordedFrameCapture> PendingFrameStates;
 	std::deque<SideChannelRecord> PendingSideChannelEvents;
 	int CapturedFrameEventsFrame = -1;
-	// The unconsumed DoList entries seen before Execute_DoList ran; afterwards, the ones it marked
-	// executed are this frame's events. Pointers rather than queue positions on purpose: the queue's
-	// backing array is a fixed member of a static object, so an entry's address never changes, which
-	// a position relative to the head would not survive if anything ever moved it.
-	std::vector<const EventClass*> CandidateEvents;
+	// This frame's events, appended by RecordExecutedEvent as Execute_DoList consumes each one.
 	std::vector<EventClass> CapturedFrameEvents;
 	ReplayHeader PlaybackHeader = {};
 	bool HasPlaybackHeader = false;
@@ -216,6 +212,7 @@ int GetPlaybackTargetFPS();
 double PlaybackClockMilliseconds();
 void ApplyPlaybackFramePacing();
 void CaptureEventsForCurrentFrame();
+void RecordExecutedEvent(const EventClass* pEvent);
 void RecordCapturedEventsForCurrentFrame();
 void RemoveReplayGameplayEventsFromDoList();
 void PlaybackFrameEvents();

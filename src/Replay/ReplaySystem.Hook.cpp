@@ -28,6 +28,7 @@
 #include <Utilities/Macro.h>
 
 #include <BeaconManagerClass.h>
+#include <EventClass.h>
 #include <HouseClass.h>
 #include <ProgressScreenClass.h>
 #include <ScenarioClass.h>
@@ -39,6 +40,12 @@
 #include <limits>
 
 using namespace ReplaySystem::Internal;
+
+static const EventClass* EventFromScaledDoListSlot(unsigned int scaledSlot)
+{
+	return reinterpret_cast<const EventClass*>(
+		reinterpret_cast<uintptr_t>(EventClass::DoList.GetArray()) + static_cast<size_t>(scaledSlot) * 3u);
+}
 
 // FootClass::Active_Click_With creates an animation when the player clicks to move units. This doesn't
 // happen on playback as there's no click. So we need to skip it while recording/watching otherwise
@@ -202,6 +209,26 @@ DEFINE_HOOK(0x6475B3, Queue_AI_Singleplayer_ReplayGameCRC, 0x8)
 	return executeSucceeded ? 0x6474B8 : 0x6475BB;
 }
 
+DEFINE_HOOK(0x64C75D, ExecuteDoList_RecordAcceptedMegaMission, 0x5)
+{
+	if (ReplayState.Recording)
+		RecordExecutedEvent(EventFromScaledDoListSlot(R->EAX<unsigned int>()));
+
+	return 0;
+}
+
+DEFINE_HOOK(0x64CAC0, ExecuteDoList_RecordConsumedEvent, 0x7)
+{
+	if (ReplayState.Recording)
+	{
+		const auto* const pEvent = EventFromScaledDoListSlot(R->EAX<unsigned int>());
+		if (pEvent && pEvent->Type != EventType::MegaMission)
+			RecordExecutedEvent(pEvent);
+	}
+
+	return 0;
+}
+
 // Queue_AI_Multiplayer, at the gate for vanilla's own recording: write this frame's events out, or
 // inject the recorded ones, and take vanilla's recorder out of the picture. Only while the replay
 // system is active, so a normal multiplayer game keeps it.
@@ -230,13 +257,12 @@ DEFINE_HOOK(0x64820E, Queue_AI_Multiplayer_RecordPlaybackEvents, 0x7)
 }
 
 // Queue_AI_Multiplayer, immediately after Execute_DoList has returned and before the queue's spent
-// entries are dropped: write out the events that actually executed. The singleplayer branch below
-// already writes from here, at the matching point in Queue_AI.
+// entries are dropped: write out the frame's events. The events themselves were captured as the
+// engine consumed them (see the 0x64CAC0 hook); this is only the point where the frame is known to
+// be complete. The singleplayer branch writes from the matching point in Queue_AI.
 //
-// Recording cannot be done at the gate above, where the events are picked out, because
-// Execute_DoList reschedules before it executes - see CaptureEventsForCurrentFrame. Vanilla's own
-// test of the return value is what this stands on, so it does that test itself.
-DEFINE_HOOK(0x648234, Queue_AI_Multiplayer_RecordExecutedEvents, 0x8)
+// Vanilla's own test of the return value is what this stands on, so it does that test itself.
+DEFINE_HOOK(0x648234, Queue_AI_Multiplayer_WriteFrameEvents, 0x8)
 {
 	enum { ExecuteSucceeded = 0x6482BD, ExecuteFailed = 0x64823C };
 

@@ -249,26 +249,49 @@ Recording an event on the frame its `Frame` field names would be wrong, because 
 to run on that later frame instead. The engine logs each one as `DoList: Moving event from frame %d
 to frame %d`.
 
-So recording is split across the call. `CaptureEventsForCurrentFrame`, at the event pump (0x64820E
-for multiplayer, 0x647586 for campaign and skirmish), takes the *address* of every `DoList` entry
-not yet consumed, without judging which of them this frame will reach. Once `Execute_DoList` has
-returned (0x648234, and 0x6475B3 respectively) and before `Queue_AI` drops the spent entries,
-`RecordCapturedEventsForCurrentFrame` copies out the ones the engine has now marked `IsExecuted`.
+So the frame an event belongs to is decided by the engine, and recording takes it from the one
+instruction that decides it. `ExecuteDoList_RecordConsumedEvent` hooks `0x64CAC0`, where
+`Execute_DoList` sets `IsExec` on a queue entry - the single point every path through the function
+converges on. `EAX` there holds the engine's own scaled slot index, so the entry is at
+`DoList.List + EAX * 3` (`sizeof(EventClass)` is 111, and the instruction addresses the flag as
+`[eax + eax*2 + &DoList.List.IsExec]`). Each event is copied out as it is consumed, in the order the
+engine consumed it. The two post-execute sites - `0x648234` for multiplayer, `0x6475B3` for campaign
+and skirmish - then write the frame's collected events once the frame is known to be complete.
 
-Two kinds of event are therefore absent from a frame that a naive capture would have put there: one
-the engine rescheduled, which is recorded on the frame it finally runs on, and one it discarded as
-`Packet received too late!`, which is never recorded because it never ran. Capturing before the call
-recorded a rescheduled event *twice* - once where it was moved from, once where it ran - and
-playback then executed an order the game never made.
+`MEGAMISSION` - what an ordinary unit order is - is the one type recorded elsewhere, by
+`ExecuteDoList_RecordAcceptedMegaMission` at `0x64C75D`. It never runs in place: `Execute_DoList`
+copies it into a second queue (`MegaMissionList`, `EventClass::MegaMissionList` in YRpp), marks the
+original consumed, and runs the copy later, after `Queue_256_Sort` has reordered the batch. Reaching
+the mark therefore does not mean the engine kept it - when that queue is already full at 256 entries
+the copy is skipped and `0x64C743` jumps straight to the mark, so the order never happens. Recording
+from the accept path instead keeps a dropped order out of the file; recording it would make playback
+carry out an order the recorded game never did.
 
-`IsExecuted` is the marker to use here, and hooking `EventClass::Execute` (0x4C6CB0) instead - which
-looks like the more direct way to record what ran - is a trap. `Execute_DoList` handles `FRAMEINFO`,
-and `EXIT` and `OPTIONS` belonging to another player, inline and never calls `Execute` for them, so
-that recording would lose every network timing sample and every remote quit. All of those paths do
-reach `IsExecuted`, because all eleven of them end at the same place (`0x64CAA8`).
+Three kinds of event are therefore absent from a frame that a naive capture would have put there:
+one the engine rescheduled, which is recorded on the frame it finally runs on; one it discarded as
+`Packet received too late!`, which is never recorded because it never ran; and a `MEGAMISSION`
+dropped for want of room in `MegaMissionList`.
 
-Events are written unexecuted, whichever side of execution they were copied from, so the same event
-is always the same bytes on disk.
+**Do not record by comparing `IsExec` before and after `Execute_DoList`.** That approach - take the
+address of every unconsumed entry at the event pump, then copy out the ones marked afterwards -
+looks equivalent and is not, because on RA2 the flag does not mean "ran". A `MEGAMISSION`, which is
+what an ordinary unit order is, never executes in place: `Execute_DoList` copies it into a second
+queue (`DoList_256`), marks the original consumed immediately, and runs the copy later, after
+`Queue_256_Sort` has reordered the batch. The marked original stays in `DoList` until `Clean_DoList`
+reaches it, so any later frame's scan sees it already-marked and skips it - and the event is lost
+from the recording entirely. Measured on one recording, four of the five frames that carried an
+event wrote nothing at all. Playback then runs a game where an order was never given, and diverges
+one frame later.
+
+Tiberian Sun has no `DoList_256` and executes every due event inline, so a design checked against
+that source reads as correct. It is not; check `Execute_DoList` in the RA2 binary.
+
+Hooking `EventClass::Execute` (0x4C6CB0) is the other trap, in the opposite direction:
+`Execute_DoList` handles `FRAMEINFO`, and `EXIT` and `OPTIONS` belonging to another player, inline
+and never calls `Execute` for them, so that recording would lose every network timing sample and
+every remote quit. `0x64CAC0` is reached by all of them.
+
+Events are written unexecuted, so the same event is always the same bytes on disk.
 
 Blocks are stored bare, so a reader that meets a flag it does not know cannot find the end of that
 block - the length is written down nowhere - and `ReadNextPlaybackFrameRecord` rejects the record.
