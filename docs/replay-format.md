@@ -4,7 +4,7 @@ Defined in `src/Replay/ReplayFormat.h` and written by `src/Replay/ReplaySystem.c
 that drive it live in `src/Replay/ReplaySystem.Hook.cpp`. The CnCNet client mirrors the header by hand in
 `DXMainClient/Domain/ReplayGame.cs` — there is no compile-time link between the two, so **any
 change here must be made in both repos in the same change**. A size mismatch does not error; it
-silently misparses every field after the point of divergence.
+silently mis-parses every field after the point of divergence.
 
 `GetReplayFPSFromGameSpeed` is duplicated the same way, as `ReplayGame.GetFramesPerSecond`. The
 client uses it to turn `TotalFrames` into a displayed duration, so the two have to agree.
@@ -44,13 +44,13 @@ nothing until then.
 | Per-frame data | an `Extensions` block | stays |
 | Anything that changes the meaning or position of an existing field | — | bump |
 
-An **additive** change keeps `Version` at 1. Older readers skip what they do not recognise:
+An **additive** change keeps `Version` at 1. Older readers skip what they do not recognize:
 `Reserved` words they do not know, header bytes past their own `sizeof`, and the length-prefixed
 extension block. They keep playing the file.
 
-An **incompatible** change bumps `REPLAY_VERSION`. Old readers then refuse the file, which is the
-point of doing it. Leave `MIN_SUPPORTED_REPLAY_VERSION` where it is: a reader accepts the range
-`MIN_SUPPORTED_REPLAY_VERSION`..`REPLAY_VERSION`, and that is what keeps every replay recorded
+An **incompatible** change bumps `ReplayVersion`. Old readers then refuse the file, which is the
+point of doing it. Leave `MinSupportedReplayVersion` where it is: a reader accepts the range
+`MinSupportedReplayVersion`..`ReplayVersion`, and that is what keeps every replay recorded
 before the break readable afterwards.
 
 The first twelve bytes - `Magic`, `Version`, `HeaderSize` - are the only part of the file whose
@@ -66,7 +66,7 @@ the two questions are answered separately and independently.
 
 | Offset | Size | Field | Notes |
 |---:|---:|---|---|
-| 0 | 4 | `Magic` | `0x4A455259` |
+| 0 | 4 | `Magic` | `0x50525259` (`YRRP` in file order) |
 | 4 | 4 | `Version` | `1` |
 | 8 | 4 | `HeaderSize` | bytes from the start of the file to the embedded spawn.ini; what readers seek by |
 | 12 | 260 | `MapName` | `spawnmap.ini [Basic] Name`, else spawn.ini `UIMapName`, else `ScenarioClass::FileName` |
@@ -114,20 +114,21 @@ version says so rather than being folded into a generic read error.
 `ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1452`, `sizeof(FrameRecordHeader) == 12`
 and `sizeof(SideChannelRecord) == 329`, **and** the individual `offsetof` of every header field the
 client hardcodes. Size alone does not pin a layout: swapping two fields of the same width, or
-shortening one array while lengthening another, leaves `sizeof` untouched and misparses everything
+shortening one array while lengthening another, leaves `sizeof` untouched and mis-parses everything
 from the point of divergence onward. The per-field asserts are what catch that. None of them can
 see `ReplayGame.cs` - the messages point at it, but keeping the two in step is still manual.
 
 ## Compression
 
 The frame records are a single raw deflate stream (RFC 1951, no zlib wrapper), produced by
-upstream miniz 3.0.2, vendored byte-identical in `src/Replay/miniz.{c,h}` and configured through the
+upstream miniz 3.0.2, vendored byte-identical in `src/Vendor/miniz/` and configured through the
 `MINIZ_NO_*` defines on its `ClCompile` entry in `Spawner.vcxproj` (deflate and inflate only). It is
 driven by `Replay::DeflateWriter` / `Replay::InflateReader` in `src/Replay/ReplayStream.{h,cpp}`.
+See `src/Vendor/miniz/README.md` for provenance and how to verify it.
 
 A truncated stream is detected by clearing `TINFL_FLAG_HAS_MORE_INPUT` once the file runs out and
 treating the resulting `TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS` as end of data. Do not reinstate
-the pre-1.16 behaviour of leaving the flag set: older miniz zero-padded the input and decoded
+the pre-1.16 behavior of leaving the flag set: older miniz zero-padded the input and decoded
 plausible-looking garbage past the end of a cut-short recording.
 
 The stream is sync-flushed every 60 recorded frames. A sync flush ends the current deflate block
@@ -136,10 +137,8 @@ keeps a recording a crash cut short usable: the reader inflates up to the last b
 the disk and then reports a short stream. At most one second of play is lost, and the header's
 `CleanShutdown` flag stays clear, which is how a reader knows the recording is incomplete.
 
-Independent per-block compression was measured against this and is strictly worse - to bound the
-loss to the same one second it would need 16 KB blocks, which compress to 9.3x against the single
-stream's 10.1x. On a 3.7 MB, 8.5 minute recording the stream costs about 2.6 us per frame to
-compress and the whole file inflates in ~5 ms.
+Independent per-block compression bounded to the same one second of loss needs 16 KB blocks, which
+compress about 8% worse than the single stream because each block restarts the dictionary.
 
 `TotalFrames` and `Flags` are stamped together by `StopReplaySystem()`, which seeks back to
 `offsetof(ReplayHeader, TotalFrames)` just before the file is closed. A game that crashes or is killed never reaches that, so both
@@ -309,7 +308,7 @@ shipping the *skip* now, ahead of any use, is what buys the freedom later.
 
 Adding a per-frame block that is *not* carried inside the extension block is an incompatible
 change. It would have to take a lower flag bit to stay in flag order, and no reader in the field
-could step over it, so it means bumping `REPLAY_VERSION`.
+could step over it, so it means bumping `ReplayVersion`.
 
 Every simulated frame carries a record, because every frame records a hash. Frame numbers are
 still only guaranteed monotonic rather than contiguous: a reader must not assume it can index them.
@@ -424,7 +423,7 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | Key | Default | Meaning |
 |---|---|---|
 | `EnableReplayRecording` | `false` | Record this game. |
-| `ReplayFileOut` | `replay.dat` | Where the recording is written. Relative to the game directory; missing directories are created. |
+| `ReplayFileOut` | `replay.yrrp` | Where the recording is written. Relative to the game directory; missing directories are created. |
 | `ReplayFile` | *(empty)* | Non-empty switches the session to playback of that file. |
 | `ReplayShroudEnabled` | `false` | Keep the recording player's shroud instead of revealing the map. |
 | `ReplayLockedViewport` | `true` | Pin the camera to the recorded position. |
@@ -467,6 +466,23 @@ ReplaySpeedDown=189     ; VK_OEM_MINUS, the '-' key
 They ship unbound on purpose. `Init_Commands` runs once per process rather than once per session, so
 a default would apply to normal games too, and every plausible key is already spoken for by vanilla
 (`0` is `TeamSelect_10`).
+
+The hook sits at the same address Phobos registers its own commands from, so the two agree on where
+in `CommandClass::Array` third-party commands land.
+
+Their names and descriptions come from the string table, each with an English fallback, so a client
+package can translate them by adding these labels to its CSF. Without them the fallbacks are used
+and nothing breaks:
+
+| Label | Fallback |
+|---|---|
+| `TXT_REPLAY_CATEGORY` | Replay |
+| `TXT_REPLAY_PAUSE` | Replay: Pause/Resume |
+| `TXT_REPLAY_PAUSE_DESC` | Freezes replay playback. The map can still be scrolled while paused. |
+| `TXT_REPLAY_SPEED_UP` | Replay: Speed Up |
+| `TXT_REPLAY_SPEED_UP_DESC` | Plays the replay back faster, past the speed a live game allows. |
+| `TXT_REPLAY_SLOW_DOWN` | Replay: Slow Down |
+| `TXT_REPLAY_SLOW_DOWN_DESC` | Plays the replay back slower. |
 
 ### Speed
 

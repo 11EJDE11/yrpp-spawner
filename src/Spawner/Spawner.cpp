@@ -89,6 +89,7 @@ bool Spawner::StartGame()
 
 	bool result = StartScenario(pScenarioName);
 
+	// After the scenario exists, so there is a house to make an observer of
 	if (result)
 		ReplaySystem::ApplyPlaybackSpectator();
 
@@ -448,6 +449,8 @@ void Spawner::InitNetwork()
 		Game::Network::FrameSendRate = isReplayPlayback ? 1 : pSpawnerConfig->FrameSendRate;
 	}
 
+	// Playback has no peers to stay ahead of, and every frame's events come out of the file on the
+	// frame they were recorded on, so send rate and MaxAhead are both pinned to 1
 	if (isReplayPlayback)
 		Game::Network::MaxAhead = 1;
 	else if (pSpawnerConfig->MaxAhead == -1)

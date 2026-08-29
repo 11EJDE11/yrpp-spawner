@@ -31,9 +31,8 @@
 
 bool __forceinline IsStatisticsEnabled()
 {
-	// Never while a replay is playing back. Every statistics gate in this file routes through here,
-	// including the stats.dmp writer below - without this, replaying a game to its win/lose screen
-	// overwrites the real stats.dmp with the recorded game's results.
+	// Never while a replay is playing back: watching a game to its win/lose screen would otherwise
+	// overwrite the real stats.dmp with the recorded game's results.
 	return Spawner::Active
 		&& Spawner::GetConfig()->WriteStatistics
 		&& !SessionClass::IsCampaign()
@@ -246,10 +245,7 @@ DEFINE_HOOK(0x64827D, QueueAIMultiplayer_SendStatistics_3, 0x6)
 
 DEFINE_HOOK(0x648089, QueueAIMultiplayer_SendStatistics_4, 0x5)
 {
-	enum { Send = 0x64808E, DontSend = 0x648093, SkipStatistics = 0x64820E };
-
-	if (ReplaySystem::IsPlaybackActive())
-		return SkipStatistics;
+	enum { Send = 0x64808E, DontSend = 0x648093 };
 
 	return IsStatisticsEnabled() || (SessionClass::Instance.GameMode == GameMode::Internet)
 		? Send

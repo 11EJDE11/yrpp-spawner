@@ -19,51 +19,49 @@
 
 #pragma once
 
-// The viewer-side controls for replay playback: pause, and a playback speed allowed to run past the
+// Viewer-side controls for replay playback: pause, and a playback speed allowed to run past the
 // 60 FPS ceiling the in-game speed slider tops out at. Both are plain CommandClass commands, bound
-// from the in-game keyboard options like any other, and neither is part of the replay file format.
+// from the in-game keyboard options like any other. Neither is part of the replay file format.
+
+#include <iterator>
 
 namespace ReplaySystem
 {
+	namespace Controls
+	{
+		// Playback speed ladder, in frames per second. The first seven rungs are the rates the
+		// game-speed slider produces, so the options dialog and these hotkeys agree where they
+		// overlap; the rest exist only for playback, which is not pacing itself against other
+		// players. The engine paces a frame in whole milliseconds, so above 240 FPS only rungs
+		// that land on a different millisecond mean anything, and 2000 divides to no wait at all.
+		constexpr int SpeedLadder[] = { 10, 12, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 500, 1000, 2000 };
+		constexpr int SpeedLadderCount = static_cast<int>(std::size(SpeedLadder));
 
-namespace Controls
-{
+		// True while playback is frozen. The main loop still renders, scrolls and takes input;
+		// only the simulation is held.
+		bool IsPlaybackPaused();
 
-// Playback speed ladder, in frames per second. The first seven rungs are the rates the engine's own
-// game-speed slider produces, so the options dialog and these hotkeys agree where they overlap; the
-// rest exist only for playback, which is not pacing itself against other players.
-//
-// The top of the ladder is spaced by what the engine can tell apart: it paces a frame in whole
-// milliseconds, so above 240 FPS only rungs that land on a different millisecond mean anything, and
-// 2000 divides to no wait at all - as fast as the machine can simulate and draw.
-constexpr int SPEED_LADDER[] = { 10, 12, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 500, 1000, 2000 };
-constexpr int SPEED_LADDER_COUNT = static_cast<int>(sizeof(SPEED_LADDER) / sizeof(SPEED_LADDER[0]));
+		// Toggles the freeze. Does nothing outside playback.
+		void TogglePlaybackPause();
 
-// True while playback is frozen. The main loop still renders, scrolls and takes input; only the
-// simulation is held.
-bool IsPlaybackPaused();
+		// Walks the ladder by one rung: +1 faster, -1 slower. Does nothing outside playback.
+		void StepPlaybackSpeed(int direction);
 
-// Toggles the freeze. Does nothing outside playback.
-void TogglePlaybackPause();
+		// Commits and draws whatever the viewer scrolled to during a paused frame, in place of the
+		// per-frame work that would normally do it.
+		void RenderPausedFrame();
 
-// Walks the ladder by one rung: +1 faster, -1 slower. Does nothing outside playback.
-void StepPlaybackSpeed(int direction);
+		// The game-speed index (0 fastest .. 6 slowest) the options dialog should show and compare
+		// against for the current playback speed. Speeds past 60 FPS have no slider position of
+		// their own and report as 0, the fastest one the slider has.
+		int GetPlaybackGameSpeedIndex();
 
-// Commits and draws whatever the viewer scrolled to during a paused frame. Called at the end of a
-// paused iteration, in place of the per-frame work that would normally do it.
-void RenderPausedFrame();
+		// Applies a game-speed index chosen from the options dialog or replayed from a GameSpeed
+		// event.
+		void SetPlaybackGameSpeedIndex(int gameSpeedIndex);
 
-// The game-speed index (0 fastest .. 6 slowest) the options dialog should show and compare against
-// for the current playback speed. Speeds past 60 FPS have no slider position of their own and
-// report as 0, the fastest one the slider has.
-int GetPlaybackGameSpeedIndex();
-
-// Applies a game-speed index chosen from the options dialog or replayed from a GameSpeed event.
-void SetPlaybackGameSpeedIndex(int gameSpeedIndex);
-
-// Adds the replay commands to CommandClass::Array so the keyboard options dialog lists them.
-void RegisterReplayCommands();
-
-} // namespace Controls
-
-} // namespace ReplaySystem
+		// Adds the replay commands to CommandClass::Array so the keyboard options dialog lists
+		// them.
+		void RegisterReplayCommands();
+	}
+}

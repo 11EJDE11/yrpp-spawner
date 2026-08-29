@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup Label="Globals">
     <ProjectName>CnCNet-Spawner</ProjectName>
@@ -56,8 +56,8 @@
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.Hook.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayStream.cpp" />
-    <!-- Vendored third-party C, compiled as-is: deflate/inflate only, warnings off. -->
-    <ClCompile Include="$(ThisDir)\src\Replay\miniz.c">
+    <!-- Vendored -->
+    <ClCompile Include="$(ThisDir)\src\Vendor\miniz\miniz.c">
       <PreprocessorDefinitions>MINIZ_NO_STDIO;MINIZ_NO_TIME;MINIZ_NO_ARCHIVE_APIS;MINIZ_NO_ZLIB_APIS;MINIZ_NO_ZLIB_COMPATIBLE_NAMES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
@@ -99,7 +99,8 @@
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.Internal.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayStream.h" />
-    <ClInclude Include="$(ThisDir)\src\Replay\miniz.h" />
+    <!-- Vendored -->
+    <ClInclude Include="$(ThisDir)\src\Vendor\miniz\miniz.h" />
     <!-- Spawner -->
     <ClInclude Include="$(ThisDir)\src\Spawner\NetHack.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\ProtocolZero.h" />

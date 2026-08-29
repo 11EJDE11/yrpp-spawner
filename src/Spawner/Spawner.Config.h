@@ -106,22 +106,20 @@ public:
 
 	// Replay Options
 	bool EnableReplayRecording;
-	// Where a recording is written; relative to the game directory, missing folders are created.
-	// The client sets this per game so recordings do not overwrite each other.
+	// Where a recording is written, relative to the game directory. Missing folders are created.
 	char ReplayFileOut[MAX_PATH];
+	// The replay to watch. Empty means no playback.
 	char ReplayFile[MAX_PATH];
 	bool ReplayShroudEnabled;
 	bool ReplayLockedViewport;
 	bool ReplaySelectUnits;
-	// How fast to watch a replay, in frames per second - a rung of SPEED_LADDER in ReplayControls.h,
-	// which the client mirrors. Zero or less watches it at the speed it was recorded at. A rate rather
-	// than a GameSpeed index, which is how fast the recorded game ran and has to be reproduced exactly.
+	// How fast to watch a replay, in frames per second - a rung of SpeedLadder in ReplayControls.h.
+	// Zero or less watches it at the speed it was recorded at.
 	int  ReplayPlaybackSpeed;
-	// Watch as an observer: reveals the whole map and makes cloaked/disguised units and radar blips
-	// visible. Off by default, so playback stays from the recorded player's point of view.
+	// Watch as an observer: reveals the whole map and makes cloaked and disguised units and radar
+	// blips visible.
 	bool ReplaySpectator;
-	// Playback-only: whether recorded chat, beacons and taunts get reproduced. Recording them is
-	// unconditional - there is no record-side option.
+	// Playback only. Recording chat, beacons and taunts is unconditional.
 	bool ReplayShowChatAndBeacons;
 	// Which spawn.ini player slot playback is watched from: 0 or -1 is the recording player, N is
 	// [OtherN]. Only human slots are accepted; anything else falls back to the recording player.
@@ -205,7 +203,7 @@ public:
 		, AutoSaveInterval { 7200 }
 		, NextAutoSaveNumber { 0 }
 		, EnableReplayRecording { false }
-		, ReplayFileOut { "replay.dat" }
+		, ReplayFileOut { "replay.yrrp" }
 		, ReplayFile { "" }
 		, ReplayShroudEnabled { false }
 		, ReplayLockedViewport { true }

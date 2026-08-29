@@ -31,7 +31,8 @@ namespace ReplaySystem
 	void ApplyPlaybackViewPlayer();
 	void ApplyPlaybackSpectator();
 
-	// Recording taps for side-channel replay data. Safe to call when not recording.
+	// Recording taps for chat, beacons and taunts, which bypass EventClass::DoList. Safe to call
+	// when not recording.
 	void RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex);
 	void RecordTaunt(int tauntCommand);
 	void RecordBeaconPlace(int houseIndex, const CoordStruct& coord, int beaconSlot);

@@ -25,6 +25,7 @@
 #include <CommandClass.h>
 #include <MapClass.h>
 #include <MessageListClass.h>
+#include <StringTable.h>
 #include <TacticalClass.h>
 
 #include <algorithm>
@@ -35,185 +36,195 @@ using namespace ReplaySystem::Internal;
 
 namespace ReplaySystem
 {
-
-namespace Controls
-{
-
-namespace
-{
-
-constexpr int CONTROL_MESSAGE_DURATION_FRAMES = 90;
-
-bool CommandsRegistered = false;
-
-void PrintControlMessage(const wchar_t* pMessage)
-{
-	MessageListClass::Instance.PrintMessage(
-		pMessage,
-		CONTROL_MESSAGE_DURATION_FRAMES,
-		ColorScheme::White,
-		/* bSilent: */ true);
-}
-
-int GetRecordedFPS()
-{
-	if (!ReplayState.HasPlaybackHeader)
-		return GetReplayFPSFromGameSpeed(0);
-
-	return GetReplayFPSFromGameSpeed(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed));
-}
-
-// The rung the current speed sits on. A speed that is not exactly on the ladder - a hand written
-// ReplayPlaybackSpeed, or a GameSpeed event replayed out of the recording - snaps to the nearest
-// rung so that the next step still moves somewhere sensible.
-int FindNearestLadderIndex(int fps)
-{
-	int bestIndex = 0;
-	int bestDistance = std::abs(SPEED_LADDER[0] - fps);
-
-	for (int i = 1; i < SPEED_LADDER_COUNT; ++i)
+	namespace Controls
 	{
-		const int distance = std::abs(SPEED_LADDER[i] - fps);
-		if (distance < bestDistance)
+		namespace
 		{
-			bestDistance = distance;
-			bestIndex = i;
+			constexpr int ControlMessageDurationFrames = 90;
+
+			void PrintControlMessage(const wchar_t* pMessage)
+			{
+				MessageListClass::Instance.PrintMessage(
+					pMessage,
+					ControlMessageDurationFrames,
+					ColorScheme::White,
+					/* bSilent: */ true);
+			}
+
+			int GetRecordedFPS()
+			{
+				if (!ReplayState.HasPlaybackHeader)
+					return GetReplayFPSFromGameSpeed(0);
+
+				return GetReplayFPSFromGameSpeed(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed));
+			}
+
+			// The rung the current speed sits on. A speed that is not exactly on the ladder - a
+			// hand written ReplayPlaybackSpeed, or a GameSpeed event out of the recording - snaps
+			// to the nearest rung so the next step still moves somewhere sensible.
+			int FindNearestLadderIndex(int fps)
+			{
+				int bestIndex = 0;
+				int bestDistance = std::abs(SpeedLadder[0] - fps);
+
+				for (int i = 1; i < SpeedLadderCount; ++i)
+				{
+					const int distance = std::abs(SpeedLadder[i] - fps);
+					if (distance < bestDistance)
+					{
+						bestDistance = distance;
+						bestIndex = i;
+					}
+				}
+
+				return bestIndex;
+			}
+
+			void ReportPlaybackSpeed()
+			{
+				const int fps = ReplayState.PlaybackFPS;
+				const int recordedFPS = GetRecordedFPS();
+				const double multiplier = recordedFPS > 0 ? static_cast<double>(fps) / recordedFPS : 1.0;
+
+				wchar_t message[64];
+				swprintf_s(message, L"Replay speed: %.2fx (%d FPS)", multiplier, fps);
+				PrintControlMessage(message);
+			}
+
+			// None of these labels exist in the stock CSF, so every one carries an English
+			// fallback for clients that have not shipped a translation.
+			const wchar_t* ReplayCategory()
+			{
+				return StringTable::TryFetchString("TXT_REPLAY_CATEGORY", L"Replay");
+			}
+
+			class ReplayTogglePauseCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplayTogglePause"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_PAUSE", L"Replay: Pause/Resume"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_PAUSE_DESC",
+						L"Freezes replay playback. The map can still be scrolled while paused.");
+				}
+
+				virtual void Execute(WWKey) const override { TogglePlaybackPause(); }
+			};
+
+			class ReplaySpeedUpCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplaySpeedUp"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_SPEED_UP", L"Replay: Speed Up"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_SPEED_UP_DESC",
+						L"Plays the replay back faster, past the speed a live game allows.");
+				}
+
+				virtual void Execute(WWKey) const override { StepPlaybackSpeed(1); }
+			};
+
+			class ReplaySpeedDownCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplaySpeedDown"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_SLOW_DOWN", L"Replay: Slow Down"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_SLOW_DOWN_DESC",
+						L"Plays the replay back slower.");
+				}
+
+				virtual void Execute(WWKey) const override { StepPlaybackSpeed(-1); }
+			};
+
+			template <typename T>
+			T* MakeCommand()
+			{
+				T* pCommand = GameCreate<T>();
+				CommandClass::Array.AddItem(pCommand);
+				return pCommand;
+			}
+		}
+
+		bool IsPlaybackPaused()
+		{
+			return ReplayState.Playback && ReplayState.PlaybackPaused;
+		}
+
+		void TogglePlaybackPause()
+		{
+			if (!ReplayState.Playback)
+				return;
+
+			ReplayState.PlaybackPaused = !ReplayState.PlaybackPaused;
+			PrintControlMessage(ReplayState.PlaybackPaused ? L"Replay paused." : L"Replay resumed.");
+		}
+
+		void StepPlaybackSpeed(int direction)
+		{
+			if (!ReplayState.Playback || direction == 0)
+				return;
+
+			const int currentIndex = FindNearestLadderIndex(ReplayState.PlaybackFPS);
+			const int nextIndex = std::clamp(currentIndex + (direction > 0 ? 1 : -1), 0, SpeedLadderCount - 1);
+
+			// Reported either way: the ladder may have run out, or an off-ladder speed may have
+			// snapped onto the rung it was nearest to without moving.
+			ReplayState.PlaybackFPS = SpeedLadder[nextIndex];
+			ReportPlaybackSpeed();
+		}
+
+		void RenderPausedFrame()
+		{
+			if (!TacticalClass::Instance)
+				return;
+
+			TacticalClass::Instance->AI();
+			MapClass::Instance.Render();
+		}
+
+		int GetPlaybackGameSpeedIndex()
+		{
+			// The slider counts the other way round from the ladder and stops at 60 FPS. Anything
+			// faster reports as its fastest position, so opening the dialog and leaving it alone
+			// cannot slow playback back down.
+			for (int gameSpeedIndex = 0; gameSpeedIndex <= MaxGameSpeedIndex; ++gameSpeedIndex)
+			{
+				if (GetReplayFPSFromGameSpeed(gameSpeedIndex) <= ReplayState.PlaybackFPS)
+					return gameSpeedIndex;
+			}
+
+			return MaxGameSpeedIndex;
+		}
+
+		void SetPlaybackGameSpeedIndex(int gameSpeedIndex)
+		{
+			ReplayState.PlaybackFPS = GetReplayFPSFromGameSpeed(std::clamp(gameSpeedIndex, 0, MaxGameSpeedIndex));
+		}
+
+		void RegisterReplayCommands()
+		{
+			MakeCommand<ReplayTogglePauseCommandClass>();
+			MakeCommand<ReplaySpeedUpCommandClass>();
+			MakeCommand<ReplaySpeedDownCommandClass>();
 		}
 	}
-
-	return bestIndex;
 }
-
-void ReportPlaybackSpeed()
-{
-	const int fps = ReplayState.PlaybackFPS;
-	const int recordedFPS = GetRecordedFPS();
-	const double multiplier = recordedFPS > 0 ? static_cast<double>(fps) / recordedFPS : 1.0;
-
-	wchar_t message[64];
-	swprintf_s(message, L"Replay speed: %.2fx (%d FPS)", multiplier, fps);
-	PrintControlMessage(message);
-}
-
-class ReplayTogglePauseCommandClass : public CommandClass
-{
-public:
-	const char* GetName() const override { return "ReplayTogglePause"; }
-	const wchar_t* GetUIName() const override { return L"Replay: Pause/Resume"; }
-	const wchar_t* GetUICategory() const override { return L"Replay"; }
-	const wchar_t* GetUIDescription() const override
-		{ return L"Freezes replay playback. The map can still be scrolled while paused."; }
-
-	void Execute(WWKey) const override { TogglePlaybackPause(); }
-};
-
-class ReplaySpeedUpCommandClass : public CommandClass
-{
-public:
-	const char* GetName() const override { return "ReplaySpeedUp"; }
-	const wchar_t* GetUIName() const override { return L"Replay: Speed Up"; }
-	const wchar_t* GetUICategory() const override { return L"Replay"; }
-	const wchar_t* GetUIDescription() const override
-		{ return L"Plays the replay back faster, past the speed a live game allows."; }
-
-	void Execute(WWKey) const override { StepPlaybackSpeed(1); }
-};
-
-class ReplaySpeedDownCommandClass : public CommandClass
-{
-public:
-	const char* GetName() const override { return "ReplaySpeedDown"; }
-	const wchar_t* GetUIName() const override { return L"Replay: Slow Down"; }
-	const wchar_t* GetUICategory() const override { return L"Replay"; }
-	const wchar_t* GetUIDescription() const override
-		{ return L"Plays the replay back slower."; }
-
-	void Execute(WWKey) const override { StepPlaybackSpeed(-1); }
-};
-
-template <typename T>
-void MakeCommand()
-{
-	CommandClass::Array.AddItem(GameCreate<T>());
-}
-
-} // namespace
-
-bool IsPlaybackPaused()
-{
-	return ReplayState.Playback && ReplayState.PlaybackPaused;
-}
-
-void TogglePlaybackPause()
-{
-	if (!ReplayState.Playback)
-		return;
-
-	ReplayState.PlaybackPaused = !ReplayState.PlaybackPaused;
-	PrintControlMessage(ReplayState.PlaybackPaused ? L"Replay paused." : L"Replay resumed.");
-}
-
-void StepPlaybackSpeed(int direction)
-{
-	if (!ReplayState.Playback || direction == 0)
-		return;
-
-	const int currentIndex = FindNearestLadderIndex(ReplayState.PlaybackFPS);
-	const int nextIndex = std::clamp(currentIndex + (direction > 0 ? 1 : -1), 0, SPEED_LADDER_COUNT - 1);
-	const int nextFPS = SPEED_LADDER[nextIndex];
-
-	// Either the ladder ran out, or the speed was off-ladder and snapped onto the rung it was
-	// nearest to. Either way there is nothing to apply, but still say where playback ended up.
-	if (nextFPS != ReplayState.PlaybackFPS)
-	{
-		ReplayState.PlaybackFPS = nextFPS;
-	}
-
-	ReportPlaybackSpeed();
-}
-
-void RenderPausedFrame()
-{
-	if (!TacticalClass::Instance)
-		return;
-
-	TacticalClass::Instance->AI();
-
-	MapClass::Instance.Render();
-}
-
-int GetPlaybackGameSpeedIndex()
-{
-	// The slider counts the other way round from the ladder and stops at 60 FPS. Anything faster
-	// reports as its fastest position, so that opening the dialog and leaving it alone cannot slow
-	// playback back down.
-	for (int gameSpeedIndex = 0; gameSpeedIndex <= MAX_GAME_SPEED_INDEX; ++gameSpeedIndex)
-	{
-		if (GetReplayFPSFromGameSpeed(gameSpeedIndex) <= ReplayState.PlaybackFPS)
-			return gameSpeedIndex;
-	}
-
-	return MAX_GAME_SPEED_INDEX;
-}
-
-void SetPlaybackGameSpeedIndex(int gameSpeedIndex)
-{
-	ReplayState.PlaybackFPS = GetReplayFPSFromGameSpeed(std::clamp(gameSpeedIndex, 0, MAX_GAME_SPEED_INDEX));
-}
-
-void RegisterReplayCommands()
-{
-	// Init_Commands runs once per process, but the hook this is called from sits at an address the
-	// engine reaches once per command it creates - guard rather than rely on that staying true.
-	if (CommandsRegistered)
-		return;
-
-	CommandsRegistered = true;
-	MakeCommand<ReplayTogglePauseCommandClass>();
-	MakeCommand<ReplaySpeedUpCommandClass>();
-	MakeCommand<ReplaySpeedDownCommandClass>();
-}
-
-} // namespace Controls
-
-} // namespace ReplaySystem

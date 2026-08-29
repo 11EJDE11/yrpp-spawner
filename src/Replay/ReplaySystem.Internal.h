@@ -19,9 +19,8 @@
 
 #pragma once
 
-// Runtime state and the internal entry points the replay hooks drive. Split out of
-// ReplaySystem.cpp so that ReplaySystem.Hook.cpp can reach them; nothing outside src/Replay should
-// include this. The public surface is ReplaySystem.h.
+// Runtime state and the entry points the replay hooks drive. Only src/Replay includes this; the
+// public surface is ReplaySystem.h.
 
 #include "ReplayFormat.h"
 #include "ReplayStream.h"
@@ -36,190 +35,188 @@
 
 namespace ReplaySystem
 {
+	namespace Internal
+	{
+		using namespace Replay;
 
-namespace Internal
-{
+		// How often the compressed stream is given a decodable point. A recording cut short by a
+		// crash loses at most this many frames.
+		constexpr int SyncFlushFrameInterval = 60;
+		// Forced disk commits stall the game thread, so they run on a byte count rather than the
+		// frame cadence above.
+		constexpr uint64_t DiskFlushIntervalBytes = 50ull * 1024 * 1024;
+		constexpr const char* DefaultRecordingPath = "replay.yrrp";
 
-using namespace Replay;
+		struct PlaybackFrameRecord
+		{
+			int32_t FrameNumber = 0;
+			int32_t EventCountThisFrame = 0;
+			uint32_t Flags = FrameRecordFlag_None;
+			Point2D TacticalPos = { 0, 0 };
+			int32_t SelectedObjectCount = 0;
+			std::vector<uint32_t> SelectedObjectIDs;
+			std::vector<SideChannelRecord> SideChannelEvents;
+			uint32_t GameCRC = 0;
+			FrameObjectCensus Census { 0, 0 };
+			int32_t GameSpeed = 0;
+			bool EndOfStream = false;
+		};
 
-// How often the compressed stream is given a decodable point. A recording cut short by a crash
-// loses at most this many frames - one second of play - and the cadence costs about 1% of ratio.
-constexpr int REPLAY_SYNC_FLUSH_FRAME_INTERVAL = 60;
-// Flush rarely; forced disk commits can stall the game thread.
-constexpr uint64_t REPLAY_FLUSH_INTERVAL_BYTES = 50ull * 1024 * 1024;
-constexpr const char* DEFAULT_RECORDING_PATH = "replay.dat";
+		// One frame's worth of visible state, captured in the main loop and written out once the
+		// queue hook knows how many events the frame carried.
+		struct PendingRecordedFrameCapture
+		{
+			int FrameNumber = 0;
+			Point2D TacticalPos { 0, 0 };
+			std::vector<uint32_t> SelectedObjectIDs;
+			// Filled in later than the rest of the capture: the engine has not computed the hash
+			// when this struct is created. See CaptureGameCRCForCurrentFrame.
+			uint32_t GameCRC = 0;
+			bool HasGameCRC = false;
+			FrameObjectCensus Census { 0, 0 };
+			bool HasCensus = false;
+			int32_t GameSpeed = 0;
+			bool HasGameSpeed = false;
+		};
 
-struct PlaybackFrameRecord
-{
-	int32_t FrameNumber = 0;
-	int32_t EventCountThisFrame = 0;
-	uint32_t Flags = FrameRecordFlag_None;
-	Point2D TacticalPos = { 0, 0 };
-	int32_t SelectedObjectCount = 0;
-	std::vector<uint32_t> SelectedObjectIDs;
-	std::vector<SideChannelRecord> SideChannelEvents;
-	uint32_t GameCRC = 0;
-	FrameObjectCensus Census { 0, 0 };
-	int32_t GameSpeed = 0;
-	bool EndOfStream = false;
-};
+		struct ReplayRuntimeState
+		{
+			bool Recording = false;
+			bool Playback = false;
+			bool InitRandomHandled = false;
+			// Latched once a campaign mission's recording has been closed out, and refuses every
+			// later StartReplayRecording for the rest of the game. Cleared once per game by
+			// ReplaySystem::OnGameStartReset, not by ResetRuntimeFlagsForScenario, which runs for
+			// every scenario including the suppressed ones. See FinishRecordingAtMissionEnd.
+			bool RecordingFinishedForSession = false;
+			// Set once the load-progress bar has been forced complete for this scenario instead of
+			// animating. See WaitForPlayers_SkipProgressAnimation.
+			bool ProgressBarForcedComplete = false;
 
-// One frame's worth of visible state, captured in the main loop and written out once
-// the active queue hook knows how many events the frame carried.
-struct PendingRecordedFrameCapture
-{
-	int FrameNumber = 0;
-	Point2D TacticalPos { 0, 0 };
-	std::vector<uint32_t> SelectedObjectIDs;
-	// Filled in later than the rest of the capture: the hash only exists once the engine has
-	// computed it, which happens after this struct is created. See CaptureGameCRCForCurrentFrame.
-	uint32_t GameCRC = 0;
-	bool HasGameCRC = false;
-	FrameObjectCensus Census { 0, 0 };
-	bool HasCensus = false;
-	int32_t GameSpeed = 0;
-	bool HasGameSpeed = false;
-};
+			bool ShroudEnabled = false;
+			bool LockViewport = true;
+			bool SelectUnits = true;
+			bool SpectatorView = false;
+			// Playback only; recording keeps this data unconditionally.
+			bool ShowChatAndBeacons = true;
 
-struct ReplayRuntimeState
-{
-	bool Recording = false;
-	bool Playback = false;
-	bool InitRandomHandled = false;
-	// Latched once a campaign mission's recording has been closed out, and refuses every later
-	// StartReplayRecording for the rest of the game - see FinishRecordingAtMissionEnd. Deliberately
-	// not cleared by ResetRuntimeFlagsForScenario, which runs for every scenario including the
-	// suppressed ones; ReplaySystem::OnGameStartReset clears it, once per game.
-	bool RecordingFinishedForSession = false;
-	// Set once the load-progress bar has been force-completed for this scenario (playback,
-	// skirmish, or campaign) instead of animating. See WaitForPlayers_SkipProgressAnimation.
-	bool ProgressBarForcedComplete = false;
+			// Playback pacing, as a target frame rate rather than a game-speed index: the ladder
+			// the viewer hotkeys walk runs past 60 FPS, which no game-speed index can express.
+			// 0 until playback starts. See ReplayControls.h.
+			int PlaybackFPS = 0;
+			// Performance-counter deadline for the next playback frame, in milliseconds. Zero
+			// means the pacing has not started yet, or needs resyncing to now.
+			double PlaybackNextFrameDue = 0.0;
+			// Set by the pause hotkey. While it is set the main loop still renders, scrolls and
+			// takes input, but LogicClass::AI, Queue_AI and the frame counter are all held.
+			bool PlaybackPaused = false;
 
-	bool ShroudEnabled = false;
-	bool LockViewport = true;
-	bool SelectUnits = true;
-	bool SpectatorView = false;
-	// Playback-only; recording keeps this data unconditionally.
-	bool ShowChatAndBeacons = true;
+			int ExpectedEventsThisFrame = 0;
+			uint64_t BytesAtLastDiskFlush = 0;
+			int LastSyncFlushFrame = 0;
 
-	// Playback pacing, as a target frame rate rather than a game-speed index: the ladder the
-	// viewer hotkeys walk runs past 60 FPS, which no game-speed index can express. 0 until
-	// playback starts. See Replay/ReplayControls.h.
-	int PlaybackFPS = 0;
-	// Performance-counter deadline for the next playback frame, in milliseconds. Zero means
-	// the pacing has not started yet, or needs resyncing to now.
-	double PlaybackNextFrameDue = 0.0;
-	// Set by the pause hotkey. While it is set the main loop still renders, scrolls and takes
-	// input, but LogicClass::AI, Queue_AI and the frame counter are all held.
-	bool PlaybackPaused = false;
+			// The recorded hash for the frame being played back, consumed once by the comparison
+			// and cleared again every frame, so a frame the recording has no record for is not
+			// checked rather than checked against a stale value.
+			uint32_t ExpectedGameCRC = 0;
+			bool HasExpectedGameCRC = false;
+			FrameObjectCensus ExpectedCensus { 0, 0 };
+			bool HasExpectedCensus = false;
+			bool CensusMismatchReported = false;
+			// The game speed as last written into the stream, so only changes are recorded. -1
+			// forces the first frame to establish the baseline.
+			int LastRecordedGameSpeed = -1;
+			bool DivergenceReported = false;
 
-	int ExpectedEventsThisFrame = 0;
-	uint64_t BytesAtLastDiskFlush = 0;
-	int LastSyncFlushFrame = 0;
+			// Divergence diagnostics, logged as a summary when playback ends.
+			int CheckedFrameCount = 0;
+			int MismatchedFrameCount = 0;
+			int LoggedMismatchCount = 0;
+			int LoggedRecoveryCount = 0;
+			int FirstMismatchFrame = -1;
+			int LastMismatchFrame = -1;
+			// Whether the previous checked frame mismatched, so a return to matching is reported.
+			bool LastCheckMismatched = false;
 
-	// Desync detection. The recorded hash for the frame being played back, consumed once by the
-	// comparison and cleared again every frame, so a frame the recording has no record for is
-	// simply not checked rather than checked against a stale value.
-	uint32_t ExpectedGameCRC = 0;
-	bool HasExpectedGameCRC = false;
-	FrameObjectCensus ExpectedCensus { 0, 0 };
-	bool HasExpectedCensus = false;
-	bool CensusMismatchReported = false;
-	// The game speed as last written into the stream, so only changes are recorded. -1 forces
-	// the first frame to establish the baseline.
-	int LastRecordedGameSpeed = -1;
-	bool DivergenceReported = false;
+			HANDLE ReplayFile = INVALID_HANDLE_VALUE;
+			// Only one of these is ever active: recording deflates, playback inflates.
+			Replay::DeflateWriter Writer;
+			Replay::InflateReader Reader;
 
-	// Divergence diagnostics, all logged as a summary when playback ends.
-	int CheckedFrameCount = 0;
-	int MismatchedFrameCount = 0;
-	int LoggedMismatchCount = 0;
-	int LoggedRecoveryCount = 0;
-	int FirstMismatchFrame = -1;
-	int LastMismatchFrame = -1;
-	// Whether the previous checked frame mismatched, so that a return to matching can be reported.
-	bool LastCheckMismatched = false;
+			char PlaybackPath[MAX_PATH] = { 0 };
+			std::deque<PendingRecordedFrameCapture> PendingFrameStates;
+			std::deque<SideChannelRecord> PendingSideChannelEvents;
+			int CapturedFrameEventsFrame = -1;
+			// This frame's events, appended by RecordExecutedEvent as Execute_DoList consumes
+			// each one.
+			std::vector<EventClass> CapturedFrameEvents;
+			ReplayHeader PlaybackHeader = {};
+			bool HasPlaybackHeader = false;
 
-	HANDLE ReplayFile = INVALID_HANDLE_VALUE;
-	// Only one of these is ever active: recording deflates, playback inflates.
-	Replay::DeflateWriter Writer;
-	Replay::InflateReader Reader;
+			bool HasPendingPlaybackFrame = false;
+			bool PlaybackStreamEnded = false;
 
-	char PlaybackPath[MAX_PATH] = { 0 };
-	std::deque<PendingRecordedFrameCapture> PendingFrameStates;
-	std::deque<SideChannelRecord> PendingSideChannelEvents;
-	int CapturedFrameEventsFrame = -1;
-	// This frame's events, appended by RecordExecutedEvent as Execute_DoList consumes each one.
-	std::vector<EventClass> CapturedFrameEvents;
-	ReplayHeader PlaybackHeader = {};
-	bool HasPlaybackHeader = false;
+			// Last recorded viewport position, re-applied between sparse frame records.
+			Point2D LockedViewportPos = { 0, 0 };
+			bool HasLockedViewportPos = false;
+			PlaybackFrameRecord PendingPlaybackFrame = {};
 
-	bool HasPendingPlaybackFrame = false;
-	bool PlaybackStreamEnded = false;
+			bool HasLastWrittenFrameState = false;
+			int32_t LastWrittenFrameNumber = 0;
+			Point2D LastRecordedTacticalPos = { 0, 0 };
+			std::vector<uint32_t> LastRecordedSelectionIDs;
 
-	// Last recorded viewport position, re-applied between sparse frame records.
-	Point2D LockedViewportPos = { 0, 0 };
-	bool HasLockedViewportPos = false;
-	PlaybackFrameRecord PendingPlaybackFrame = {};
+			// Scratch buffers reused every frame so recording does not allocate on the game thread.
+			std::vector<SideChannelRecord> SideChannelScratch;
+			std::vector<EventClass> PreservedEventsScratch;
+		};
 
-	bool HasLastWrittenFrameState = false;
-	int32_t LastWrittenFrameNumber = 0;
-	Point2D LastRecordedTacticalPos = { 0, 0 };
-	std::vector<uint32_t> LastRecordedSelectionIDs;
+		extern ReplayRuntimeState ReplayState;
 
-	// Scratch buffers reused every frame so recording does not allocate on the game thread.
-	std::vector<SideChannelRecord> SideChannelScratch;
-	std::vector<EventClass> PreservedEventsScratch;
-};
+		const SpawnerConfig* GetConfig();
 
-extern ReplayRuntimeState ReplayState;
+		// Why a replay could not be opened for playback. Failure is fatal and the message is the
+		// last thing the player sees, so a version mismatch says so on its own.
+		enum class ReplayOpenFailure
+		{
+			None,
+			// The file could not be opened, or ended inside the header.
+			Unreadable,
+			// No magic number: not a replay at all.
+			NotAReplay,
+			// A replay, from a layout generation this build does not know.
+			UnsupportedVersion,
+			// Right generation, but the header does not describe a file this shape.
+			Malformed
+		};
 
-const SpawnerConfig* GetConfig();
+		const char* DescribeReplayOpenFailure(ReplayOpenFailure failure);
 
-// Why a replay could not be opened for playback. Failure is fatal and the message is the last
-// thing the player sees, so a version mismatch - the likeliest cause - says so on its own.
-enum class ReplayOpenFailure
-{
-	None,
-	// The file could not be opened, or ended inside the header.
-	Unreadable,
-	// No magic number: not a replay at all.
-	NotAReplay,
-	// A replay, from a layout generation this build does not know.
-	UnsupportedVersion,
-	// Right generation, but the header does not describe a file this shape.
-	Malformed
-};
+		// Lifecycle.
+		void StartReplayRecording();
+		void StartReplayPlayback(const char* replayPath);
+		void StopReplaySystem();
+		void FinishRecordingAtMissionEnd();
+		void ApplyPlaybackInitialState();
+		bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader);
 
-const char* DescribeReplayOpenFailure(ReplayOpenFailure failure);
+		// Per-frame work, driven from the main loop and from the queue event hooks.
+		void RecordFrameState();
+		void RestoreFrameState();
+		void CaptureGameCRCForCurrentFrame();
+		FrameObjectCensus CurrentObjectCensus();
+		void CheckObjectCensusForCurrentFrame();
+		void ComputeAndCaptureGameCRCForCurrentFrame();
+		int GetPlaybackTargetFPS();
+		double PlaybackClockMilliseconds();
+		void ApplyPlaybackFramePacing();
+		void CaptureEventsForCurrentFrame();
+		void RecordExecutedEvent(const EventClass* pEvent);
+		void RecordCapturedEventsForCurrentFrame();
+		void RemoveReplayGameplayEventsFromDoList();
+		void PlaybackFrameEvents();
 
-// Lifecycle.
-void StartReplayRecording();
-void StartReplayPlayback(const char* replayPath);
-void StopReplaySystem();
-void FinishRecordingAtMissionEnd();
-void ApplyPlaybackInitialState();
-bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader);
-
-// Per-frame work, driven from the main loop and from the active queue event hook.
-void RecordFrameState();
-void RestoreFrameState();
-void CaptureGameCRCForCurrentFrame();
-FrameObjectCensus CurrentObjectCensus();
-void CheckObjectCensusForCurrentFrame();
-void ComputeAndCaptureGameCRCForCurrentFrame();
-int GetPlaybackTargetFPS();
-double PlaybackClockMilliseconds();
-void ApplyPlaybackFramePacing();
-void CaptureEventsForCurrentFrame();
-void RecordExecutedEvent(const EventClass* pEvent);
-void RecordCapturedEventsForCurrentFrame();
-void RemoveReplayGameplayEventsFromDoList();
-void PlaybackFrameEvents();
-
-// True while playback is showing the whole map rather than the recording player's shroud.
-bool PlaybackWantsFullMapReveal();
-
-} // namespace Internal
-
-} // namespace ReplaySystem
+		// True while playback shows the whole map rather than the recording player's shroud.
+		bool PlaybackWantsFullMapReveal();
+	}
+}

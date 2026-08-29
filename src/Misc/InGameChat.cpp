@@ -144,8 +144,8 @@ DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 	HouseClass* pRecordHouse = (houseIndex < 8 && HouseClass::Array.ValidIndex(houseIndex))
 		? HouseClass::Array.GetItem(houseIndex) : nullptr;
 
-	// Recorded unconditionally (regardless of DisableChat/ChatMask below) - a replay should
-	// reflect what was actually sent, not this client's local display filters.
+	// Recorded ahead of the DisableChat and ChatMask filters below, so a replay holds what was
+	// sent rather than what this client chose to display
 	if (pRecordHouse)
 	{
 		ReplaySystem::RecordChatMessage(houseIndex, pRecordHouse->UIName,
@@ -196,8 +196,8 @@ DEFINE_HOOK(0x55F0A8, MessageInput_Print, 0x5)
 	if (!Spawner::Enabled)
 		return 0;
 
-	HouseClass* pHouse = HouseClass::CurrentPlayer;
-	if (pHouse)
+	// The local player's own message, which never comes back round through NetworkCallBack
+	if (HouseClass* pHouse = HouseClass::CurrentPlayer)
 	{
 		ReplaySystem::RecordChatMessage(pHouse->ArrayIndex, GlobalPacket_NetMessage::Instance.PlayerName,
 			GlobalPacket_NetMessage::Instance.Message, pHouse->ColorSchemeIndex);

@@ -20,7 +20,7 @@
 #pragma once
 
 // Raw deflate (RFC 1951) streaming over a Win32 file handle, used for the replay frame stream.
-// Deliberately free of any game or YRpp dependency so it can be exercised on its own.
+// No game or YRpp dependency.
 
 #include <windows.h>
 
@@ -31,86 +31,85 @@
 
 namespace Replay
 {
+	// Recording. One deflate stream punctuated by sync flushes, so a crash mid-recording loses
+	// only what was written since the last one.
+	class DeflateWriter
+	{
+	public:
+		DeflateWriter() = default;
+		~DeflateWriter();
 
-// Recording. A single deflate stream punctuated by sync flushes, so a crash mid-recording loses
-// only what was recorded since the last one. Independent blocks would cost more and compress worse
-// for the same exposure, since each one restarts the dictionary.
-class DeflateWriter
-{
-public:
-	DeflateWriter() = default;
-	~DeflateWriter();
+		DeflateWriter(const DeflateWriter&) = delete;
+		DeflateWriter& operator=(const DeflateWriter&) = delete;
 
-	DeflateWriter(const DeflateWriter&) = delete;
-	DeflateWriter& operator=(const DeflateWriter&) = delete;
+		// Begins a stream at the handle's current position. The handle stays owned by the caller.
+		bool Start(HANDLE file);
 
-	// Begins a stream at the handle's current position. The handle stays owned by the caller.
-	bool Start(HANDLE file);
+		bool IsActive() const { return this->Compressor != nullptr; }
 
-	bool IsActive() const { return this->Compressor != nullptr; }
+		bool Write(const void* data, size_t size);
 
-	bool Write(const void* data, size_t size);
+		// Ends the current deflate block. Everything written so far is on disk afterwards.
+		bool SyncFlush();
 
-	// Emits a decodable point. Everything written so far is on disk afterwards.
-	bool SyncFlush();
+		// Terminates the stream. Must be called before seeking the handle elsewhere.
+		bool Finish();
 
-	// Terminates the stream. Must be called before seeking the handle elsewhere.
-	bool Finish();
+		void Reset();
 
-	void Reset();
+		uint64_t CompressedBytesWritten() const { return this->BytesWritten; }
 
-	uint64_t CompressedBytesWritten() const { return this->BytesWritten; }
+	private:
+		bool Pump(const void* data, size_t size, int flush);
+		bool WriteAll(const void* data, size_t size);
 
-private:
-	bool Pump(const void* data, size_t size, int flush);
-	bool WriteAll(const void* data, size_t size);
+		struct CompressorDeleter { void operator()(void* p) const; };
 
-	struct CompressorDeleter { void operator()(void* p) const; };
+		std::unique_ptr<void, CompressorDeleter> Compressor;
+		std::vector<uint8_t> OutputBuffer;
+		HANDLE File = INVALID_HANDLE_VALUE;
+		uint64_t BytesWritten = 0;
+		bool Failed = false;
+	};
 
-	std::unique_ptr<void, CompressorDeleter> Compressor;
-	std::vector<uint8_t> OutputBuffer;
-	HANDLE File = INVALID_HANDLE_VALUE;
-	uint64_t BytesWritten = 0;
-	bool Failed = false;
-};
+	// Playback. Reads are served out of a 32 KiB dictionary window, refilled from the file on
+	// demand.
+	class InflateReader
+	{
+	public:
+		InflateReader() = default;
+		~InflateReader();
 
-// Playback. Reads are served from a 32 KiB dictionary window, refilled from the file on demand.
-class InflateReader
-{
-public:
-	InflateReader() = default;
-	~InflateReader();
+		InflateReader(const InflateReader&) = delete;
+		InflateReader& operator=(const InflateReader&) = delete;
 
-	InflateReader(const InflateReader&) = delete;
-	InflateReader& operator=(const InflateReader&) = delete;
+		// Begins reading a stream at the handle's current position. The handle stays owned by the
+		// caller.
+		bool Start(HANDLE file);
 
-	// Begins reading a stream at the handle's current position. The handle stays owned by the caller.
-	bool Start(HANDLE file);
+		bool IsActive() const { return this->Decompressor != nullptr; }
 
-	bool IsActive() const { return this->Decompressor != nullptr; }
+		// False when the stream ends, is truncated - the usual shape of a crashed recording - or
+		// is corrupt. Callers cannot tell those apart and do not need to: all three stop playback.
+		bool Read(void* buffer, size_t size);
 
-	// False when the stream ends, is truncated (the usual shape of a crashed recording) or is
-	// corrupt. Callers cannot tell those apart and do not need to: all three mean playback stops.
-	bool Read(void* buffer, size_t size);
+		void Reset();
 
-	void Reset();
+	private:
+		bool Refill();
 
-private:
-	bool Refill();
+		struct DecompressorDeleter { void operator()(void* p) const; };
 
-	struct DecompressorDeleter { void operator()(void* p) const; };
-
-	std::unique_ptr<void, DecompressorDeleter> Decompressor;
-	std::vector<uint8_t> Window;      // TINFL_LZ_DICT_SIZE, used as a ring buffer
-	std::vector<uint8_t> InputBuffer;
-	HANDLE File = INVALID_HANDLE_VALUE;
-	size_t WindowWritePos = 0;        // where the next decompressed bytes land
-	size_t WindowReadPos = 0;         // start of the bytes not yet handed out
-	size_t WindowAvailable = 0;       // bytes not yet handed out
-	size_t InputPos = 0;
-	size_t InputAvailable = 0;
-	bool InputExhausted = false;
-	bool Finished = false;
-};
-
-} // namespace Replay
+		std::unique_ptr<void, DecompressorDeleter> Decompressor;
+		std::vector<uint8_t> Window;      // TINFL_LZ_DICT_SIZE, used as a ring buffer
+		std::vector<uint8_t> InputBuffer;
+		HANDLE File = INVALID_HANDLE_VALUE;
+		size_t WindowWritePos = 0;        // where the next decompressed bytes land
+		size_t WindowReadPos = 0;         // start of the bytes not yet handed out
+		size_t WindowAvailable = 0;       // bytes not yet handed out
+		size_t InputPos = 0;
+		size_t InputAvailable = 0;
+		bool InputExhausted = false;
+		bool Finished = false;
+	};
+}

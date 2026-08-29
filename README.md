@@ -33,7 +33,7 @@ Please note that you can build the hardened version only if you have access to i
   - Fake multiplayer flag
 - **[EJ](https://github.com/11EJDE11)**
   - Whole lot of desync fixes
-  - Event verification checks
+  - Replay recording and playback
 - **[ZivDero](https://github.com/ZivDero)**
   - Handicaps (difficulty & credits) support
 - **[Starkku](https://github.com/Starkku)**

@@ -145,6 +145,7 @@ DEFINE_HOOK(0x642BC3, ProgressScreenClass__GetPlayerColorSchemes, 0x5)
 		: NotAllowObserver;
 }
 
+// Enable observer sidebar in skirmish, and when a campaign replay is watched as a spectator
 DEFINE_HOOK(0x6A557A, SidebarClass__InitIO, 0x5)
 {
 	enum { AllowObserver = 0x6A558D, NotAllowObserver = 0x6A5830 };
@@ -162,6 +163,8 @@ bool inline ShowHouseOnObserverSidebar(HouseClass* pHouse)
 	if (pHouse->Type->MultiplayPassive)
 		return false;
 
+	// A campaign has no human house but the recording player's, so a spectated campaign replay
+	// would otherwise show an empty sidebar
 	const bool bShowAI = (Spawner::Enabled && Spawner::GetConfig()->Observer_ShowAIOnSidebar)
 		|| (SessionClass::IsCampaign() && ReplaySystem::IsSpectatorPlayback());
 
