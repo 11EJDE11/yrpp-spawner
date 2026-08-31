@@ -92,8 +92,10 @@ DEFINE_HOOK(0x4E20BA, GameControlsClass__SomeDialog, 0x5)
 
 DEFINE_HOOK(0x5533E0, LoadProgressMgr__Draw_SetBackground, 0x5)
 {
+	enum { UseObserverScreen = 0x5533FD };
+
 	return Game::ObserverMode
-		? 0x5533EF
+		? UseObserverScreen
 		: 0;
 }
 

@@ -31,7 +31,6 @@
 #include <EventClass.h>
 #include <HouseClass.h>
 #include <ObjectClass.h>
-#include <ProgressScreenClass.h>
 #include <ScenarioClass.h>
 #include <SessionClass.h>
 #include <TActionClass.h>
@@ -485,20 +484,6 @@ DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 	return 0;
 }
 
-// SessionClass::Callback, the progress callback used throughout scenario loading. With no network
-// peer to pace it the bar animates 0->100 over the whole load, so playback forces it complete.
-// Playback only - forcing it stops the loading screen repainting, which a normal load needs.
-DEFINE_HOOK(0x69AE90, WaitForPlayers_SkipProgressAnimation, 0x5)
-{
-	if (ReplayState.Playback && !ReplayState.ProgressBarForcedComplete)
-	{
-		ReplayState.ProgressBarForcedComplete = true;
-		for (int i = 0; i < static_cast<int>(std::size(ProgressScreenClass::Instance.PlayerProgresses)); ++i)
-			ProgressScreenClass::Instance.PlayerProgresses[i] = 100;
-	}
-
-	return 0;
-}
 
 // The same function's end-of-load handshake, which broadcasts to the other players and then waits
 // about four seconds for a send queue playback will never drain. Take the branch the engine already

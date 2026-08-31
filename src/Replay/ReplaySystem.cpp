@@ -877,7 +877,6 @@ namespace ReplaySystem
 			ReplayState.FirstMismatchFrame = -1;
 			ReplayState.LastMismatchFrame = -1;
 			ReplayState.LastCheckMismatched = false;
-			ReplayState.ProgressBarForcedComplete = false;
 			ReplayState.PendingFrameStates.clear();
 			ReplayState.PendingSideChannelEvents.clear();
 			ReplayState.CapturedFrameEventsFrame = -1;
@@ -1574,13 +1573,23 @@ namespace ReplaySystem
 			}
 		}
 
+		int GetChatMessageDurationFrames()
+		{
+			constexpr int TicksPerMinute = 900;
+			constexpr double DefaultMessageDelay = 0.6; // Rules' own default, if Rules is not loaded.
+
+			const double messageDelay = RulesClass::Instance
+				? RulesClass::Instance->MessageDelay
+				: DefaultMessageDelay;
+
+			return static_cast<int>(messageDelay * TicksPerMinute);
+		}
+
 		// Replays recorded chat, beacons and taunts without using the network.
 		void ApplySideChannelEvent(const SideChannelRecord& record)
 		{
 			if (!ReplayState.ShowChatAndBeacons)
 				return;
-
-			constexpr int SideChannelMessageDurationFrames = 1800;
 
 			switch (static_cast<SideChannelEventType>(record.Type))
 			{
@@ -1588,7 +1597,7 @@ namespace ReplaySystem
 				MessageListClass::Instance.AddMessage(
 					record.SenderName, record.House, record.Text, record.Aux,
 					TextPrintType::UseGradPal | TextPrintType::FullShadow | TextPrintType::Point6Grad,
-					SideChannelMessageDurationFrames, false);
+					GetChatMessageDurationFrames(), false);
 				if (RulesClass::Instance)
 					VocClass::PlayGlobal(RulesClass::Instance->IncomingMessage, 0x2000, 1.0f);
 				break;

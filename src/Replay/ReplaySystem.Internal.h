@@ -89,9 +89,6 @@ namespace ReplaySystem
 			// ReplaySystem::OnGameStartReset, not by ResetRuntimeFlagsForScenario, which runs for
 			// every scenario including the suppressed ones. See FinishRecordingAtMissionEnd.
 			bool RecordingFinishedForSession = false;
-			// Set once the load-progress bar has been forced complete for this scenario instead of
-			// animating. See WaitForPlayers_SkipProgressAnimation.
-			bool ProgressBarForcedComplete = false;
 
 			bool ShroudEnabled = false;
 			bool LockViewport = true;
