@@ -18,8 +18,11 @@
 */
 
 #include "ReplayControls.h"
+#include "ReplaySeek.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
+
+#include <Spawner/Spawner.h>
 
 #include <ColorScheme.h>
 #include <CommandClass.h>
@@ -27,6 +30,7 @@
 #include <MessageListClass.h>
 #include <StringTable.h>
 #include <TacticalClass.h>
+#include <Unsorted.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -42,7 +46,23 @@ namespace ReplaySystem
 		{
 			constexpr int ControlMessageDurationFrames = 90;
 
-			void PrintControlMessage(const wchar_t* pMessage)
+			// The frame at which a single step takes the pause back. The pause flag is read at four
+			// points in a main-loop iteration, so it is held steady from one frame start to the next.
+			int SingleStepTargetFrame = -1;
+			// Input is handled after RestoreFrameState. A resume requested there must wait for the
+			// next frame-start hook or the simulation advances without preparing this frame's record.
+			bool ResumePending = false;
+			bool ControlBarVisible = false;
+
+			void SetPausedState(bool paused)
+			{
+				ReplayState.PlaybackPaused = paused;
+				// Never carry a pre-pause or single-step deadline into resumed playback. Starting the
+				// pacing clock afresh prevents a burst of unpaced frames on resume.
+				ReplayState.PlaybackNextFrameDue = 0.0;
+			}
+
+			void PrintControlMessageInternal(const wchar_t* pMessage)
 			{
 				MessageListClass::Instance.PrintMessage(
 					pMessage,
@@ -89,6 +109,20 @@ namespace ReplaySystem
 				wchar_t message[64];
 				swprintf_s(message, L"Replay speed: %.2fx (%d FPS)", multiplier, fps);
 				PrintControlMessage(message);
+			}
+
+			// How far the jump hotkeys move, in seconds of recorded game time. The seek bar is for
+			// anything longer than a nudge.
+			constexpr int HotkeySeekSeconds = 10;
+
+			void SeekBySeconds(int seconds)
+			{
+				if (!ReplayState.Playback)
+					return;
+
+				const int target = Seek::CurrentFrame() + seconds * Seek::RecordedFPS();
+				if (!Seek::RequestSeek(target))
+					PrintControlMessage(L"Nothing to rewind to yet.");
 			}
 
 			// None of these labels exist in the stock CSF, so every one carries an English
@@ -155,6 +189,82 @@ namespace ReplaySystem
 				virtual void Execute(WWKey) const override { StepPlaybackSpeed(-1); }
 			};
 
+			class ReplayStepFrameCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplayStepFrame"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_STEP_FRAME", L"Replay: Advance One Frame"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_STEP_FRAME_DESC",
+						L"Runs a single frame and freezes again. Pauses playback first if it is running.");
+				}
+
+				virtual void Execute(WWKey) const override { RequestSingleStep(); }
+			};
+
+			class ReplaySeekBackCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplaySeekBack"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_BACK", L"Replay: Jump Back"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_SEEK_BACK_DESC",
+						L"Jumps ten seconds back, restarting from the nearest keyframe.");
+				}
+
+				virtual void Execute(WWKey) const override { SeekBySeconds(-HotkeySeekSeconds); }
+			};
+
+			class ReplaySeekForwardCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplaySeekForward"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_FORWARD", L"Replay: Jump Forward"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_SEEK_FORWARD_DESC",
+						L"Jumps ten seconds forward, running the frames in between without drawing them.");
+				}
+
+				virtual void Execute(WWKey) const override { SeekBySeconds(HotkeySeekSeconds); }
+			};
+
+			class ReplayToggleControlBarCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplayToggleControlBar"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_CONTROL_BAR", L"Replay: Show/Hide Controls"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_CONTROL_BAR_DESC",
+						L"Shows or hides the on-screen playback controls.");
+				}
+
+				virtual void Execute(WWKey) const override { ToggleControlBar(); }
+			};
+
 			template <typename T>
 			T* MakeCommand()
 			{
@@ -174,8 +284,115 @@ namespace ReplaySystem
 			if (!ReplayState.Playback)
 				return;
 
-			ReplayState.PlaybackPaused = !ReplayState.PlaybackPaused;
-			PrintControlMessage(ReplayState.PlaybackPaused ? L"Replay paused." : L"Replay resumed.");
+			SingleStepTargetFrame = -1;
+			if (ReplayState.PlaybackPaused)
+			{
+				ResumePending = true;
+				ReplayState.PlaybackNextFrameDue = 0.0;
+				PrintControlMessage(L"Replay resumed.");
+			}
+			else
+			{
+				ResumePending = false;
+				SetPausedState(true);
+				PrintControlMessage(L"Replay paused.");
+			}
+		}
+
+		void PrintControlMessage(const wchar_t* pMessage)
+		{
+			PrintControlMessageInternal(pMessage);
+		}
+
+		void SetPlaybackPaused(bool paused)
+		{
+			if (!ReplayState.Playback)
+				return;
+
+			SingleStepTargetFrame = -1;
+			if (paused)
+			{
+				ResumePending = false;
+				SetPausedState(true);
+			}
+			else if (ReplayState.PlaybackPaused)
+			{
+				ResumePending = true;
+				ReplayState.PlaybackNextFrameDue = 0.0;
+			}
+		}
+
+		void RequestSingleStep()
+		{
+			if (!ReplayState.Playback || Seek::IsSeeking())
+				return;
+
+			// Stepping out of a running replay freezes it on the next frame rather than the one
+			// after, which is what a viewer reaching for the button is asking for.
+			SingleStepTargetFrame = static_cast<int>(Unsorted::CurrentFrame) + 1;
+			ResumePending = false;
+			SetPausedState(true);
+		}
+
+		void ServiceFrameStart()
+		{
+			if (!ReplayState.Playback)
+			{
+				SingleStepTargetFrame = -1;
+				ResumePending = false;
+				return;
+			}
+
+			if (ResumePending)
+			{
+				ResumePending = false;
+				SetPausedState(false);
+			}
+
+			if (SingleStepTargetFrame < 0)
+				return;
+
+			if (static_cast<int>(Unsorted::CurrentFrame) >= SingleStepTargetFrame)
+			{
+				SingleStepTargetFrame = -1;
+				SetPausedState(true);
+				return;
+			}
+
+			SetPausedState(false);
+		}
+
+		int PlaybackFPS()
+		{
+			return ReplayState.PlaybackFPS > 0 ? ReplayState.PlaybackFPS : GetRecordedFPS();
+		}
+
+		double PlaybackSpeedMultiplier()
+		{
+			const int recordedFPS = GetRecordedFPS();
+			if (recordedFPS <= 0)
+				return 1.0;
+
+			return static_cast<double>(PlaybackFPS()) / recordedFPS;
+		}
+
+		bool IsControlBarVisible()
+		{
+			return ReplayState.Playback && ControlBarVisible;
+		}
+
+		void ToggleControlBar()
+		{
+			if (!ReplayState.Playback)
+				return;
+
+			ControlBarVisible = !ControlBarVisible;
+		}
+
+		void InitControlBarVisibility()
+		{
+			const auto* const pConfig = Spawner::GetConfig();
+			ControlBarVisible = pConfig && pConfig->ReplayControlBar;
 		}
 
 		void StepPlaybackSpeed(int direction)
@@ -189,6 +406,7 @@ namespace ReplaySystem
 			// Reported either way: the ladder may have run out, or an off-ladder speed may have
 			// snapped onto the rung it was nearest to without moving.
 			ReplayState.PlaybackFPS = SpeedLadder[nextIndex];
+			ReplayState.PlaybackNextFrameDue = 0.0;
 			ReportPlaybackSpeed();
 		}
 
@@ -218,6 +436,7 @@ namespace ReplaySystem
 		void SetPlaybackGameSpeedIndex(int gameSpeedIndex)
 		{
 			ReplayState.PlaybackFPS = GetReplayFPSFromGameSpeed(std::clamp(gameSpeedIndex, 0, MaxGameSpeedIndex));
+			ReplayState.PlaybackNextFrameDue = 0.0;
 		}
 
 		void RegisterReplayCommands()
@@ -225,6 +444,10 @@ namespace ReplaySystem
 			MakeCommand<ReplayTogglePauseCommandClass>();
 			MakeCommand<ReplaySpeedUpCommandClass>();
 			MakeCommand<ReplaySpeedDownCommandClass>();
+			MakeCommand<ReplayStepFrameCommandClass>();
+			MakeCommand<ReplaySeekBackCommandClass>();
+			MakeCommand<ReplaySeekForwardCommandClass>();
+			MakeCommand<ReplayToggleControlBarCommandClass>();
 		}
 	}
 }

@@ -21,6 +21,8 @@
 // and docs/replay-format.md has the detail behind the trickier hooks.
 
 #include "ReplayControls.h"
+#include "ReplayOverlay.h"
+#include "ReplaySeek.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
 
@@ -38,6 +40,7 @@
 #include <TechnoClass.h>
 #include <TriggerClass.h>
 #include <TriggerTypeClass.h>
+#include <WWMouseClass.h>
 #include <Unsorted.h>
 
 #include <algorithm>
@@ -121,6 +124,12 @@ DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
 	if (!pConfig)
 		return 0;
 
+	// A seek loads a keyframe through the engine's own savegame path, which comes back through
+	// here. Reopening the replay would throw away the playback already in flight and start it
+	// again from frame zero; the seek repositions the stream itself. See ReplaySeek.h.
+	if (ReplaySystem::Seek::IsLoadInProgress())
+		return 0;
+
 	if (ReplaySystem::IsPlaybackRequested())
 	{
 		ApplyPlaybackInitialState();
@@ -143,7 +152,9 @@ DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
 // selection is stored by them, so playback re-applies its initial state here.
 DEFINE_HOOK(0x686B6A, ReadScenarioINI_ReplayApplyState, 0x6)
 {
-	if (ReplayState.Playback)
+	// A keyframe load restores the recorded state instead of re-deriving it, so re-seeding the
+	// RNG and the object ID counter here would undo the load.
+	if (ReplayState.Playback && !ReplaySystem::Seek::IsLoadInProgress())
 		ApplyPlaybackInitialState();
 
 	return 0;
@@ -155,6 +166,12 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 {
 	if (ReplayState.Recording)
 		RecordFrameState();
+
+	// Both of these want a whole, quiescent frame: the single-step machine has to settle the
+	// pause flag before anything in this iteration reads it, and a keyframe save or load is a
+	// snapshot of the entire world. This is the only point in the loop that is either.
+	ReplaySystem::Controls::ServiceFrameStart();
+	ReplaySystem::Seek::ServiceFrameStart();
 
 	// A paused iteration must leave the stream where it was, or the frame's event count and its
 	// events part company and every later frame reads the wrong bytes. The pause hooks below hold
@@ -495,6 +512,62 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 
 	return 0;
 }
+
+#pragma region Playback controls overlay
+
+// GScreenClass::Render, after the sidebar, the message list and the tooltips have gone onto the
+// composite surface and before the mouse cursor is blitted over it. Nothing in the game can cover
+// the panel from here, and the cursor still sits on top of it.
+DEFINE_HOOK(0x4F4583, GScreenClass_Render_DrawReplayOverlay, 0x6)
+{
+	ReplaySystem::Overlay::Draw();
+	return 0;
+}
+
+// MouseClass::AI, where it hands the frame's input to the rest of the chain - scrolling, then the
+// sidebar, then the map. The two stolen instructions load that call's arguments off the stack;
+// taking the input here means a click on the panel is not also a click on the map behind it, and
+// the bottom screen edge underneath it does not scroll the view. Keyboard input is untouched:
+// Main_Loop runs Keyboard_Process on the same key after GScreenClass::Input returns.
+DEFINE_HOOK(0x5BDF13, MouseClass_AI_ReplayOverlayInput, 0x8)
+{
+	// Past the two argument loads, the two pushes and the call itself, landing on the epilogue.
+	// Because the pushes are skipped as well, the stack is left exactly as it is here, which
+	// is what the callee-cleaned call would otherwise have tidied up.
+	enum { SkipInputChain = 0x5BDF24 };
+
+	if (ReplayState.Playback && WWMouseClass::Instance)
+	{
+		const int mouseX = WWMouseClass::Instance->GetX();
+		const int mouseY = WWMouseClass::Instance->GetY();
+
+		if (ReplaySystem::Overlay::ProcessMouseInput(mouseX, mouseY))
+			return SkipInputChain;
+	}
+
+	return 0;
+}
+
+// Main_Loop's per-frame render. A seek runs frames as fast as it can and drawing is most of what
+// one costs, so it draws only every so often - enough to read as progress rather than as a hang.
+DEFINE_HOOK(0x55D8F2, MainLoop_SkipRenderWhileSeeking, 0x5)
+{
+	enum { SkipRender = 0x55D8F7 };
+
+	if (!ReplaySystem::Seek::IsSeeking())
+		return 0;
+
+	if (ReplaySystem::Seek::ShouldSkipRenderThisFrame())
+	{
+		ReplaySystem::Seek::CountRenderedFrame();
+		return SkipRender;
+	}
+
+	ReplaySystem::Seek::CountRenderedFrame();
+	return 0;
+}
+
+#pragma endregion Playback controls overlay
 
 #pragma region In-game options dialog game speed
 

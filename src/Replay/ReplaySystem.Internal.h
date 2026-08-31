@@ -152,6 +152,18 @@ namespace ReplaySystem
 
 			bool HasPendingPlaybackFrame = false;
 			bool PlaybackStreamEnded = false;
+			// RestoreFrameState may run more than once while the same simulation frame is held
+			// paused. Remember which frame has already consumed its replay record so resuming does
+			// not either skip that record or interpret its event bytes as another frame header.
+			int PreparedPlaybackFrame = -1;
+
+			// Where the deflated frame stream starts in the file, so a seek can restart the
+			// decompressor from the top. Deflate has no random access, and the alternative - an
+			// index of decodable points - would have to go in the file. See ReplaySeek.h.
+			uint64_t PlaybackStreamOffset = 0;
+			// The furthest frame playback has reached, which stands in for the replay's length
+			// when the recording died before it could stamp one into the header.
+			int HighestPlayedFrame = 0;
 
 			// Last recorded viewport position, re-applied between sparse frame records.
 			Point2D LockedViewportPos = { 0, 0 };
@@ -200,6 +212,10 @@ namespace ReplaySystem
 		// Per-frame work, driven from the main loop and from the queue event hooks.
 		void RecordFrameState();
 		void RestoreFrameState();
+		// Rewinds the frame stream and walks it forward to the first record at or after the frame,
+		// re-applying the sticky state - viewport, game speed - carried by the records stepped
+		// over. Used by seeking; see ReplaySeek.h.
+		bool RepositionPlaybackStreamToFrame(int targetFrame);
 		void CaptureGameCRCForCurrentFrame();
 		FrameObjectCensus CurrentObjectCensus();
 		void CheckObjectCensusForCurrentFrame();

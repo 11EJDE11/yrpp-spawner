@@ -124,6 +124,12 @@ public:
 	// Which spawn.ini player slot playback is watched from: 0 or -1 is the recording player, N is
 	// [OtherN]. Only human slots are accepted; anything else falls back to the recording player.
 	int  ReplayViewPlayer;
+	// Draw the on-screen playback controls - seek bar, transport buttons, clock - during playback.
+	bool ReplayControlBar;
+	// How many frames apart playback drops a savegame keyframe, so seeking backwards restarts from
+	// one instead of replaying from the beginning. Zero or less takes none, which leaves seeking
+	// forward-only. See ReplaySeek.h.
+	int  ReplayKeyframeInterval;
 
 	// Scenario Options
 	int  Seed;
@@ -212,6 +218,8 @@ public:
 		, ReplaySpectator { false }
 		, ReplayShowChatAndBeacons { true }
 		, ReplayViewPlayer { -1 }
+		, ReplayControlBar { true }
+		, ReplayKeyframeInterval { 750 }
 
 		// Scenario Options
 		, Seed { 0 }

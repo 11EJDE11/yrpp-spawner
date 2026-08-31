@@ -421,6 +421,8 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayShowChatAndBeacons` | `true` | Playback only; recording of this data is unconditional. |
 | `ReplayPlaybackSpeed` | `-1` | Game speed index to pace playback at. `-1` falls back to `GameSpeed`. Does not affect the simulation, which stays pinned to `RecordedGameSpeed`. |
 | `ReplayViewPlayer` | `-1` | Which player's screen to watch the recording from. See below. |
+| `ReplayControlBar` | `true` | Draw the on-screen playback controls during playback. See below. |
+| `ReplayKeyframeInterval` | `750` | Frames between playback keyframes, which is what makes seeking backwards possible. `0` takes none. See below. |
 
 Playback speed is deliberately kept out of `OptionsClass Options.GameSpeed` (0xA8EB60): simulation
 code reads that through `GetAnimSpeed`, so it stays pinned to `RecordedGameSpeed` for the whole of
@@ -428,6 +430,70 @@ playback. The in-game options dialog binds its speed slider to the same variable
 `ReplaySystem.Hook.cpp` (0x4E209E, 0x4E1E1B, 0x4E1EBA) give that dialog a view of the playback
 speed instead. Recorded `GameSpeed` events are harvested for their requested speed and then dropped
 rather than executed, so the engine never writes the pinned value.
+
+## Seeking, and the playback controls
+
+Playback is a deterministic recurrence: the state at frame N follows from the state at frame 0 and
+the events up to N. Seeking forward is therefore just running the simulation without drawing it,
+but seeking backwards needs an earlier state to restart from, and there is no way to run a frame
+in reverse.
+
+Those states are **not** in the replay file - they would dwarf the events many times over, and the
+file is meant to be small enough to hand around. Instead playback drops one every
+`ReplayKeyframeInterval` frames as it watches, using the engine's own savegame format
+(`ScenarioClass::SaveGame` 0x67CEF0). That only makes the part of the replay already watched cheap
+to rewind into, which is the part a viewer wants to rewind into. Nothing about the `.yrrp` layout
+changes, and a replay recorded by a build without any of this plays back identically.
+
+A seek runs in two halves, in `src/Replay/ReplaySeek.cpp`:
+
+1. **Land on a keyframe.** Skipped entirely when the target is ahead of where playback already is.
+   Otherwise the newest keyframe at or before the target is loaded through
+   `LoadOptionsClass::LoadMission` (0x559D60), the engine's own in-game load.
+2. **Run to the target.** Frames go by with the pacing off (`ApplyPlaybackFramePacing` returns
+   early), the drawing mostly off (`MainLoop_SkipRenderWhileSeeking` at 0x55D8F2 keeps one frame
+   in 61 so it reads as progress rather than as a hang) and the sound off (`VocAllowed` at
+   0x8464AC, which every `VocClass::Play` path tests, is cleared for the duration).
+
+Keyframes live in `<SavedGameDir>\Replay Keyframes`, are written when playback starts and are
+deleted when it ends. They are savegames, so they cost a few MB each; a 30 minute recording at the
+default interval leaves a few dozen of them while it is being watched.
+
+Two things a load has to be protected from. The scenario-start hooks (0x685659 and 0x686B6A) would
+otherwise reopen the replay from frame 0 and re-seed the RNG over the top of the state just
+restored, so both stand down while `ReplaySystem::Seek::IsLoadInProgress()` holds. And the frame
+stream is deflated, which has no random access: `RepositionPlaybackStreamToFrame` restarts the
+decompressor at the top and walks forward, re-applying the sticky state - viewport, game speed -
+carried by the sparse records it steps over. Inflating the whole stream is far cheaper than the
+simulation the seek is about to run anyway.
+
+Because a seek replays hundreds of frames in a second or two, recorded chat and taunts are dropped
+while one runs - they are momentary, and replaying them all would land the lot on screen at once
+with their lifetimes starting from the seek. Beacons are state that outlives the frame that placed
+them, so those are applied either way.
+
+### The control bar
+
+`ReplayControlBar` draws a media-player panel along the bottom of the tactical view
+(`src/Replay/ReplayOverlay.cpp`): jump to start, step back a frame, slower, play/pause, faster,
+step forward a frame, jump to end; a clock; the speed as a multiple of the recorded speed; and a
+seek bar that can be clicked or dragged, ticked with the frames a backwards seek can still reach.
+
+It is drawn from `GScreenClass::Render` at 0x4F4583 - after the sidebar, the message list and the
+tooltips, before the mouse cursor - so nothing in the game covers it and the cursor stays on top
+of it. Input is taken at 0x5BDF13, the point `MouseClass::AI` hands off to the rest of the input
+chain. While the pointer is over the panel, or holding the seek handle wherever it has been
+dragged to, that whole chain is skipped: a click on a button is not also a click on the map behind
+it, and the bottom screen edge under the panel does not scroll the view. Keyboard input is
+unaffected, because `Main_Loop` runs `Keyboard_Process` on the same key afterwards.
+
+Every button also has a keyboard command in the `Replay` category of the in-game keyboard options
+(`ReplayStepFrame`, `ReplaySeekBack`, `ReplaySeekForward`, `ReplayToggleControlBar`, alongside the
+existing pause and speed ones), so the bar can be hidden and the replay driven entirely from the
+keyboard.
+
+With `ReplayKeyframeInterval = 0` no keyframes are taken: seeking forward still works, seeking
+backwards does not, and the two buttons that need it are drawn greyed out.
 
 `ReplayPlaybackSpeed` only sets the speed playback *starts* at; from there the hotkeys below own it.
 

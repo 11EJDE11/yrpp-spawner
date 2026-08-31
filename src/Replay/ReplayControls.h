@@ -44,6 +44,33 @@ namespace ReplaySystem
 		// Toggles the freeze. Does nothing outside playback.
 		void TogglePlaybackPause();
 
+		// Freezes or resumes playback without the on-screen notice the hotkey prints. Clears any
+		// half-finished single step.
+		void SetPlaybackPaused(bool paused);
+
+		// Runs exactly one more frame and freezes again. Pauses first if playback is running.
+		void RequestSingleStep();
+
+		// Top of the frame, before the frame state is restored: commits deferred resumes and releases
+		// playback until an explicit single-step target arrives, then takes the pause back. The target
+		// is cancelled by a manual pause/resume action.
+		void ServiceFrameStart();
+
+		// Playback speed as a multiple of the speed the game was recorded at.
+		double PlaybackSpeedMultiplier();
+
+		// The frame rate playback is running at.
+		int PlaybackFPS();
+
+		// Whether the on-screen playback controls are being drawn, and its toggle. Starts at the
+		// ReplayControlBar setting.
+		bool IsControlBarVisible();
+		void ToggleControlBar();
+		void InitControlBarVisibility();
+
+		// Prints a short notice in the message list, in the style the playback hotkeys use.
+		void PrintControlMessage(const wchar_t* pMessage);
+
 		// Walks the ladder by one rung: +1 faster, -1 slower. Does nothing outside playback.
 		void StepPlaybackSpeed(int direction);
 

@@ -17,6 +17,9 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "ReplayControls.h"
+#include "ReplayOverlay.h"
+#include "ReplaySeek.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
 
@@ -138,7 +141,19 @@ namespace ReplaySystem
 		// it is instead of sprinting through a backlog after a pause or a slow frame.
 		void ApplyPlaybackFramePacing()
 		{
-			if (!ReplayState.Playback || ReplayState.PlaybackFPS <= 0)
+			if (!ReplayState.Playback)
+				return;
+
+			// A seek is not being watched, so it runs as fast as the machine manages. The engine
+			// still has to be told not to wait, which is what the two timers below do.
+			if (ReplaySystem::Seek::IsSeeking())
+			{
+				Unsorted::GameFrameTimer.TimeLeft = 0;
+				Unsorted::NetworkFrameTimer.TimeLeft = 0;
+				return;
+			}
+
+			if (ReplayState.PlaybackFPS <= 0)
 				return;
 
 			const double frameMilliseconds = 1000.0 / ReplayState.PlaybackFPS;
@@ -849,6 +864,8 @@ namespace ReplaySystem
 				return false;
 			}
 
+			// Kept so a seek can restart the decompressor here. See ReplaySeek.h.
+			ReplayState.PlaybackStreamOffset = streamOffset;
 			return true;
 		}
 
@@ -885,6 +902,9 @@ namespace ReplaySystem
 			memset(&ReplayState.PlaybackHeader, 0, sizeof(ReplayState.PlaybackHeader));
 			ReplayState.HasPendingPlaybackFrame = false;
 			ReplayState.PlaybackStreamEnded = false;
+			ReplayState.PreparedPlaybackFrame = -1;
+			ReplayState.PlaybackStreamOffset = 0;
+			ReplayState.HighestPlayedFrame = 0;
 			ReplayState.PendingPlaybackFrame = {};
 			ReplayState.LockedViewportPos = { 0, 0 };
 			ReplayState.HasLockedViewportPos = false;
@@ -896,6 +916,7 @@ namespace ReplaySystem
 
 		void AbortReplaySystem()
 		{
+			ReplaySystem::Seek::OnPlaybackStopped();
 			ResetRuntimeFlagsForScenario();
 			CloseReplayFile();
 		}
@@ -1120,6 +1141,7 @@ namespace ReplaySystem
 						std::clamp(event.GameSpeed.GameSpeed, 0, MaxGameSpeedIndex));
 
 					ReplayState.PlaybackFPS = requestedFPS;
+					ReplayState.PlaybackNextFrameDue = 0.0;
 				}
 			}
 
@@ -1525,6 +1547,82 @@ namespace ReplaySystem
 			return true;
 		}
 
+		// Restarts the decompressor at the top of the frame stream and walks forward to the first
+		// record at or after the target. Deflate has no random access and an index of decodable
+		// points would have to live in the file, but the frame stream is small and inflating it is
+		// far cheaper than the simulation a seek is about to run anyway.
+		bool RepositionPlaybackStreamToFrame(int targetFrame)
+		{
+			if (ReplayState.ReplayFile == INVALID_HANDLE_VALUE)
+				return false;
+
+			LARGE_INTEGER streamStart {};
+			streamStart.QuadPart = static_cast<LONGLONG>(ReplayState.PlaybackStreamOffset);
+
+			if (!SetFilePointerEx(ReplayState.ReplayFile, streamStart, nullptr, FILE_BEGIN)
+				|| !ReplayState.Reader.Start(ReplayState.ReplayFile))
+			{
+				Debug::Log("[Replay] Failed to rewind the replay stream while seeking.\n");
+				return false;
+			}
+
+			ReplayState.HasPendingPlaybackFrame = false;
+			ReplayState.PlaybackStreamEnded = false;
+			ReplayState.PreparedPlaybackFrame = -1;
+			ReplayState.PendingPlaybackFrame = {};
+			ReplayState.ExpectedEventsThisFrame = 0;
+			ReplayState.HasExpectedGameCRC = false;
+			ReplayState.HasExpectedCensus = false;
+
+			for (;;)
+			{
+				PlaybackFrameRecord record {};
+				if (!ReadNextPlaybackFrameRecord(record))
+				{
+					Debug::Log("[Replay] Failed to read the replay stream while seeking to frame %d.\n",
+						targetFrame);
+					return false;
+				}
+
+				if (record.EndOfStream)
+				{
+					ReplayState.PlaybackStreamEnded = true;
+					return true;
+				}
+
+				if (record.FrameNumber >= targetFrame)
+				{
+					ReplayState.PendingPlaybackFrame = std::move(record);
+					ReplayState.HasPendingPlaybackFrame = true;
+					return true;
+				}
+
+				// Records are sparse and the state they carry is sticky, so the ones stepped over still
+				// have to be applied - otherwise the seek lands with the viewport and the simulation speed
+				// left at whatever the last record before the rewind happened to say.
+				if ((record.Flags & FrameRecordFlag_TacticalPos) != 0u)
+				{
+					ReplayState.LockedViewportPos = record.TacticalPos;
+					ReplayState.HasLockedViewportPos = true;
+				}
+
+				if ((record.Flags & FrameRecordFlag_GameSpeed) != 0u)
+				{
+					const int gameSpeed = std::clamp(static_cast<int>(record.GameSpeed), 0, MaxGameSpeedIndex);
+					GameOptionsClass::Instance.GameSpeed = gameSpeed;
+					GameModeOptionsClass::Instance.GameSpeed = gameSpeed;
+				}
+
+				// The frame's events sit in the stream immediately after its record.
+				if (!SkipRaw(static_cast<size_t>(record.EventCountThisFrame) * sizeof(EventClass)))
+				{
+					Debug::Log("[Replay] Failed to step over frame %d's events while seeking.\n",
+						record.FrameNumber);
+					return false;
+				}
+			}
+		}
+
 		void ApplyPlaybackSelection(const PlaybackFrameRecord& frameRecord)
 		{
 			if (!ReplayState.SelectUnits)
@@ -1591,7 +1689,19 @@ namespace ReplaySystem
 			if (!ReplayState.ShowChatAndBeacons)
 				return;
 
-			switch (static_cast<SideChannelEventType>(record.Type))
+			// A seek runs through hundreds of frames in a second or two. Chat and taunts are
+			// momentary, and replaying them all would land the lot on screen at once with their
+			// lifetimes starting from the seek rather than from when they were said. Beacons are
+			// state that outlives the frame that placed them, so those are applied either way.
+			const auto eventType = static_cast<SideChannelEventType>(record.Type);
+			if (ReplaySystem::Seek::IsSeeking()
+				&& (eventType == SideChannelEventType::ChatMessage
+					|| eventType == SideChannelEventType::Taunt))
+			{
+				return;
+			}
+
+			switch (eventType)
 			{
 			case SideChannelEventType::ChatMessage:
 				MessageListClass::Instance.AddMessage(
@@ -1830,8 +1940,18 @@ namespace ReplaySystem
 			if (!ReplayState.Playback)
 				return;
 
+			const int currentFrame = static_cast<int>(Unsorted::CurrentFrame);
+			if (ReplayState.PreparedPlaybackFrame == currentFrame)
+				return;
+
+			// Set this before reading: every successful or empty sparse frame is prepared exactly
+			// once. A read failure stops playback and ResetRuntimeFlagsForScenario clears it.
+			ReplayState.PreparedPlaybackFrame = currentFrame;
+
 			ReplayState.ExpectedEventsThisFrame = 0;
 			ReplayState.HasExpectedGameCRC = false;
+			ReplayState.HighestPlayedFrame = std::max(ReplayState.HighestPlayedFrame,
+				currentFrame);
 
 			// Keep the viewport locked on frames without replay records.
 			ApplyLockedViewport();
@@ -2096,7 +2216,6 @@ namespace ReplaySystem
 			// ReplayPlaybackSpeed is a frame rate, one of the rungs of the viewer's speed ladder,
 			// not a game speed index. Zero or less watches at the speed it was recorded at.
 			const int requestedFPS = pConfig ? pConfig->ReplayPlaybackSpeed : 0;
-			ReplayState.PlaybackFPS = requestedFPS > 0 ? requestedFPS : 0;
 
 			int recordedGameSpeed = std::clamp(GameOptionsClass::Instance.GameSpeed, 0, MaxGameSpeedIndex);
 			if (!ReplayState.HasPlaybackHeader)
@@ -2111,6 +2230,13 @@ namespace ReplaySystem
 
 			if (ReplayState.HasPlaybackHeader)
 				recordedGameSpeed = std::clamp(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed), 0, MaxGameSpeedIndex);
+
+			// Keep one pacing path active even when no override was requested. A zero sentinel made
+			// normal playback rely on the engine timers while seeks and controls used the replay
+			// clock, allowing a pause/single-step transition to resume without a valid deadline.
+			ReplayState.PlaybackFPS = requestedFPS > 0
+				? requestedFPS
+				: GetReplayFPSFromGameSpeed(recordedGameSpeed);
 
 			// The speed the recording started at, applied once and never re-pinned: a change the
 			// player made during the game is in the event stream and is replayed like any other.
@@ -2132,6 +2258,9 @@ namespace ReplaySystem
 			}
 
 			strncpy_s(ReplayState.PlaybackPath, sizeof(ReplayState.PlaybackPath), replayPath, _TRUNCATE);
+
+			ReplaySystem::Controls::InitControlBarVisibility();
+			ReplaySystem::Seek::OnPlaybackStarted();
 
 			ReplayOpenFailure failure = ReplayOpenFailure::None;
 			if (!OpenPlaybackReplayStream(ReplayState.PlaybackPath, failure))
