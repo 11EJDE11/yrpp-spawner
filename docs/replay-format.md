@@ -423,6 +423,7 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayViewPlayer` | `-1` | Which player's screen to watch the recording from. See below. |
 | `ReplayControlBar` | `true` | Draw the on-screen playback controls during playback. See below. |
 | `ReplayKeyframeInterval` | `750` | Frames between playback keyframes, which is what makes seeking backwards possible. `0` takes none. See below. |
+| `ReplayDiagnostics` | `false` | Turn on the per-frame state watchers that find a divergence. They walk every techno, every layer object and every cell on the map every frame and keep what they find for the whole replay, so playback slows to a crawl. For chasing a bug, not for watching a replay. See below. |
 
 Playback speed is deliberately kept out of `OptionsClass Options.GameSpeed` (0xA8EB60): simulation
 code reads that through `GetAnimSpeed`, so it stays pinned to `RecordedGameSpeed` for the whole of
@@ -447,63 +448,278 @@ changes, and a replay recorded by a build without any of this plays back identic
 
 A seek runs in two halves, in `src/Replay/ReplaySeek.cpp`:
 
-1. **Land on a keyframe.** Skipped entirely when the target is ahead of where playback already is.
-   Otherwise the newest keyframe at or before the target is loaded through
+1. **Land on a keyframe.** The newest keyframe at or before the target is loaded whenever it is
+   behind the current frame, or whenever it can skip forward over frames already watched.
+   Otherwise playback is already closer and no load is needed. Loads go through
    `LoadOptionsClass::LoadMission` (0x559D60), the engine's own in-game load.
 2. **Run to the target.** Frames go by with the pacing off (`ApplyPlaybackFramePacing` returns
    early), the drawing mostly off (`MainLoop_SkipRenderWhileSeeking` at 0x55D8F2 keeps one frame
    in 61 so it reads as progress rather than as a hang) and the sound off (`VocAllowed` at
    0x8464AC, which every `VocClass::Play` path tests, is cleared for the duration).
 
-Keyframes live in `<SavedGameDir>\Replay Keyframes`, are written when playback starts and are
+### What a savegame load does to the state a replay depends on
+
+Several things, all verified in the binary, and all of which the seek has to undo.
+
+**The synchronised randomiser is reset.** `ScenarioClass::Load` (0x689470) reads the saved struct
+back over `Scen` and then runs `ScenarioClass::ScenarioClass` (0x683560) over the top of it, whose
+first act is `Random2Class::Random2Class(&RandomNumber, 0)`. So every savegame load re-seeds the
+randomiser to a fixed seed and discards what the file held. Playback puts the whole struct back
+from the keyframe.
+
+**The unique-ID counter is inflated.** `Load_Game` -> `Decode_All_Pointers` (0x67E730) runs
+`Clear_Scenario` (which sets `Scen->UniqueID` to 1,000,000), then `ScenarioClass::Load` restores the
+saved counter, and *then* constructs every object the file holds. Each constructor calls
+`AbstractClass::Create_ID` (0x410230) -> `ScenarioClass::Increment_UniqueID` (0x68BCB0), so the
+counter ends up at the saved value plus one per object loaded. `CellClass::CellClass` (0x47BBF0) is
+among them and `MouseClass::Save` writes every valid cell, which is why the inflation is tens of
+thousands rather than the object count, and why it is a different amount for every save. Each
+object's own ID is overwritten from the stream afterwards, so only the counter is wrong; playback
+restores it from the keyframe.
+
+**The planning routes are dropped entirely.** A unit given a route to follow carries a
+`PlanningTokenClass` holding the nodes it has still to visit. `TechnoClass::Planning_6385C0`
+(0x6385C0) reads it every time the unit is asked what to do: with nodes left the unit goes to
+`MISSION_PARA_WAIT` and carries on with the plan, and with none it falls through to
+`InfantryClass::Enter_Idle_Mode` and goes back to guarding. Neither path draws a random number,
+so losing the token changes what an army does while leaving every hash and every randomiser check
+perfectly in step - which is what made this the last and hardest of the five to find.
+
+The savegame carries none of it: `PlanningTokenClass` is a plain class with no vtable and no
+unique ID, and the savegame only serialises the `AbstractClass` graph through `IPersistStream`.
+This is the same loss players see when a save forgets every waypoint after the first.
+
+The graph has to be captured when the keyframe is written. Preserving the live graph immediately
+before a backwards load is wrong: it grafts routes from the current (future) frame onto the older
+world. Each keyframe therefore keeps an out-of-band snapshot of:
+
+- tokens, their scalar state, owner IDs, and ordered node references;
+- each shared node once, including its 111-byte planning event, members, and branches;
+- each member's owner ID and 111-byte event, and each branch's event and counters;
+- the planning manager's three ordered node lists, active-route owner list, and per-house counts;
+- the ordered `PlannedEvents` queue at `0xAC4B48`.
+
+That last queue is a separate, easy-to-miss half of route execution. When
+`TechnoClass::Planning_6385C0` takes the next command from a token, it sets the token's
+`field_1C` in-flight flag and puts a heap-allocated copy of the event in `PlannedEvents`.
+`PlanningManager_637550` sends and frees those packets later in the main loop. Neither the
+savegame loader nor `PlanningManager::Init_0` clears this vector. A backwards load therefore
+used to retain pending commands from the future while omitting commands that were pending at the
+keyframe; the affected token then stalled or skipped a later waypoint. Restoring the packets and
+their order keeps the in-flight flags and the work that clears them paired.
+
+IDA pins the native layouts at `0x9C` for a token, `0xB8` for a node, `0x78` for a branch,
+and `0x10` for a member. After the savegame load has rebuilt the `TechnoClass` objects, playback
+uses the game's own token/node constructors and allocator to rebuild that frame's graph, resolves
+world pointers by unique ID, and then immediately recaptures and compares the graph with the
+snapshot. A mismatch stops the seek rather than allowing a delayed divergence.
+
+**Some locomotor Load methods erase state they just read.** The common
+`LocomotionClass::Load` (0x55AAC0) reads the complete derived locomotor object from the stream.
+Several derived Load methods then construct or reset a value-type member over those restored
+bytes:
+
+- `HoverLocomotionClass::Load` (0x5170B0) calls the `FacingClass` constructor on its steering
+  facing at offset 0x30, zeroing the desired/start facing, rotation timer, and ROT;
+- `TunnelLocomotionClass::Load` (0x72A150) resets its dig `RateTimer` at offset 0x28;
+- `TeleportLocomotionClass::Load` (0x719CA0) resets its phase timer at offset 0x3C;
+- `RocketLocomotionClass::Load` (0x663410) resets its trailer timer at offset 0x34.
+
+The first is particularly deceptive: the techno's own position and facing can remain correct
+until a moving hover unit reaches a later path cell and consults its locomotor steering again.
+At that point it chooses a different body turn without using the randomiser. Keyframes retain
+these four vulnerable value members by owner ID and put back only the bytes the derived Load
+routine discarded. The per-frame drift watcher also includes the hidden locomotor heading,
+full 24-entry path buffer, and path timers so another movement-state loss is reported at its
+first changed frame.
+
+The whole path buffer is compared, terminator and leftovers included. `Build_Final_Path` writes
+the facings followed by a `FACING_NONE` terminator and `Basic_Path` copies exactly that many
+entries, so everything past the terminator is left over from routes the unit finished long ago -
+but that is not dead state. `AStarClass::Apply_Path_Collision_Avoidance` reads a blocking unit's
+`Path[0]` and `Path[1]` (and `Path[2]` for infantry) to decide whether it is about to stop and so
+worth routing around, without caring whether those entries belong to a live route. The buffer is
+saved whole - `FootClass::Serialize` writes all 24 - so a difference anywhere in it is real, and
+one unit's stale tail can change another unit's route.
+
+**The object arrays come back in a different order.** The load rebuilds every object and refills
+the arrays as it goes, and the order it ends up with is not the order it started from -
+`TechnoClass::Array` was observed holding a different object at a given index straight after a
+load. None of those arrays is hashed by `Compute_Game_CRC`, so a shuffle leaves the frame hash
+clean and the objects all doing the same things; what changes is who gets asked first, and every
+"find me the best target" loop in the engine settles a tie by taking whichever candidate it
+reached first. That is a decision made without drawing a single random number, which is why it
+stays silent for hundreds of frames and then surfaces as a targeting call landing on the wrong
+frame. A keyframe records the order of each array and puts it back.
+
+**The map border becomes walkable.** `CellClass::Passability` is the one value the zone builder
+and the pathfinder work from - the cell's terrain, overlay and occupiers boiled down to one of
+eight cases, indexed straight into `MapClass::MovementAdjustArray`. The savegame does not carry it,
+and the Tiberian Sun source says so in as many words, in the middle of `CellClass::Serialize`:
+
+```
+// Passability -- no save has ever carried it either; derived from the terrain and whatever
+// is standing here.
+```
+
+It is meant to be recomputed by `CellClass::Recalc_Passability` whenever something that could block
+or unblock the cell changes. Nothing recomputes it after a load, so every cell comes back holding
+what its constructor left - `Passable`, zero - until something happens on that cell to make the
+engine work it out again.
+
+Over most of the map that is invisible, because the terrain says the same thing anyway. The border
+is not: `Recalc_Passability` opens with
+
+```
+if (!Map.In_Local_Radar(CellID)) { Passability = PASSABLE_OUTSIDE; return; }
+```
+
+so every cell outside the playable rectangle carries `OutsideMap` while the game runs and comes back
+from a load as `Passable`. On the map this was found on that is 3,956 cells of the 262,144 in the
+array - the whole border ring. The pathfinder then believes a route may run off the edge of the
+world, and units near the border take different ones, which is how a keyframe load ends up changing
+step twenty of a twenty-four step route more than a thousand frames later without touching the
+randomiser once.
+
+A keyframe records the value for every cell and puts it back. It records rather than recalculates
+because what has to be matched is the recording, not what a fresh calculation would arrive at.
+
+**The ore growth and spread queues are rebuilt in map order.** Each `TiberiumClass` owns two
+priority queues naming the cells waiting to change and when. `TiberiumClass::Grow` (0x722F00)
+pops the top of the growth heap, thickens that cell, and pushes it back scored
+`Frame + rand() % 50`, so the order the ore field evolves in is something the game builds up over
+its whole length. `Load_Game` (0x67E440) finishes with `Tiberium_Init_Growth_Data` (0x722D00) and
+`Tiberium_Init_Spread_Data` (0x722240), which throw both queues away and rebuild them through
+`TiberiumClass::Recalc_Growth_Data` (0x7233A0) - a walk of the map with the cell iterator, pushing
+every eligible cell scored `0.0`. The *set* of cells survives that; the order does not.
+
+So after a load the ore thickens in map-scan order instead of the order the recording had reached.
+Different cells grow, harvesters pick different ore, and the units driving around them take
+different paths - and not one step of that draws an extra random number, which is why it stayed
+invisible to every randomiser check and surfaced hundreds of frames later as a tank following a
+different route. A keyframe records both heaps and the per-cell "already queued" flags behind them,
+and writes them back over what the load rebuilt. The node pool underneath is a bump allocator the
+engine only appends to and only ever resets wholesale, and nothing reads an entry the heap does not
+point at, so the live nodes are put back compacted at the front of it.
+
+This is the same loss an ordinary save/load has always had; it is only visible here because a
+replay has something exact to be compared against.
+
+**The hierarchical subzone graph is rebuilt without its history.** Above the cell grid RA2 keeps
+three increasingly coarse graphs which the long-range A* search walks before it searches individual
+cells. Each graph entry contains an ordered adjacency vector, its parent at the next coarser level,
+its passability, and its threat-map region. The per-cell subzone IDs are indices into those vectors.
+
+`MapClass_LevelAndPassability_567110` clears all three graphs and rebuilds them through
+`MapClass_subzone_581F90`. Gameplay does not keep doing full rebuilds: walls, rubble, cliffs,
+overlays, terrain and bridge changes call the incremental updater at 0x584550, which removes and
+appends subzones in the affected block. The resulting numbering and connection order therefore
+encode the map's history. A load with the same cells can still build a different graph. In the
+failing replay, keyframe 1500 had 4,942 fine subzones while the load built 4,936, and 2,820 of the
+4,936 shared indices already differed. This was not an append-only shortfall; the IDs themselves
+had shifted.
+
+Keyframes now carry every graph entry and every directed 8-byte connection in order, the 10-byte
+per-cell records whose first three words index those graphs, and the three entry counters at
+`MapClass+0x74..+0x7C`. Keeping both halves matters: restoring the recorded graph while leaving
+the cells holding the load-built numbering makes a hierarchical search index unrelated nodes.
+Restore first grows all engine-owned vectors, then writes the complete graph back and calls A*'s
+subzone-table reset at 0x42C1C0. That last call is required because the visit and cost arrays were
+sized for the smaller graph made by the load.
+The adjacent hash tables are not retained state: both RA2's incremental updater and the matching
+Tiberian Sun source clear every bucket before using them as duplicate-removal scratch.
+
+**The session is taken out of its in-game state.** `LoadOptionsClass::Load_File` runs
+`SessionClass`'s in-game teardown (0x69BB40) on the way into the load, which clears the flag at
+`SessionClass+0x30D8` that says the game is in play, releases and hides the mouse, and drops the
+audio level. The engine sets all of that back up on the way out of a load screen; a seek never
+goes through one. Leaving the flag clear is what made Escape crash after a load: the options
+dialog reads it (0x69BBE0) and lays itself out for the shell when it is false, dereferencing a
+menu-only shape pointer that is null in game - the fault at 0x60B3B5, `movsx` from `[0xB0FAC4]`.
+The seek calls the engine's own counterpart to the teardown (0x69BAB0) after every load, before
+re-pinning the game speed, because the teardown and the counterpart each have their own opinion
+about what the speed should be.
+
+**`DSurface::Temp` is left dangling.** `Decode_All_Pointers` calls `Allocate_Surfaces` (0x533FD0),
+which deletes and reallocates the composite, tile, sidebar, hidden and alternate surfaces and
+updates each of those globals - but not `DSurface::Temp` (0x887314), which is an alias that
+`WWMouseClass::PrepareScreen` normally points at the hidden surface. Nothing in a frame notices,
+because the two places that use it overwrite it before reading it, but Ares walks every surface
+global and calls a virtual on each non-null one before opening an in-game dialog - so pressing
+Escape after a load faulted in `Ares.dll+0x6258A`. The seek re-points it after every load.
+
+One more thing worth knowing when reading a divergence report: `Compute_Game_CRC` (0x64DAB0) draws
+from the scenario randomiser as its last act, and hashes the object arrays in their current order.
+The frame hash is therefore part of the same random stream the simulation draws from, and it is
+order-sensitive - which is why a keyframe records the array orders as well, and why the divergence
+log prints where the randomiser is.
+
+A frame record can therefore carry a `FrameRandomState` (`FrameRecordFlag_RandomState`, an
+int32 pair holding the randomiser's two table cursors, written straight after the object census).
+When playback finds a hash mismatch it compares that against its own position and says which of
+the two happened:
+
+- **randomiser in step, so the objects differ** - some state the simulation reads was not carried
+  across the load, and the objects have genuinely moved apart.
+- **randomiser drifted** - a draw was made on one side and not the other. The objects may still be
+  identical; something simply consumed randomness that the other run did not.
+
+This is an additive flag, so it does not bump the version, but a replay recorded with it cannot be
+read by a build that predates it - the unknown-flag check rejects the file rather than misparsing
+it. Replays recorded before it play back fine and the report says `not recorded` instead.Keyframes live in `<SavedGameDir>\Replay Keyframes`, are written when playback starts and are
 deleted when it ends. They are savegames, so they cost a few MB each; a 30 minute recording at the
 default interval leaves a few dozen of them while it is being watched.
 
-Two things a load has to be protected from. The scenario-start hooks (0x685659 and 0x686B6A) would
-otherwise reopen the replay from frame 0 and re-seed the RNG over the top of the state just
-restored, so both stand down while `ReplaySystem::Seek::IsLoadInProgress()` holds. And the frame
-stream is deflated, which has no random access: `RepositionPlaybackStreamToFrame` restarts the
-decompressor at the top and walks forward, re-applying the sticky state - viewport, game speed -
-carried by the sparse records it steps over. Inflating the whole stream is far cheaper than the
-simulation the seek is about to run anyway.
+### Finding the code behind a divergence
 
-Because a seek replays hundreds of frames in a second or two, recorded chat and taunts are dropped
-while one runs - they are momentary, and replaying them all would land the lot on screen at once
-with their lifetimes starting from the seek. Beacons are state that outlives the frame that placed
-them, so those are applied either way.
+Knowing the randomiser drifted still leaves the question of *what* drew from it. Playback answers
+that on its own, with nothing to diff by hand, when `ReplayDiagnostics` is set.
 
-### The control bar
+Everything in this section is behind that key and off by default. The watchers walk every techno,
+every object in the five display layers and the logic queue, and every cell on the map, on every
+frame, and keep all of it for the length of the replay so a frame can be compared against itself.
+That is what makes them worth having and also what makes them far too slow to watch a replay
+through.
 
-`ReplayControlBar` draws a media-player panel along the bottom of the tactical view
-(`src/Replay/ReplayOverlay.cpp`): jump to start, step back a frame, slower, play/pause, faster,
-step forward a frame, jump to end; a clock; the speed as a multiple of the recorded speed; and a
-seek bar that can be clicked or dragged, ticked with the frames a backwards seek can still reach.
+Seeking backwards replays frames that have already been played once, and that first pass is a
+known-good reference - it is the run that matched the recording. So playback remembers which code
+asked for each scenario-randomiser draw, keyed by frame, and when a frame comes round a second
+time it checks the sequence against what it was the first time:
 
-It is drawn from `GScreenClass::Render` at 0x4F4583 - after the sidebar, the message list and the
-tooltips, before the mouse cursor - so nothing in the game covers it and the cursor stays on top
-of it. Input is taken at 0x5BDF13, the point `MouseClass::AI` hands off to the rest of the input
-chain. While the pointer is over the panel, or holding the seek handle wherever it has been
-dragged to, that whole chain is skipped: a click on a button is not also a click on the map behind
-it, and the bottom screen edge under the panel does not scroll the view. Keyboard input is
-unaffected, because `Main_Loop` runs `Keyboard_Process` on the same key afterwards.
+```
+[Replay] Frame 3161 drew from the randomiser differently the second time round: it drew from
+somewhere else at draw 7 (first pass 004DAACB, after the keyframe load 0064DBA3). That address is
+the code whose state the load did not carry across.
+```
 
-Every button also has a keyboard command in the `Replay` category of the in-game keyboard options
-(`ReplayStepFrame`, `ReplaySeekBack`, `ReplaySeekForward`, `ReplayToggleControlBar`, alongside the
-existing pause and speed ones), so the bar can be hidden and the replay driven entirely from the
-keyboard.
+It reports the first difference and then stays quiet, because after that the two runs are
+different games. Three kinds of difference are caught: drawing from a different place, drawing
+more times than before, and stopping early.
 
-With `ReplayKeyframeInterval = 0` no keyframes are taken: seeking forward still works, seeking
-backwards does not, and the two buttons that need it are drawn greyed out.
+There are two taps, because a `Random2Class` has two draw entry points that do not share an
+implementation: `operator()` (0x65C780), which `Compute_Game_CRC` uses, and the ranged
+`operator()(int, int)` (0x65C7E0), which walks the table itself rather than calling the other one
+and which almost all gameplay randomness goes through. Tapping only the first sees a handful of
+draws per frame and misses everything that matters.
 
-`ReplayPlaybackSpeed` only sets the speed playback *starts* at; from there the hotkeys below own it.
+The ranged form also draws repeatedly until the value fits the range, so one call can advance the
+table any number of times. That is why each entry records where the randomiser stood as well as
+who asked: two runs can reach the same call site in the same order and still part company on how
+far they moved the table, and comparing the cursor catches that too.
 
-Playback also overrides `Seed`, `GameSpeed`, `Protocol`, `FrameSendRate` and `MaxAhead` from the
-header, skips `CreateConnections()`, and suppresses the statistics packet. `Spawner/Statistics.cpp`
-does that last one by jumping to `0x64820E`, which is the address of the replay system's own
-event-pump hook - moving that hook means moving that jump target with it.
+Draws from any randomiser other than the scenario's are ignored - the
+map generator and the shell menus have their own and neither is part of the simulation. Call sites
+are held in memory and capped at two million (about eight megabytes), which covers tens of
+thousands of frames of a normal skirmish.
 
-The spawner does **not** extract the embedded spawn.ini/spawnmap.ini for playback — it seeks past
-them. The client is responsible for writing both files out before launching.
+Draws made while a keyframe is loading are ignored. The load constructs every object the file
+holds and each constructor draws - `TechnoClass::TechnoClass` among them - and `ScenarioClass::Load`
+restores the frame counter before any of that runs, so those draws would otherwise land on the
+frame being loaded and be compared against its first pass. They are wiped a moment later when the
+keyframe restores the randomiser, so they are not part of the simulation.
+
+To use it: watch a replay past the point the divergence report named, seek back to before it, and
+let it play through again. The log names the address.
 
 ## Playback controls
 

@@ -40,6 +40,7 @@
 #include <MouseClass.h>
 #include <RulesClass.h>
 #include <SessionClass.h>
+#include <TechnoClass.h>
 #include <TacticalClass.h>
 #include <Timer.h>
 #include <Unsorted.h>
@@ -884,6 +885,8 @@ namespace ReplaySystem
 			ReplayState.HasExpectedGameCRC = false;
 			ReplayState.ExpectedCensus = { 0, 0 };
 			ReplayState.HasExpectedCensus = false;
+			ReplayState.ExpectedRandomState = { 0, 0 };
+			ReplayState.HasExpectedRandomState = false;
 			ReplayState.CensusMismatchReported = false;
 			ReplayState.LastRecordedGameSpeed = -1;
 			ReplayState.DivergenceReported = false;
@@ -917,6 +920,9 @@ namespace ReplaySystem
 		void AbortReplaySystem()
 		{
 			ReplaySystem::Seek::OnPlaybackStopped();
+			ResetRandomDrawTrace();
+			ResetMissionTrace();
+			ResetPathRequestTrace();
 			ResetRuntimeFlagsForScenario();
 			CloseReplayFile();
 		}
@@ -1226,6 +1232,9 @@ namespace ReplaySystem
 				header.Flags |= FrameRecordFlag_GameCRC;
 			if (capture.HasCensus)
 				header.Flags |= FrameRecordFlag_ObjectCensus;
+
+			if (capture.HasRandomState)
+				header.Flags |= FrameRecordFlag_RandomState;
 			if (capture.HasGameSpeed)
 				header.Flags |= FrameRecordFlag_GameSpeed;
 
@@ -1272,6 +1281,12 @@ namespace ReplaySystem
 
 			if (capture.HasCensus && !WriteRaw(&capture.Census, sizeof(capture.Census)))
 				return false;
+
+			if (capture.HasRandomState
+				&& !WriteRaw(&capture.RandomState, sizeof(capture.RandomState)))
+			{
+				return false;
+			}
 
 			if (capture.HasGameSpeed)
 			{
@@ -1521,6 +1536,12 @@ namespace ReplaySystem
 				return false;
 			}
 
+			if ((record.Flags & FrameRecordFlag_RandomState) != 0u
+				&& !ReadRaw(&record.RandomState, sizeof(record.RandomState)))
+			{
+				return false;
+			}
+
 			if ((record.Flags & FrameRecordFlag_GameSpeed) != 0u
 				&& !ReadRaw(&record.GameSpeed, sizeof(record.GameSpeed)))
 			{
@@ -1738,6 +1759,24 @@ namespace ReplaySystem
 		constexpr int MaxLoggedDivergences = 10;
 		constexpr int MaxLoggedDivergenceRecoveries = 3;
 
+		// Taken at the same point on both sides - after Compute_Game_CRC has made its own draw -
+		// so the two are directly comparable.
+		// Roughly eight megabytes of call sites. Enough for tens of thousands of frames of a normal
+		// skirmish, and a hard stop so a long watch cannot grow without bound.
+		constexpr size_t MaxTracedRandomDraws = 2000000;
+
+		FrameRandomState CurrentRandomState()
+		{
+			FrameRandomState state {};
+			if (ScenarioClass::Instance)
+			{
+				state.Next1 = ScenarioClass::Instance->Random.Next1;
+				state.Next2 = ScenarioClass::Instance->Random.Next2;
+			}
+
+			return state;
+		}
+
 		FrameObjectCensus CurrentObjectCensus()
 		{
 			FrameObjectCensus census {};
@@ -1777,6 +1816,478 @@ namespace ReplaySystem
 				census.ScenarioUniqueID, expected.ScenarioUniqueID);
 		}
 
+		// See ReplaySeek.cpp. The traces below are hooked into the randomiser and into every mission
+		// change, so they are asked on paths the simulation runs constantly.
+		bool DiagnosticsWanted()
+		{
+			const auto* const pConfig = GetConfig();
+			return pConfig && pConfig->ReplayDiagnostics;
+		}
+
+		#pragma region Randomiser draw trace
+
+		// Seeking backwards replays frames that have already been played once, and the first pass is a
+		// known-good reference: it is the run that matched the recording. So every draw from the
+		// scenario randomiser is remembered by frame - the address that asked for it, and where the
+		// randomiser stood when it did - and when a frame comes round a second time the sequence is
+		// checked against what it was the first time.
+		//
+		// The first line that differs names the code that went a different way after the keyframe load,
+		// which is the code whose state the load failed to carry across. No setting to turn on and
+		// nothing to diff by hand: watch a replay, seek back over what you watched, read the log.
+		//
+		// The cursor is kept as well as the caller because the ranged draw (0x65C7E0) rejects and
+		// redraws until the value fits the range, so one call can advance the table any number of
+		// times. Two runs can reach the same call site in the same order and still part company on
+		// how far they moved the table; comparing the cursor catches that as well.
+		uint32_t UniqueIDOfAbstract(const AbstractClass* pAbstract)
+		{
+			return pAbstract ? static_cast<uint32_t>(pAbstract->UniqueID) : 0u;
+		}
+
+		struct RandomDrawSite
+		{
+			uint32_t Caller;
+			int32_t Cursor;
+			// Which object was asking, where the call site bothers to say. Tells a same-object-at-a
+			// -different-time difference from a different-object-entirely one, which need looking at in
+			// completely different places.
+			uint32_t Context;
+		};
+
+		// Set just before a call that is about to draw, by a hook on a function whose object is
+		// worth naming. Consumed by the next draw and cleared, so it can never attach itself to an
+		// unrelated one.
+		uint32_t PendingRandomDrawContext = 0;
+		const TechnoClass* PendingRandomDrawTechno = nullptr;
+
+		std::unordered_map<int, std::vector<RandomDrawSite>> RandomDrawsByFrame;
+		size_t TracedRandomDrawCount = 0;
+		int TracedRandomFrame = -1;
+		// Where this frame's draws are appended, on a frame being seen for the first time.
+		std::vector<RandomDrawSite>* TracedRandomTarget = nullptr;
+		// What this frame drew the first time round, on a frame being replayed.
+		const std::vector<RandomDrawSite>* TracedRandomReference = nullptr;
+		size_t TracedRandomCompareIndex = 0;
+		bool TracedRandomMismatchReported = false;
+
+		void ResetRandomDrawTrace()
+		{
+			RandomDrawsByFrame.clear();
+			TracedRandomDrawCount = 0;
+			TracedRandomFrame = -1;
+			TracedRandomTarget = nullptr;
+			TracedRandomReference = nullptr;
+			TracedRandomCompareIndex = 0;
+			TracedRandomMismatchReported = false;
+			PendingRandomDrawContext = 0;
+			PendingRandomDrawTechno = nullptr;
+		}
+
+		void ReportRandomDrawMismatch(const char* what, int frame, size_t drawIndex,
+			const RandomDrawSite& before, const RandomDrawSite& now)
+		{
+			if (TracedRandomMismatchReported)
+				return;
+
+			TracedRandomMismatchReported = true;
+			Debug::Log("[Replay] Frame %d used the randomiser differently the second time round: %s at "
+				"draw %u. First pass: caller %08X, cursor %d, object %u. After the keyframe load: "
+				"caller %08X, cursor %d, object %u.\n",
+				frame, what, static_cast<unsigned int>(drawIndex + 1),
+				before.Caller, before.Cursor, before.Context,
+				now.Caller, now.Cursor, now.Context);
+
+			// The gate on this call is Frame - TargetingTimer.StartTime >= TimeLeft, so those two
+			// numbers say whether the object was scheduled to look for a target on this frame at all.
+			if (PendingRandomDrawTechno)
+			{
+				const auto* const pTechno = PendingRandomDrawTechno;
+				Debug::Log("[Replay] The object asking was %u: mission %d, target %u, targeting timer "
+					"started frame %d with %d to run, on frame %d.\n",
+					UniqueIDOfAbstract(pTechno), static_cast<int>(pTechno->CurrentMission),
+					UniqueIDOfAbstract(pTechno->Target),
+					pTechno->TargetingTimer.StartTime, pTechno->TargetingTimer.TimeLeft,
+					static_cast<int>(Unsorted::CurrentFrame));
+			}
+		}
+
+		// A frame boundary: decide whether this frame is being seen for the first time or replayed,
+		// and close out the frame that just ended.
+		void BeginRandomDrawTraceFrame(int frame)
+		{
+			// A replayed frame that stopped short drew fewer times than it did before, which is just as
+			// much a difference as drawing from somewhere else.
+			if (TracedRandomReference && TracedRandomCompareIndex < TracedRandomReference->size())
+			{
+				ReportRandomDrawMismatch("it stopped drawing early", TracedRandomFrame,
+					TracedRandomCompareIndex, (*TracedRandomReference)[TracedRandomCompareIndex],
+					RandomDrawSite { 0u, 0 });
+			}
+
+			TracedRandomFrame = frame;
+			TracedRandomTarget = nullptr;
+			TracedRandomReference = nullptr;
+			TracedRandomCompareIndex = 0;
+
+			const auto it = RandomDrawsByFrame.find(frame);
+			if (it != RandomDrawsByFrame.end())
+			{
+				TracedRandomReference = &it->second;
+				return;
+			}
+
+			if (TracedRandomDrawCount < MaxTracedRandomDraws)
+				TracedRandomTarget = &RandomDrawsByFrame[frame];
+		}
+
+		void SetRandomDrawContext(const TechnoClass* pTechno)
+		{
+			if (!DiagnosticsWanted())
+				return;
+
+			PendingRandomDrawTechno = pTechno;
+			PendingRandomDrawContext = UniqueIDOfAbstract(pTechno);
+		}
+
+		void TraceRandomDraw(const void* randomiser, const void* caller)
+		{
+			if (!DiagnosticsWanted())
+				return;
+
+			// Only the scenario's own randomiser drives the simulation. The map generator and the shell
+			// menus have their own, and draws from those mean nothing here.
+			if (!ReplayState.Playback || !ScenarioClass::Instance
+				|| randomiser != &ScenarioClass::Instance->Random)
+			{
+				return;
+			}
+
+			// A keyframe load draws from the randomiser itself - every object it constructs does, through
+			// TechnoClass::TechnoClass and its like - and ScenarioClass::Load restores the frame counter
+			// before any of that runs, so those draws land on the frame being loaded. They are wiped a
+			// moment later when the keyframe restores the randomiser, so they are not part of the
+			// simulation and comparing them against the first pass only ever reports the load itself.
+			if (Seek::IsLoadInProgress())
+				return;
+
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+			if (frame != TracedRandomFrame)
+				BeginRandomDrawTraceFrame(frame);
+
+			const RandomDrawSite site {
+				reinterpret_cast<uint32_t>(caller),
+				ScenarioClass::Instance->Random.Next1,
+				PendingRandomDrawContext
+			};
+
+			PendingRandomDrawContext = 0;
+
+			if (TracedRandomReference)
+			{
+				if (TracedRandomCompareIndex >= TracedRandomReference->size())
+				{
+					ReportRandomDrawMismatch("it drew more times than before", frame,
+						TracedRandomCompareIndex, RandomDrawSite { 0u, 0 }, site);
+				}
+				else
+				{
+					const RandomDrawSite& before = (*TracedRandomReference)[TracedRandomCompareIndex];
+					if (before.Caller != site.Caller)
+					{
+						ReportRandomDrawMismatch("it drew from somewhere else", frame,
+							TracedRandomCompareIndex, before, site);
+					}
+					else if (before.Cursor != site.Cursor)
+					{
+						ReportRandomDrawMismatch("the same caller found the randomiser elsewhere", frame,
+							TracedRandomCompareIndex, before, site);
+					}
+				}
+
+				++TracedRandomCompareIndex;
+				return;
+			}
+
+			if (TracedRandomTarget)
+			{
+				TracedRandomTarget->push_back(site);
+				++TracedRandomDrawCount;
+			}
+		}
+
+		#pragma endregion Randomiser draw trace
+
+		#pragma region Mission assignment trace
+
+		// The same idea as the draw trace, for the thing the draw trace cannot see. A mission change
+		// is how one object's behaviour turns into another's, and it happens on paths that consume no
+		// randomness at all - so a run that assigns a mission the first time round and not the second
+		// looks identical to every check that watches the randomiser.
+		//
+		// Every assignment is recorded by frame with the object, the mission and the code that asked.
+		// A frame replayed after a seek is checked against what it did the first time, and the first
+		// difference names the caller to go and read.
+		struct MissionAssignment
+		{
+			uint32_t Object;
+			int32_t Mission;
+			uint32_t Caller;
+		};
+
+		std::unordered_map<int, std::vector<MissionAssignment>> MissionsByFrame;
+		size_t TracedMissionCount = 0;
+		int TracedMissionFrame = -1;
+		std::vector<MissionAssignment>* TracedMissionTarget = nullptr;
+		const std::vector<MissionAssignment>* TracedMissionReference = nullptr;
+		size_t TracedMissionCompareIndex = 0;
+		bool TracedMissionMismatchReported = false;
+
+		constexpr size_t MaxTracedMissions = 400000;
+
+		void ResetMissionTrace()
+		{
+			MissionsByFrame.clear();
+			TracedMissionCount = 0;
+			TracedMissionFrame = -1;
+			TracedMissionTarget = nullptr;
+			TracedMissionReference = nullptr;
+			TracedMissionCompareIndex = 0;
+			TracedMissionMismatchReported = false;
+		}
+
+		void ReportMissionMismatch(const char* what, int frame, size_t index,
+			const MissionAssignment& before, const MissionAssignment& now)
+		{
+			if (TracedMissionMismatchReported)
+				return;
+
+			TracedMissionMismatchReported = true;
+			Debug::Log("[Replay] Frame %d assigned missions differently the second time round: %s at "
+				"assignment %u. First pass: object %u given mission %d by %08X. After the keyframe "
+				"load: object %u given mission %d by %08X.\n",
+				frame, what, static_cast<unsigned int>(index + 1),
+				before.Object, before.Mission, before.Caller,
+				now.Object, now.Mission, now.Caller);
+		}
+
+		void BeginMissionTraceFrame(int frame)
+		{
+			if (TracedMissionReference && TracedMissionCompareIndex < TracedMissionReference->size())
+			{
+				ReportMissionMismatch("it stopped assigning early", TracedMissionFrame,
+					TracedMissionCompareIndex, (*TracedMissionReference)[TracedMissionCompareIndex],
+					MissionAssignment { 0u, 0, 0u });
+			}
+
+			TracedMissionFrame = frame;
+			TracedMissionTarget = nullptr;
+			TracedMissionReference = nullptr;
+			TracedMissionCompareIndex = 0;
+
+			const auto it = MissionsByFrame.find(frame);
+			if (it != MissionsByFrame.end())
+			{
+				TracedMissionReference = &it->second;
+				return;
+			}
+
+			if (TracedMissionCount < MaxTracedMissions)
+				TracedMissionTarget = &MissionsByFrame[frame];
+		}
+
+		void TraceMissionAssignment(const void* object, int mission, const void* caller)
+		{
+			if (!DiagnosticsWanted() || !ReplayState.Playback || Seek::IsLoadInProgress())
+				return;
+
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+			if (frame != TracedMissionFrame)
+				BeginMissionTraceFrame(frame);
+
+			const MissionAssignment entry {
+				UniqueIDOfAbstract(static_cast<const AbstractClass*>(object)),
+				static_cast<int32_t>(mission),
+				reinterpret_cast<uint32_t>(caller)
+			};
+
+			if (TracedMissionReference)
+			{
+				if (TracedMissionCompareIndex >= TracedMissionReference->size())
+				{
+					ReportMissionMismatch("it assigned more than before", frame, TracedMissionCompareIndex,
+						MissionAssignment { 0u, 0, 0u }, entry);
+				}
+				else
+				{
+					const MissionAssignment& before = (*TracedMissionReference)[TracedMissionCompareIndex];
+					if (before.Object != entry.Object || before.Mission != entry.Mission
+						|| before.Caller != entry.Caller)
+					{
+						ReportMissionMismatch("a different assignment", frame, TracedMissionCompareIndex,
+							before, entry);
+					}
+				}
+
+				++TracedMissionCompareIndex;
+				return;
+			}
+
+			if (TracedMissionTarget)
+			{
+				TracedMissionTarget->push_back(entry);
+				++TracedMissionCount;
+			}
+		}
+
+		#pragma endregion Mission assignment trace
+
+		#pragma region Pathfinder request trace
+
+		// Everything the pathfinder is asked about now checks out across a load - the cells, the map's own
+		// copy of their passability and zone, and the thirteen movement zone tables the zone lookup ends
+		// in - and so does every field of the unit doing the asking. What is left is the possibility that
+		// two runs ask different questions, or ask at different moments.
+		//
+		// So the questions are recorded. FootClass::Basic_Path (0x4D3920) is the one entry point every
+		// route goes through; each call is written down by frame with who asked and what they asked for,
+		// and a frame replayed after a seek is checked against what it was the first time. Either the
+		// calls match - in which case the pathfinder returned two different answers to the same question,
+		// and the difference is inside Find_Path - or they do not, and the report names the frame where
+		// the asking itself changed.
+		struct PathRequest
+		{
+			uint32_t Object;
+			int32_t DestX;
+			int32_t DestY;
+			int32_t PathOffset;
+			int32_t Avoidance;
+			bool operator==(const PathRequest&) const = default;
+		};
+
+		std::unordered_map<int, std::vector<PathRequest>> PathRequestsByFrame;
+		size_t TracedPathRequestCount = 0;
+		int TracedPathFrame = -1;
+		std::vector<PathRequest>* TracedPathTarget = nullptr;
+		const std::vector<PathRequest>* TracedPathReference = nullptr;
+		size_t TracedPathCompareIndex = 0;
+		bool TracedPathMismatchReported = false;
+
+		constexpr size_t MaxTracedPathRequests = 400000;
+
+		void ResetPathRequestTrace()
+		{
+			PathRequestsByFrame.clear();
+			TracedPathRequestCount = 0;
+			TracedPathFrame = -1;
+			TracedPathTarget = nullptr;
+			TracedPathReference = nullptr;
+			TracedPathCompareIndex = 0;
+			TracedPathMismatchReported = false;
+		}
+
+		void ReportPathRequestMismatch(const char* what, int frame, size_t index,
+			const PathRequest& before, const PathRequest& now)
+		{
+			if (TracedPathMismatchReported)
+				return;
+
+			TracedPathMismatchReported = true;
+			Debug::Log("[Replay] Frame %d asked the pathfinder differently the second time round: %s at "
+				"request %u. First pass: object %u wanted cell %d,%d from step %d avoiding %d. After the "
+				"keyframe load: object %u wanted cell %d,%d from step %d avoiding %d.\n",
+				frame, what, static_cast<unsigned int>(index + 1),
+				before.Object, before.DestX, before.DestY, before.PathOffset, before.Avoidance,
+				now.Object, now.DestX, now.DestY, now.PathOffset, now.Avoidance);
+		}
+
+		void BeginPathRequestFrame(int frame)
+		{
+			if (TracedPathReference && TracedPathCompareIndex < TracedPathReference->size())
+			{
+				ReportPathRequestMismatch("it stopped asking early", TracedPathFrame,
+					TracedPathCompareIndex, (*TracedPathReference)[TracedPathCompareIndex], PathRequest {});
+			}
+
+			TracedPathFrame = frame;
+			TracedPathTarget = nullptr;
+			TracedPathReference = nullptr;
+			TracedPathCompareIndex = 0;
+
+			const auto it = PathRequestsByFrame.find(frame);
+			if (it != PathRequestsByFrame.end())
+			{
+				TracedPathReference = &it->second;
+				return;
+			}
+
+			if (TracedPathRequestCount < MaxTracedPathRequests)
+				TracedPathTarget = &PathRequestsByFrame[frame];
+		}
+
+		void TracePathRequest(const void* object, int cell, int pathOffset, int avoidance)
+		{
+			if (!DiagnosticsWanted() || !ReplayState.Playback || Seek::IsLoadInProgress())
+				return;
+
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+			if (frame != TracedPathFrame)
+				BeginPathRequestFrame(frame);
+
+			const PathRequest entry {
+				UniqueIDOfAbstract(static_cast<const AbstractClass*>(object)),
+				static_cast<int16_t>(cell & 0xFFFF),
+				static_cast<int16_t>((cell >> 16) & 0xFFFF),
+				pathOffset,
+				avoidance
+			};
+
+			if (TracedPathReference)
+			{
+				if (TracedPathCompareIndex >= TracedPathReference->size())
+				{
+					ReportPathRequestMismatch("it asked more than before", frame, TracedPathCompareIndex,
+						PathRequest {}, entry);
+				}
+				else
+				{
+					const PathRequest& before = (*TracedPathReference)[TracedPathCompareIndex];
+					if (!(before == entry))
+						ReportPathRequestMismatch("a different question", frame, TracedPathCompareIndex,
+							before, entry);
+				}
+
+				++TracedPathCompareIndex;
+				return;
+			}
+
+			if (TracedPathTarget)
+			{
+				TracedPathTarget->push_back(entry);
+				++TracedPathRequestCount;
+			}
+		}
+
+		#pragma endregion Pathfinder request trace
+
+		// A trace that reports nothing is only worth something if it can be told apart from a trace
+		// that never ran. One pathfinder run came back silent and there was no way to know whether
+		// the questions matched or the hook had simply never fired.
+		void ReportTraceCoverage()
+		{
+			if (!DiagnosticsWanted())
+				return;
+
+			Debug::Log("[Replay] Traces recorded %u randomiser draws, %u mission assignments and %u "
+				"pathfinder requests over %u, %u and %u frames.\n",
+				static_cast<unsigned int>(TracedRandomDrawCount),
+				static_cast<unsigned int>(TracedMissionCount),
+				static_cast<unsigned int>(TracedPathRequestCount),
+				static_cast<unsigned int>(RandomDrawsByFrame.size()),
+				static_cast<unsigned int>(MissionsByFrame.size()),
+				static_cast<unsigned int>(PathRequestsByFrame.size()));
+		}
+
 		void CaptureGameCRCForCurrentFrame()
 		{
 			if (!ReplayState.Recording && !ReplayState.Playback)
@@ -1798,6 +2309,8 @@ namespace ReplaySystem
 				capture.HasGameCRC = true;
 				capture.Census = CurrentObjectCensus();
 				capture.HasCensus = true;
+				capture.RandomState = CurrentRandomState();
+				capture.HasRandomState = true;
 				return;
 			}
 
@@ -1826,7 +2339,10 @@ namespace ReplaySystem
 
 			++ReplayState.MismatchedFrameCount;
 			if (ReplayState.FirstMismatchFrame < 0)
+			{
 				ReplayState.FirstMismatchFrame = frameNumber;
+				ReportTraceCoverage();
+			}
 
 			ReplayState.LastMismatchFrame = frameNumber;
 			ReplayState.LastCheckMismatched = true;
@@ -1834,9 +2350,35 @@ namespace ReplaySystem
 			if (ReplayState.LoggedMismatchCount < MaxLoggedDivergences)
 			{
 				++ReplayState.LoggedMismatchCount;
-				Debug::Log("[Replay] Playback diverged from the recording on frame %d "
-					"(recorded CRC %08X, playback CRC %08X).\n", frameNumber, ReplayState.ExpectedGameCRC,
-					gameCRC);
+				// Compute_Game_CRC (0x64DAB0) hashes the object arrays and then draws from the scenario
+				// randomiser, so a mismatched hash has two very different explanations. If the recording
+				// says the randomiser was in the same place, the objects themselves differ - some state
+				// the simulation reads was not carried across. If it was somewhere else, a draw was made
+				// on one side and not the other, and the objects may be identical.
+				const FrameRandomState randomState = CurrentRandomState();
+
+				if (ReplayState.HasExpectedRandomState)
+				{
+					const bool randomiserMatches =
+						randomState.Next1 == ReplayState.ExpectedRandomState.Next1
+						&& randomState.Next2 == ReplayState.ExpectedRandomState.Next2;
+
+					Debug::Log("[Replay] Playback diverged from the recording on frame %d "
+						"(recorded CRC %08X, playback CRC %08X; randomiser at %d/%d, recorded %d/%d - %s).\n",
+						frameNumber, ReplayState.ExpectedGameCRC, gameCRC,
+						randomState.Next1, randomState.Next2,
+						ReplayState.ExpectedRandomState.Next1, ReplayState.ExpectedRandomState.Next2,
+						randomiserMatches
+							? "randomiser in step, so the objects differ"
+							: "randomiser drifted, so a draw was made on one side only");
+				}
+				else
+				{
+					Debug::Log("[Replay] Playback diverged from the recording on frame %d "
+						"(recorded CRC %08X, playback CRC %08X; randomiser at %d/%d, not recorded).\n",
+						frameNumber, ReplayState.ExpectedGameCRC, gameCRC,
+						randomState.Next1, randomState.Next2);
+				}
 
 				if (ReplayState.LoggedMismatchCount == MaxLoggedDivergences)
 				{
@@ -1866,8 +2408,11 @@ namespace ReplaySystem
 			CaptureGameCRCForCurrentFrame();
 		}
 
+
 		void LogPlaybackDivergenceSummary()
 		{
+			ReportTraceCoverage();
+
 			if (!ReplayState.Playback || ReplayState.CheckedFrameCount == 0)
 				return;
 
@@ -1882,6 +2427,7 @@ namespace ReplaySystem
 				"last frame %d).\n", ReplayState.MismatchedFrameCount, ReplayState.CheckedFrameCount,
 				ReplayState.FirstMismatchFrame, ReplayState.LastMismatchFrame);
 		}
+
 
 		void StopReplaySystem()
 		{
@@ -1950,6 +2496,7 @@ namespace ReplaySystem
 
 			ReplayState.ExpectedEventsThisFrame = 0;
 			ReplayState.HasExpectedGameCRC = false;
+			ReplayState.HasExpectedRandomState = false;
 			ReplayState.HighestPlayedFrame = std::max(ReplayState.HighestPlayedFrame,
 				currentFrame);
 
@@ -2024,6 +2571,12 @@ namespace ReplaySystem
 			{
 				ReplayState.ExpectedCensus = frameRecord.Census;
 				ReplayState.HasExpectedCensus = true;
+			}
+
+			if ((frameRecord.Flags & FrameRecordFlag_RandomState) != 0u)
+			{
+				ReplayState.ExpectedRandomState = frameRecord.RandomState;
+				ReplayState.HasExpectedRandomState = true;
 			}
 
 			// Applied from the same point in the frame the recording read it from.

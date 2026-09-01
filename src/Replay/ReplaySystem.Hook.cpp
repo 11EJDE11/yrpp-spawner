@@ -513,6 +513,51 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 	return 0;
 }
 
+// The two ways to draw from a Random2Class. They do not share an implementation: the ranged one
+// walks the table itself rather than calling the other, and it draws repeatedly until the value
+// fits the range - so both have to be tapped, and one ranged call can move the table more than
+// once. Almost all gameplay randomness comes through the ranged form; Compute_Game_CRC uses the
+// plain one. See TraceRandomDraw in ReplaySystem.cpp.
+// TechnoClass::Target_Something_Nearby, which draws as its first act. The divergence trace
+// keeps catching this one, and knowing which object asked is the difference between a
+// techno whose schedule slipped and a different techno entirely running in its place.
+// MissionClass::Assign_Mission, the single point every mission change goes through. Recorded
+// per frame so a seek can be checked against what the same frame did the first time round.
+// FootClass::Basic_Path, the one entry point every route request goes through. Recorded per
+// frame so a seek can be checked against the questions the same frame asked the first time.
+DEFINE_HOOK(0x4D3920, FootClass_BasicPath_TraceForDivergence, 0x5)
+{
+	TracePathRequest(R->ECX<void*>(), R->Stack<int>(0x4), R->Stack<int>(0x8), R->Stack<int>(0xC));
+	return 0;
+}
+
+DEFINE_HOOK(0x5B35E0, MissionClass_AssignMission_TraceForDivergence, 0x5)
+{
+	TraceMissionAssignment(R->ECX<void*>(), R->Stack<int>(0x4), R->Stack<const void*>(0x0));
+	return 0;
+}
+
+DEFINE_HOOK(0x709820, TechnoClass_TargetSomethingNearby_NameTheAsker, 0x5)
+{
+	if (ReplayState.Playback)
+		SetRandomDrawContext(R->ECX<TechnoClass*>());
+
+	return 0;
+}
+
+DEFINE_HOOK(0x65C780, Random2Class_Draw_TraceForDivergence, 0x5)
+{
+	// The caller is still on the stack: nothing has been pushed at the function's first byte.
+	TraceRandomDraw(R->ECX<const void*>(), R->Stack<const void*>(0x0));
+	return 0;
+}
+
+DEFINE_HOOK(0x65C7E0, Random2Class_DrawRanged_TraceForDivergence, 0x6)
+{
+	TraceRandomDraw(R->ECX<const void*>(), R->Stack<const void*>(0x0));
+	return 0;
+}
+
 #pragma region Playback controls overlay
 
 // GScreenClass::Render, after the sidebar, the message list and the tooltips have gone onto the

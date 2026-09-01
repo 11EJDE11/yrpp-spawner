@@ -62,7 +62,12 @@ namespace Replay
 		// The game speed changed on this frame; an int32 index follows. A single player game
 		// changes it without queueing an event, so the stream is the only place playback can
 		// learn about it.
-		FrameRecordFlag_GameSpeed = 1u << 6
+		FrameRecordFlag_GameSpeed = 1u << 6,
+		// Where the scenario randomiser stood after this frame's hash was taken. Compute_Game_CRC
+		// draws from that randomiser, so a hash that differs while the objects match means the
+		// randomiser drifted rather than the simulation - two very different bugs. A FrameRandomState
+		// follows.
+		FrameRecordFlag_RandomState = 1u << 7
 	};
 
 	constexpr uint32_t KnownFrameRecordFlags = FrameRecordFlag_TacticalPos
@@ -71,7 +76,8 @@ namespace Replay
 		| FrameRecordFlag_GameCRC
 		| FrameRecordFlag_Extensions
 		| FrameRecordFlag_ObjectCensus
-		| FrameRecordFlag_GameSpeed;
+		| FrameRecordFlag_GameSpeed
+		| FrameRecordFlag_RandomState;
 
 	constexpr uint32_t MaxFrameExtensionBytes = 1u << 20;
 
@@ -137,6 +143,14 @@ namespace Replay
 		uint32_t Reserved[16];
 	};
 
+	// The randomiser's two table cursors. Enough to tell a drifted randomiser from a drifted
+	// simulation, without putting a kilobyte of table in every frame.
+	struct FrameRandomState
+	{
+		int32_t Next1;
+		int32_t Next2;
+	};
+
 	struct FrameObjectCensus
 	{
 		int32_t AbstractCount;
@@ -158,6 +172,7 @@ namespace Replay
 	static_assert(sizeof(ReplayHeader) == 1452, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameObjectCensus) == 8, "FrameObjectCensus layout changed; update docs/replay-format.md");
+	static_assert(sizeof(FrameRandomState) == 8, "FrameRandomState layout changed; update docs/replay-format.md");
 	static_assert(sizeof(SideChannelRecord) == 329, "SideChannelRecord layout changed; update docs/replay-format.md");
 
 	static_assert(offsetof(ReplayHeader, Magic) == 0, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");

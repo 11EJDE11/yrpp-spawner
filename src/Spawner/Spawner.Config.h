@@ -131,6 +131,15 @@ public:
 	// forward-only. See ReplaySeek.h.
 	int  ReplayKeyframeInterval;
 
+	// Per-frame state watchers that compare a seek against the frames playback already went
+	// through, and name the first object, cell or randomiser draw the two disagree about. They
+	// walk every cell on the map every frame, so they are far too slow to leave on: this is for
+	// chasing a divergence, not for watching a replay.
+	// TEMPORARY: defaulted on while a seek divergence is being chased, because the client
+	// rewrites spawn.ini on every launch and will not carry the key. Back to false once it is
+	// found.
+	bool ReplayDiagnostics;
+
 	// Scenario Options
 	int  Seed;
 	int  TechLevel;
@@ -220,6 +229,7 @@ public:
 		, ReplayViewPlayer { -1 }
 		, ReplayControlBar { true }
 		, ReplayKeyframeInterval { 750 }
+		, ReplayDiagnostics { true }
 
 		// Scenario Options
 		, Seed { 0 }

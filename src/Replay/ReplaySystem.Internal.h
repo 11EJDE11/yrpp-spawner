@@ -27,6 +27,8 @@
 
 #include <Spawner/Spawner.Config.h>
 
+class TechnoClass;
+
 #include <EventClass.h>
 #include <GeneralStructures.h>
 
@@ -58,6 +60,7 @@ namespace ReplaySystem
 			std::vector<SideChannelRecord> SideChannelEvents;
 			uint32_t GameCRC = 0;
 			FrameObjectCensus Census { 0, 0 };
+			FrameRandomState RandomState { 0, 0 };
 			int32_t GameSpeed = 0;
 			bool EndOfStream = false;
 		};
@@ -75,6 +78,8 @@ namespace ReplaySystem
 			bool HasGameCRC = false;
 			FrameObjectCensus Census { 0, 0 };
 			bool HasCensus = false;
+			FrameRandomState RandomState { 0, 0 };
+			bool HasRandomState = false;
 			int32_t GameSpeed = 0;
 			bool HasGameSpeed = false;
 		};
@@ -119,6 +124,8 @@ namespace ReplaySystem
 			bool HasExpectedGameCRC = false;
 			FrameObjectCensus ExpectedCensus { 0, 0 };
 			bool HasExpectedCensus = false;
+			FrameRandomState ExpectedRandomState { 0, 0 };
+			bool HasExpectedRandomState = false;
 			bool CensusMismatchReported = false;
 			// The game speed as last written into the stream, so only changes are recorded. -1
 			// forces the first frame to establish the baseline.
@@ -217,6 +224,22 @@ namespace ReplaySystem
 		// over. Used by seeking; see ReplaySeek.h.
 		bool RepositionPlaybackStreamToFrame(int targetFrame);
 		void CaptureGameCRCForCurrentFrame();
+		// Divergence hunting. Remembers which code asked for each scenario-randomiser draw, by frame,
+		// and checks a frame replayed after a seek against what it drew the first time round. The
+		// first difference names the code whose state the keyframe load did not carry across. Always
+		// on during playback; see docs/replay-format.md.
+		void TraceRandomDraw(const void* randomiser, const void* caller);
+		void ResetRandomDrawTrace();
+		// The same trick for mission changes, which move an object's behaviour without touching
+		// the randomiser and so are invisible to the draw trace.
+		void TraceMissionAssignment(const void* object, int mission, const void* caller);
+		void ResetMissionTrace();
+		// Every route request, so two runs can be checked for asking the pathfinder the same
+		// questions in the same order before anyone blames the pathfinder for the answers.
+		void TracePathRequest(const void* object, int cell, int pathOffset, int avoidance);
+		void ResetPathRequestTrace();
+		// Names the object behind the next draw, for call sites where knowing it matters.
+		void SetRandomDrawContext(const TechnoClass* pTechno);
 		FrameObjectCensus CurrentObjectCensus();
 		void CheckObjectCensusForCurrentFrame();
 		void ComputeAndCaptureGameCRCForCurrentFrame();
