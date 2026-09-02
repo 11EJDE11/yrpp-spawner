@@ -43,6 +43,7 @@
 #include <AircraftClass.h>
 #include <AStarClass.h>
 #include <BuildingClass.h>
+#include <BulletClass.h>
 #include <EventClass.h>
 #include <GameModeOptionsClass.h>
 #include <GameOptionsClass.h>
@@ -57,6 +58,8 @@
 #include <PlanningTokenClass.h>
 #include <ScenarioClass.h>
 #include <SessionClass.h>
+#include <SlaveManagerClass.h>
+#include <SpawnManagerClass.h>
 #include <PriorityQueueClass.h>
 #include <TechnoClass.h>
 #include <TiberiumClass.h>
@@ -320,6 +323,11 @@ namespace ReplaySystem
 				// TiberiumLogic::CellIndexesWithTiberium, one bit per cell rather than the engine's one byte.
 				std::vector<unsigned char> CellFlagBits;
 				int CellFlagCount = 0;
+				// TiberiumLogic::Timer, kept whether or not the queue beside it could be captured: it is
+				// what decides whether the queue is looked at this frame at all.
+				bool TimerPresent = false;
+				int TimerStart = -1;
+				int TimerLeft = 0;
 			};
 
 			struct TiberiumSnapshot
@@ -416,6 +424,77 @@ namespace ReplaySystem
 				OrderedCollectionCount
 			};
 
+			// A CDTimerClass is three words - the frame it was started on, an unused slot, and how long
+			// it has to run - and every one of them is read the same way:
+			//
+			//     if (StartTime != -1 && Frame - StartTime >= TimeLeft) fire;
+			//     if (TimeLeft == 0)                                    fire;
+			//
+			// so a timer holding { Frame, 0 } fires on the next frame it is asked, and keeps firing. Four
+			// of the engine's own Load overrides write exactly that over the value they just read out of
+			// the savegame, through CDTimerClass::operator= (0x46B640) which is { Frame, argument }:
+			//
+			//     TiberiumClass::Load     (0x721E80) - both ore timers; handled with the ore queues
+			//     SlaveManagerClass::Load (0x6B1170) - the ten-frame gate on all slave logic
+			//     SpawnManagerClass::Load (0x6B7F10) - the update gate and the spawn timer
+			//     BulletClass::Load       (0x46AE70) - a projectile's two flight timers
+			//
+			// In a normal game none of this shows: a load is followed by whatever the player does next,
+			// and one early tick of the ore or the slaves is invisible. In a replay it is a guaranteed
+			// divergence on the first frame after any seek. SlaveManagerClass::AI (0x6AF5F0) runs its
+			// slaves once every ten frames and does nothing at all in between, so a manager whose gate has
+			// been reset is running on a different frame from the recording for the rest of the replay -
+			// its slaves scan for ore at different moments, pick different cells, take different paths and
+			// finish standing somewhere else. That is why seeking worked in the opening minutes and
+			// stopped working once there was a slave miner on the map.
+			//
+			// Two timers to an entry because that is the most any of them carries; an entry using one
+			// leaves the second stopped and is never asked about it.
+			struct LoadResetTimerSnapshot
+			{
+				uint32_t Id = 0;
+				int32_t FirstStart = -1;
+				int32_t FirstLeft = 0;
+				int32_t SecondStart = -1;
+				int32_t SecondLeft = 0;
+			};
+
+			struct LoadResetTimerSnapshots
+			{
+				std::vector<LoadResetTimerSnapshot> SpawnManagers;
+				std::vector<LoadResetTimerSnapshot> Bullets;
+			};
+
+			// Slave miners get more than their gate timer put back. Restoring the gate alone fixed which
+			// frames SlaveManagerClass::AI ran on and the runs still parted company on the first replayed
+			// frame - the same ore cell being handed to a different slave, the same code assigning the same
+			// mission to a different object. That is not a question of when the manager runs but of what it
+			// finds when it does, so the whole of it is carried: the manager's own status and last scan, and
+			// every slave control in vector order with the slave it holds, the state machine position that
+			// decides which branch of Slave_AI (0x6AF6C0) it takes, and its respawn timer.
+			//
+			// Order matters as much as content. Slave_AI walks the controls from the front and the first one
+			// that wants an ore cell gets it, so two controls swapping places is a different pair of slaves
+			// doing each other's work - which is exactly what the divergence looked like.
+			struct SlaveControlSnapshot
+			{
+				uint32_t Slave = 0;
+				int32_t State = 0;
+				int32_t TimerStart = -1;
+				int32_t TimerLeft = 0;
+			};
+
+			struct SlaveManagerSnapshot
+			{
+				uint32_t Id = 0;
+				uint32_t Owner = 0;
+				int32_t State = 0;
+				int32_t LastScanFrame = 0;
+				int32_t TimerStart = -1;
+				int32_t TimerLeft = 0;
+				std::vector<SlaveControlSnapshot> Controls;
+			};
+
 			struct Keyframe
 			{
 				int Frame = 0;
@@ -433,6 +512,8 @@ namespace ReplaySystem
 				PlanningSnapshot Planning;
 				AresParticleSnapshot AresParticles;
 				TiberiumSnapshot Tiberium;
+				LoadResetTimerSnapshots LoadResetTimers;
+				std::vector<SlaveManagerSnapshot> SlaveManagers;
 				std::vector<unsigned char> CellPassability;
 				std::vector<CellLevelPassabilityStruct> ZonePassability;
 				std::vector<LevelAndPassabilityStruct2> CellSubzones;
@@ -3132,6 +3213,11 @@ namespace ReplaySystem
 			{
 				out = TiberiumQueueSnapshot {};
 
+				// Taken first, so that a queue this cannot capture still carries its timer across.
+				out.TimerPresent = true;
+				out.TimerStart = logic.Timer.StartTime;
+				out.TimerLeft = logic.Timer.TimeLeft;
+
 				auto* const pQueue = logic.Queue;
 				if (!pQueue || !pQueue->Nodes || !logic.Nodes || !logic.CellIndexesWithTiberium)
 					return false;
@@ -3252,6 +3338,7 @@ namespace ReplaySystem
 				int restored = 0;
 				int failed = 0;
 				int cells = 0;
+				int timers = 0;
 
 				for (int i = 0; i < typeCount; ++i)
 				{
@@ -3263,10 +3350,47 @@ namespace ReplaySystem
 					{
 						const TiberiumQueueSnapshot& queue =
 							snapshot.Queues[static_cast<size_t>(i)][static_cast<size_t>(kind)];
+						TiberiumLogic& logic = TiberiumLogicOf(pTiberium, kind);
+
+						// Whether the ore grows or spreads at all on a given frame is this timer, read by
+						// Tiberium_Growth_Logic (0x722C40) and Tiberium_Spread_Logic (0x7221B0) before either
+						// queue is touched:
+						//
+						//     if (Started != -1 && Frame - Started >= DelayTime) goto grow;
+						//     if (DelayTime == 0) goto grow;
+						//
+						// Both branches of that are open on a stopped timer - Started of -1 with nothing left
+						// to run - which is how a TiberiumClass comes back from a load, because the four of
+						// them are rebuilt from the rules rather than read out of the savegame. So the frame
+						// after every seek grew and spread its ore whether or not it was due, and the first
+						// draw of that frame came from TiberiumClass::Grow where the recording's had come from
+						// TerrainClass::AI further down the same frame. Everything after that was off by one
+						// draw, and the ore field itself had thickened a tick early.
+						//
+						// Put back ahead of the queue and separately from it: a queue that could not be
+						// captured is ore evolving in a different order, while a timer left as the load found
+						// it is a spurious growth tick on the very next frame.
+						if (queue.TimerPresent && (logic.Timer.StartTime != queue.TimerStart
+							|| logic.Timer.TimeLeft != queue.TimerLeft))
+						{
+							if (timers == 0)
+							{
+								Debug::Log("[Replay] Keyframe %d: ore type %d %s timer is %d/%d after loading; "
+									"it was %d/%d.\n", keyframeFrame, i,
+									kind == TiberiumQueue_Growth ? "growth" : "spread",
+									logic.Timer.StartTime, logic.Timer.TimeLeft,
+									queue.TimerStart, queue.TimerLeft);
+							}
+
+							logic.Timer.StartTime = queue.TimerStart;
+							logic.Timer.TimeLeft = queue.TimerLeft;
+							++timers;
+						}
+
 						if (!queue.Present)
 							continue;
 
-						if (RestoreTiberiumQueue(TiberiumLogicOf(pTiberium, kind), surfaceCount, queue))
+						if (RestoreTiberiumQueue(logic, surfaceCount, queue))
 						{
 							++restored;
 							cells += static_cast<int>(queue.Heap.size());
@@ -3290,10 +3414,415 @@ namespace ReplaySystem
 						"cells, which the load had rebuilt in map order.\n", keyframeFrame, restored, cells);
 				}
 
+				if (timers > 0)
+				{
+					Debug::Log("[Replay] Keyframe %d put back %d ore growth and spread timers the load had "
+						"left ready to fire.\n", keyframeFrame, timers);
+				}
+
 				return true;
 			}
 
 			#pragma endregion Ore growth and spread queues
+
+			#pragma region Slave manager state
+			// AbstractClass::AbstractClass (0x410170) sets ID to -1 and leaves it there. Only the classes
+			// whose constructors go on to call AbstractClass::Create_ID (0x410230) ever get a real one -
+			// the objects in the world, bullets included. SlaveManagerClass and SpawnManagerClass do not,
+			// so every one of them answers -1.
+			//
+			// That is not a detail: keying a snapshot by unique ID collapsed all four slave managers onto
+			// one map entry, and the restore wrote all four recorded timers, states and slave controls onto
+			// whichever manager happened to be first. Two rounds of slave-manager findings came out of that
+			// and none of them meant anything. The manager's owner is a techno and does have a real ID, and
+			// a techno has at most one manager of each kind, so the owner is the key.
+			uint32_t KeyOfManagerOwner(const AbstractClass* pOwner)
+			{
+				return UniqueIDOf(pOwner);
+			}
+
+			// A key that repeats, or is zero because there is nothing to key on, cannot be matched across a
+			// load - and silently aliasing is worse than not trying. Anything that cannot be keyed is left
+			// out of the snapshot and counted, so the log says so instead of quietly corrupting the world.
+			bool AddKeyed(std::vector<uint32_t>& seen, uint32_t key)
+			{
+				if (key == 0)
+					return false;
+
+				if (std::find(seen.begin(), seen.end(), key) != seen.end())
+					return false;
+
+				seen.push_back(key);
+				return true;
+			}
+
+			// SlaveManagerClass is saved whole - Size_Of (0x6B1370) is 0x64, which reaches past the last
+			// field - and its controls are written and read back twenty bytes at a time, so on paper none
+			// of this needs carrying. It is captured anyway because the divergence says otherwise, and a
+			// report naming the field that differs is worth more than another round of reading Load.
+			static_assert(sizeof(SlaveManagerClass::SlaveControl) == 0x14,
+				"SlaveManagerClass::Load (0x6B1170) reads each control as twenty bytes");
+			static_assert(offsetof(SlaveManagerClass, State) == 0x5C,
+				"SlaveManagerClass::Size_Of (0x6B1370) covers 0x64 bytes ending with LastScanFrame");
+			static_assert(offsetof(SlaveManagerClass, LastScanFrame) == 0x60,
+				"SlaveManagerClass::Size_Of (0x6B1370) covers 0x64 bytes ending with LastScanFrame");
+
+			void CaptureSlaveManagerState(std::vector<SlaveManagerSnapshot>& out)
+			{
+				out.clear();
+				out.reserve(static_cast<size_t>(std::max(SlaveManagerClass::Array.Count, 0)));
+
+				std::vector<uint32_t> seen;
+				seen.reserve(static_cast<size_t>(std::max(SlaveManagerClass::Array.Count, 0)));
+				int unkeyed = 0;
+
+				for (int i = 0; i < SlaveManagerClass::Array.Count; ++i)
+				{
+					const auto* const pManager = SlaveManagerClass::Array.Items[i];
+					if (!pManager)
+						continue;
+
+					// A manager whose owner has been killed does nothing at all - SlaveManagerClass::AI
+					// (0x6AF5F0) returns before Slave_AI when Owner is null - so there is nothing to carry.
+					const uint32_t key = KeyOfManagerOwner(pManager->Owner);
+					if (!AddKeyed(seen, key))
+					{
+						++unkeyed;
+						continue;
+					}
+
+					SlaveManagerSnapshot entry {};
+					entry.Id = key;
+					entry.Owner = key;
+					entry.State = static_cast<int32_t>(pManager->State);
+					entry.LastScanFrame = pManager->LastScanFrame;
+					entry.TimerStart = pManager->RespawnTimer.StartTime;
+					entry.TimerLeft = pManager->RespawnTimer.TimeLeft;
+
+					entry.Controls.reserve(static_cast<size_t>(std::max(pManager->SlaveNodes.Count, 0)));
+					for (int at = 0; at < pManager->SlaveNodes.Count; ++at)
+					{
+						const auto* const pControl = pManager->SlaveNodes.Items[at];
+						if (!pControl)
+						{
+							entry.Controls.push_back(SlaveControlSnapshot {});
+							continue;
+						}
+
+						entry.Controls.push_back(SlaveControlSnapshot {
+							UniqueIDOf(pControl->Slave),
+							static_cast<int32_t>(pControl->State),
+							pControl->RespawnTimer.StartTime,
+							pControl->RespawnTimer.TimeLeft
+						});
+					}
+
+					out.push_back(std::move(entry));
+				}
+
+				if (unkeyed > 0)
+				{
+					Debug::Log("[Replay] Keyframe %d is carrying %d slave managers and leaving %d that have "
+						"no owner to name them by.\n", static_cast<int>(Unsorted::CurrentFrame),
+						static_cast<int>(out.size()), unkeyed);
+				}
+			}
+
+			void RestoreSlaveManagerState(const Keyframe& keyframe)
+			{
+				if (keyframe.SlaveManagers.empty())
+					return;
+
+				std::unordered_map<uint32_t, SlaveManagerClass*> byId;
+				byId.reserve(static_cast<size_t>(std::max(SlaveManagerClass::Array.Count, 0)));
+				for (int i = 0; i < SlaveManagerClass::Array.Count; ++i)
+				{
+					auto* const pManager = SlaveManagerClass::Array.Items[i];
+					if (!pManager)
+						continue;
+
+					const uint32_t key = KeyOfManagerOwner(pManager->Owner);
+					if (key != 0)
+						byId.emplace(key, pManager);
+				}
+
+				// The slave a control holds is a pointer, so putting one back means finding the infantry
+				// the recording had there. One that cannot be found is reported rather than guessed at.
+				std::unordered_map<uint32_t, InfantryClass*> infantryById;
+				infantryById.reserve(static_cast<size_t>(std::max(InfantryClass::Array.Count, 0)));
+				for (int i = 0; i < InfantryClass::Array.Count; ++i)
+				{
+					if (auto* const pInfantry = InfantryClass::Array.Items[i])
+						infantryById.emplace(UniqueIDOf(pInfantry), pInfantry);
+				}
+
+				int managersChanged = 0;
+				int controlsChanged = 0;
+				int missing = 0;
+				int reshaped = 0;
+				int reported = 0;
+
+				for (const auto& saved : keyframe.SlaveManagers)
+				{
+					const auto found = byId.find(saved.Id);
+					if (found == byId.end())
+					{
+						++missing;
+						continue;
+					}
+
+					auto* const pManager = found->second;
+					bool managerDiffered = false;
+
+					if (static_cast<int32_t>(pManager->State) != saved.State
+						|| pManager->LastScanFrame != saved.LastScanFrame
+						|| pManager->RespawnTimer.StartTime != saved.TimerStart
+						|| pManager->RespawnTimer.TimeLeft != saved.TimerLeft)
+					{
+						if (reported < 4)
+						{
+							++reported;
+							Debug::Log("[Replay] Keyframe %d: the slave manager owned by %u came back in state "
+								"%d, last scan %d, gate %d/%d; it was state %d, last scan %d, gate %d/%d.\n",
+								keyframe.Frame, saved.Owner,
+								static_cast<int>(pManager->State), pManager->LastScanFrame,
+								pManager->RespawnTimer.StartTime, pManager->RespawnTimer.TimeLeft,
+								saved.State, saved.LastScanFrame, saved.TimerStart, saved.TimerLeft);
+						}
+
+						pManager->State = static_cast<SlaveManagerStatus>(saved.State);
+						pManager->LastScanFrame = saved.LastScanFrame;
+						pManager->RespawnTimer.StartTime = saved.TimerStart;
+						pManager->RespawnTimer.TimeLeft = saved.TimerLeft;
+						managerDiffered = true;
+					}
+
+					if (pManager->SlaveNodes.Count != static_cast<int>(saved.Controls.size()))
+					{
+						++reshaped;
+						Debug::Log("[Replay] Keyframe %d: the slave manager owned by %u came back with %d "
+							"controls; it had %d. Leaving them as the load built them.\n", keyframe.Frame,
+							saved.Owner,
+							pManager->SlaveNodes.Count, static_cast<int>(saved.Controls.size()));
+					}
+					else
+					{
+						for (int at = 0; at < pManager->SlaveNodes.Count; ++at)
+						{
+							auto* const pControl = pManager->SlaveNodes.Items[at];
+							if (!pControl)
+								continue;
+
+							const SlaveControlSnapshot& want = saved.Controls[static_cast<size_t>(at)];
+							const uint32_t slave = UniqueIDOf(pControl->Slave);
+							if (slave == want.Slave && static_cast<int32_t>(pControl->State) == want.State
+								&& pControl->RespawnTimer.StartTime == want.TimerStart
+								&& pControl->RespawnTimer.TimeLeft == want.TimerLeft)
+							{
+								continue;
+							}
+
+							if (reported < 4)
+							{
+								++reported;
+								Debug::Log("[Replay] Keyframe %d: the slave manager owned by %u had control %d "
+									"come back holding slave %u in state %d with timer %d/%d; it held slave %u in "
+									"state %d with timer %d/%d.\n", keyframe.Frame, saved.Owner, at,
+									slave, static_cast<int>(pControl->State),
+									pControl->RespawnTimer.StartTime, pControl->RespawnTimer.TimeLeft,
+									want.Slave, want.State, want.TimerStart, want.TimerLeft);
+							}
+
+							if (slave != want.Slave)
+							{
+								const auto wanted = infantryById.find(want.Slave);
+								if (want.Slave == 0)
+									pControl->Slave = nullptr;
+								else if (wanted != infantryById.end())
+									pControl->Slave = wanted->second;
+							}
+
+							pControl->State = static_cast<SlaveControlStatus>(want.State);
+							pControl->RespawnTimer.StartTime = want.TimerStart;
+							pControl->RespawnTimer.TimeLeft = want.TimerLeft;
+							++controlsChanged;
+							managerDiffered = true;
+						}
+					}
+
+					if (managerDiffered)
+						++managersChanged;
+				}
+
+				if (managersChanged == 0 && missing == 0 && reshaped == 0)
+				{
+					Debug::Log("[Replay] Keyframe %d found all %d slave managers already as it recorded "
+						"them.\n", keyframe.Frame, static_cast<int>(keyframe.SlaveManagers.size()));
+					return;
+				}
+
+				Debug::Log("[Replay] Keyframe %d put back %d of %d slave managers (%d controls); %d were "
+					"not in the world and %d had a different number of controls.\n", keyframe.Frame,
+					managersChanged, static_cast<int>(keyframe.SlaveManagers.size()), controlsChanged,
+					missing, reshaped);
+			}
+
+			#pragma endregion Slave manager state
+
+			#pragma region Frame timers the load resets
+
+			// The offsets the four Load overrides write through, so a YRpp layout change is a build error
+			// here rather than three silently wrong timers at runtime.
+			static_assert(offsetof(SlaveManagerClass, RespawnTimer) == 0x50,
+				"SlaveManagerClass::AI (0x6AF5F0) reads its gate at SlaveManagerClass+0x50");
+			static_assert(offsetof(SpawnManagerClass, UpdateTimer) == 0x50,
+				"SpawnManagerClass::Load (0x6B7F10) resets the update timer at SpawnManagerClass+0x50");
+			static_assert(offsetof(SpawnManagerClass, SpawnTimer) == 0x5C,
+				"SpawnManagerClass::Load (0x6B7F10) resets the spawn timer at SpawnManagerClass+0x5C");
+			static_assert(offsetof(BulletClass, Data) == 0xB8,
+				"BulletClass::Load (0x46AE70) resets both flight timers at BulletClass+0xB8");
+
+			std::array<CDTimerClass*, 2> TimersOfSpawnManager(SpawnManagerClass* pManager)
+			{
+				return { &pManager->UpdateTimer, &pManager->SpawnTimer };
+			}
+
+			std::array<CDTimerClass*, 2> TimersOfBullet(BulletClass* pBullet)
+			{
+				return { &pBullet->Data.UnknownTimer, &pBullet->Data.ArmTimer };
+			}
+
+			template <typename TArray, typename TKeyOf, typename TTimersOf>
+			void CaptureLoadResetTimers(TArray& array, std::vector<LoadResetTimerSnapshot>& out,
+				TKeyOf keyOf, TTimersOf timersOf)
+			{
+				out.clear();
+				out.reserve(static_cast<size_t>(std::max(array.Count, 0)));
+
+				std::vector<uint32_t> seen;
+				seen.reserve(static_cast<size_t>(std::max(array.Count, 0)));
+
+				for (int i = 0; i < array.Count; ++i)
+				{
+					auto* const pItem = array.Items[i];
+					if (!pItem)
+						continue;
+
+					const uint32_t key = keyOf(pItem);
+					if (!AddKeyed(seen, key))
+						continue;
+
+					const std::array<CDTimerClass*, 2> timers = timersOf(pItem);
+
+					LoadResetTimerSnapshot entry {};
+					entry.Id = key;
+					if (timers[0])
+					{
+						entry.FirstStart = timers[0]->StartTime;
+						entry.FirstLeft = timers[0]->TimeLeft;
+					}
+
+					if (timers[1])
+					{
+						entry.SecondStart = timers[1]->StartTime;
+						entry.SecondLeft = timers[1]->TimeLeft;
+					}
+
+					out.push_back(entry);
+				}
+			}
+
+			// Matched by unique ID rather than by position: the load rebuilds these arrays as it
+			// reconstructs the object graph, and an object that is no longer there is simply skipped.
+			template <typename TArray, typename TKeyOf, typename TTimersOf>
+			int RestoreLoadResetTimers(TArray& array, const std::vector<LoadResetTimerSnapshot>& saved,
+				TKeyOf keyOf, TTimersOf timersOf)
+			{
+				if (saved.empty())
+					return 0;
+
+				using Pointer = std::remove_reference_t<decltype(array.Items[0])>;
+				std::unordered_map<uint32_t, Pointer> byId;
+				byId.reserve(static_cast<size_t>(std::max(array.Count, 0)));
+				for (int i = 0; i < array.Count; ++i)
+				{
+					auto* const pItem = array.Items[i];
+					if (!pItem)
+						continue;
+
+					const uint32_t key = keyOf(pItem);
+					if (key != 0)
+						byId.emplace(key, pItem);
+				}
+
+				int restored = 0;
+				for (const auto& entry : saved)
+				{
+					const auto found = byId.find(entry.Id);
+					if (found == byId.end())
+						continue;
+
+					const std::array<CDTimerClass*, 2> timers = timersOf(found->second);
+					bool changed = false;
+
+					if (timers[0] && (timers[0]->StartTime != entry.FirstStart
+						|| timers[0]->TimeLeft != entry.FirstLeft))
+					{
+						timers[0]->StartTime = entry.FirstStart;
+						timers[0]->TimeLeft = entry.FirstLeft;
+						changed = true;
+					}
+
+					if (timers[1] && (timers[1]->StartTime != entry.SecondStart
+						|| timers[1]->TimeLeft != entry.SecondLeft))
+					{
+						timers[1]->StartTime = entry.SecondStart;
+						timers[1]->TimeLeft = entry.SecondLeft;
+						changed = true;
+					}
+
+					if (changed)
+						++restored;
+				}
+
+				return restored;
+			}
+
+			void CaptureLoadResetTimerState(LoadResetTimerSnapshots& out)
+			{
+				CaptureLoadResetTimers(SpawnManagerClass::Array, out.SpawnManagers,
+					[](const SpawnManagerClass* p) { return KeyOfManagerOwner(p->Owner); },
+					TimersOfSpawnManager);
+				CaptureLoadResetTimers(BulletClass::Array, out.Bullets,
+					[](const BulletClass* p) { return UniqueIDOf(p); }, TimersOfBullet);
+			}
+
+			void RestoreLoadResetTimerState(const Keyframe& keyframe)
+			{
+				const int spawns = RestoreLoadResetTimers(SpawnManagerClass::Array,
+					keyframe.LoadResetTimers.SpawnManagers,
+					[](const SpawnManagerClass* p) { return KeyOfManagerOwner(p->Owner); },
+					TimersOfSpawnManager);
+				const int bullets = RestoreLoadResetTimers(BulletClass::Array,
+					keyframe.LoadResetTimers.Bullets,
+					[](const BulletClass* p) { return UniqueIDOf(p); }, TimersOfBullet);
+
+				if (spawns == 0 && bullets == 0)
+				{
+					Debug::Log("[Replay] Keyframe %d found the %d spawn managers and %d bullets already "
+						"holding the timers it recorded.\n", keyframe.Frame,
+						static_cast<int>(keyframe.LoadResetTimers.SpawnManagers.size()),
+						static_cast<int>(keyframe.LoadResetTimers.Bullets.size()));
+					return;
+				}
+
+				Debug::Log("[Replay] Keyframe %d put back the frame timers the load had reset: %d of %d "
+					"spawn managers, %d of %d bullets.\n", keyframe.Frame,
+					spawns, static_cast<int>(keyframe.LoadResetTimers.SpawnManagers.size()),
+					bullets, static_cast<int>(keyframe.LoadResetTimers.Bullets.size()));
+			}
+
+			#pragma endregion Frame timers the load resets
 
 			bool CaptureKeyframeState(int frame, Keyframe& keyframe)
 			{
@@ -3320,6 +3849,8 @@ namespace ReplaySystem
 					return false;
 				CaptureLocomotorResetStates(keyframe.LocomotorResetStates);
 				CaptureTiberiumState(keyframe.Tiberium);
+				CaptureLoadResetTimerState(keyframe.LoadResetTimers);
+				CaptureSlaveManagerState(keyframe.SlaveManagers);
 				CaptureCellPassability(keyframe.CellPassability);
 				CaptureZonePassability(keyframe.ZonePassability);
 				if (!CaptureCellSubzones(keyframe.CellSubzones))
@@ -3984,6 +4515,8 @@ namespace ReplaySystem
 				RepointTempSurfaceAfterLoad();
 				ResumeInGameSessionAfterLoad();
 				RestoreHouseRepairState(keyframe);
+				RestoreLoadResetTimerState(keyframe);
+				RestoreSlaveManagerState(keyframe);
 				RestoreTechnoInPlayfieldState(keyframe);
 
 				// Both the teardown and the resume above have their own opinion about the game speed -

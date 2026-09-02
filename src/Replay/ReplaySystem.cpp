@@ -1857,11 +1857,30 @@ namespace ReplaySystem
 			uint32_t Context;
 		};
 
+		// What the object asking for a draw looked like at the moment it asked. This was the object
+		// pointer once, read back later when a mismatch was reported, and that was wrong twice over.
+		// A keyframe load destroys and rebuilds every object in the world, so a pointer set before the
+		// load is dangling after it - which is exactly when a mismatch is reported, and the report
+		// crashed reading through it. The attribution was wrong as well: the pointer outlived the draw
+		// that named it, so a mismatch on a later unnamed draw would name whichever object had last
+		// happened to set one. Copying the fields out at the call site fixes both - nothing is read
+		// through afterwards, and the snapshot travels with the draw it belongs to.
+		struct RandomDrawAsker
+		{
+			bool Valid;
+			uint32_t Object;
+			int32_t Mission;
+			uint32_t Target;
+			int32_t TimerStart;
+			int32_t TimerLeft;
+		};
+
 		// Set just before a call that is about to draw, by a hook on a function whose object is
-		// worth naming. Consumed by the next draw and cleared, so it can never attach itself to an
-		// unrelated one.
+		// worth naming. Consumed by the next draw, so it can never attach itself to an unrelated one.
 		uint32_t PendingRandomDrawContext = 0;
-		const TechnoClass* PendingRandomDrawTechno = nullptr;
+		RandomDrawAsker PendingRandomDrawAsker {};
+		// The asker of the draw being compared right now, moved across from the pending one.
+		RandomDrawAsker CurrentRandomDrawAsker {};
 
 		// Every draw the simulation makes this frame, so an object update can be measured by how
 		// many of them it consumed. See the object update order trace.
@@ -1887,7 +1906,8 @@ namespace ReplaySystem
 			TracedRandomCompareIndex = 0;
 			TracedRandomMismatchReported = false;
 			PendingRandomDrawContext = 0;
-			PendingRandomDrawTechno = nullptr;
+			PendingRandomDrawAsker = RandomDrawAsker {};
+			CurrentRandomDrawAsker = RandomDrawAsker {};
 		}
 
 		// A caller address is only worth printing if it can be looked up afterwards. gamemd is fixed
@@ -1922,7 +1942,7 @@ namespace ReplaySystem
 		}
 
 		void ReportRandomDrawMismatch(const char* what, int frame, size_t drawIndex,
-			const RandomDrawSite& before, const RandomDrawSite& now)
+			const RandomDrawSite& before, const RandomDrawSite& now, const RandomDrawAsker& asker)
 		{
 			if (TracedRandomMismatchReported)
 				return;
@@ -1942,14 +1962,11 @@ namespace ReplaySystem
 
 			// The gate on this call is Frame - TargetingTimer.StartTime >= TimeLeft, so those two
 			// numbers say whether the object was scheduled to look for a target on this frame at all.
-			if (PendingRandomDrawTechno)
+			if (asker.Valid)
 			{
-				const auto* const pTechno = PendingRandomDrawTechno;
 				Debug::Log("[Replay] The object asking was %u: mission %d, target %u, targeting timer "
 					"started frame %d with %d to run, on frame %d.\n",
-					UniqueIDOfAbstract(pTechno), static_cast<int>(pTechno->CurrentMission),
-					UniqueIDOfAbstract(pTechno->Target),
-					pTechno->TargetingTimer.StartTime, pTechno->TargetingTimer.TimeLeft,
+					asker.Object, asker.Mission, asker.Target, asker.TimerStart, asker.TimerLeft,
 					static_cast<int>(Unsorted::CurrentFrame));
 			}
 		}
@@ -1964,7 +1981,7 @@ namespace ReplaySystem
 			{
 				ReportRandomDrawMismatch("it stopped drawing early", TracedRandomFrame,
 					TracedRandomCompareIndex, (*TracedRandomReference)[TracedRandomCompareIndex],
-					RandomDrawSite { 0u, 0 });
+					RandomDrawSite { 0u, 0 }, RandomDrawAsker {});
 			}
 
 			TracedRandomFrame = frame;
@@ -1988,8 +2005,12 @@ namespace ReplaySystem
 			if (!DiagnosticsWanted())
 				return;
 
-			PendingRandomDrawTechno = pTechno;
 			PendingRandomDrawContext = UniqueIDOfAbstract(pTechno);
+			PendingRandomDrawAsker = pTechno
+				? RandomDrawAsker { true, PendingRandomDrawContext,
+					static_cast<int32_t>(pTechno->CurrentMission), UniqueIDOfAbstract(pTechno->Target),
+					pTechno->TargetingTimer.StartTime, pTechno->TargetingTimer.TimeLeft }
+				: RandomDrawAsker {};
 		}
 
 		void TraceRandomDraw(const void* randomiser, const void* caller)
@@ -2027,13 +2048,16 @@ namespace ReplaySystem
 			};
 
 			PendingRandomDrawContext = 0;
+			CurrentRandomDrawAsker = PendingRandomDrawAsker;
+			PendingRandomDrawAsker = RandomDrawAsker {};
 
 			if (TracedRandomReference)
 			{
 				if (TracedRandomCompareIndex >= TracedRandomReference->size())
 				{
 					ReportRandomDrawMismatch("it drew more times than before", frame,
-						TracedRandomCompareIndex, RandomDrawSite { 0u, 0 }, site);
+						TracedRandomCompareIndex, RandomDrawSite { 0u, 0 }, site,
+						CurrentRandomDrawAsker);
 				}
 				else
 				{
@@ -2041,12 +2065,12 @@ namespace ReplaySystem
 					if (before.Caller != site.Caller)
 					{
 						ReportRandomDrawMismatch("it drew from somewhere else", frame,
-							TracedRandomCompareIndex, before, site);
+							TracedRandomCompareIndex, before, site, CurrentRandomDrawAsker);
 					}
 					else if (before.Cursor != site.Cursor)
 					{
 						ReportRandomDrawMismatch("the same caller found the randomiser elsewhere", frame,
-							TracedRandomCompareIndex, before, site);
+							TracedRandomCompareIndex, before, site, CurrentRandomDrawAsker);
 					}
 				}
 
