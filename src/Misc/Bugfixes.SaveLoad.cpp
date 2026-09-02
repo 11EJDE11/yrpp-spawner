@@ -251,6 +251,9 @@ DEFINE_HOOK(0x663435, RocketLocomotionClass_Load_KeepTrailerTimer, 0x10)
 
 #pragma endregion Locomotor members reconstructed after load
 
+// Defined with the rest of the passability work further down; the load-path call site is here.
+void RecomputeAllCellPassability();
+
 #pragma region Scenario randomiser and unique-ID counter
 
 // ScenarioClass::Load (0x689470) reads 0x3740 bytes of scenario at 0x6894B7 and then runs
@@ -311,6 +314,11 @@ DEFINE_HOOK(0x6894CA, ScenarioClass_Load_PutRandomiserBack, 0x6)
 // correct in both directions and can never hand out an ID twice.
 DEFINE_HOOK(0x67E6BD, LoadGame_PutUniqueIDCounterBack, 0x5)
 {
+	// Everything the load builds is in place by here - the object graph, the map, the tiberium
+	// initialisation - so this is the last chance to correct the cells and the first point at which
+	// their occupants are all known.
+	RecomputeAllCellPassability();
+
 	if (!HaveScenarioLoadState || !ScenarioClass::Instance)
 		return 0;
 
@@ -395,26 +403,35 @@ DEFINE_HOOK(0x56730E, MapClass_ClipMap_KeepIsInPlayfield, 0x6)
 //
 // Check_Passability is the engine's own answer for one cell, derived from overlay, land type and
 // whatever is standing there, so the fix is to ask it for every cell once the world is whole.
-// MapClass_LevelAndPassability_567110 is the right moment and the only one needed: it is reached
-// only from MapClass::Set_Map_Dimensions (0x565C10), never per frame, and it goes on to rebuild
-// the passability copy and all three levels of the subzone graph from these cells. Recomputing at
-// its entry means everything downstream is built from correct input rather than repaired after.
 //
-// It runs for ordinary map setup as well as for a load. That is deliberate and harmless: the
-// answer for a cell is a function of the cell, so asking earlier than usual either agrees with
-// what is already there or corrects it.
+// It is asked twice, in two places, because neither alone covers both cases:
+//
+//  - At the entry to MapClass_LevelAndPassability_567110 (0x567110), which rebuilds the map's own
+//    passability copy and all three levels of the subzone graph from these cells. Recomputing there
+//    means that rebuild is fed correct input rather than repaired afterwards. That function is
+//    reached only from MapClass::Set_Map_Dimensions (0x565C10) and never per frame.
+//
+//  - At the end of Load_Game (0x67E440). The first attempt at this fix used only the hook above, on
+//    the strength of the call chain in the notes - and it never fired once, because
+//    Init_Scenario_stuff (0x685120) does not call Set_Map_Dimensions at all. It initialises the
+//    type heaps, resets A*, re-clips the radar and returns. A load therefore never reaches
+//    0x567110, the cells stayed as CellClass::Load left them, and the divergence came straight
+//    back. This second call site is on the load path by construction.
+//
+// Both run for ordinary map setup as well as for a load. That is deliberate and harmless: the
+// answer for a cell is a function of the cell, so asking more often than the engine does either
+// agrees with what is already there or corrects it.
 void CheckCellPassability(CellClass* pCell)
 {
 	using CheckPassability = void(__thiscall*)(CellClass*);
 	reinterpret_cast<CheckPassability>(0x483C80)(pCell);
 }
 
-// Five bytes: three pushes and the two-byte move that follows them.
-DEFINE_HOOK(0x567110, MapClass_LevelAndPassability_RecomputeCellPassability, 0x5)
+void RecomputeAllCellPassability()
 {
 	// Called during the very first map setup as well, when there may be no cell array yet.
 	if (!MapClass::Instance.Cells.Items)
-		return 0;
+		return;
 
 	const int count = std::min(MapClass::Instance.MaxNumCells, MapClass::MaxCells);
 	for (int i = 0; i < count; ++i)
@@ -422,7 +439,12 @@ DEFINE_HOOK(0x567110, MapClass_LevelAndPassability_RecomputeCellPassability, 0x5
 		if (auto* const pCell = MapClass::Instance.Cells[i])
 			CheckCellPassability(pCell);
 	}
+}
 
+// Five bytes: three pushes and the two-byte move that follows them.
+DEFINE_HOOK(0x567110, MapClass_LevelAndPassability_RecomputeCellPassability, 0x5)
+{
+	RecomputeAllCellPassability();
 	return 0;
 }
 

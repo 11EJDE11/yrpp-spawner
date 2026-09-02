@@ -496,6 +496,21 @@ namespace ReplaySystem
 				std::vector<SlaveControlSnapshot> Controls;
 			};
 
+			// Two pieces of derived map state the keyframe checks rather than carries.
+			//
+			// Both were reported already correct after every load ever examined, before and after the
+			// engine-side passability work, so copying them into each keyframe was three quarters of a
+			// megabyte of writing and retention to put back values that already matched. A hash costs
+			// eight bytes and one read-only pass and still catches it if that ever stops being true.
+			//
+			// The cells themselves are a different matter and are still carried; see CaptureCellPassability.
+			struct DerivedMapHashes
+			{
+				bool Present = false;
+				uint32_t ZonePassability = 0;
+				uint32_t MovementZones = 0;
+			};
+
 			struct Keyframe
 			{
 				int Frame = 0;
@@ -516,9 +531,8 @@ namespace ReplaySystem
 				LoadResetTimerSnapshots LoadResetTimers;
 				std::vector<SlaveManagerSnapshot> SlaveManagers;
 				std::vector<unsigned char> CellPassability;
-				std::vector<CellLevelPassabilityStruct> ZonePassability;
+				DerivedMapHashes DerivedMap;
 				std::vector<LevelAndPassabilityStruct2> CellSubzones;
-				std::array<std::vector<uint16_t>, 13> MovementZones;
 				SubzoneGraphSnapshot SubzoneGraph;
 				std::vector<LocomotorResetSnapshot> LocomotorResetStates;
 				// Every object array the engine iterates, in the order it held them. None of these is hashed
@@ -2719,6 +2733,12 @@ namespace ReplaySystem
 			//
 			// The keyframe carries the value rather than recomputing it: what has to be matched is the
 			// recording, not what a fresh calculation would arrive at.
+			// Still carried, and it earns its keep. Bugfixes.SaveLoad.cpp recomputes every cell's
+			// passability with the engine's own CellClass::Check_Passability (0x483C80) at the end of
+			// Load_Game, which should make this redundant - but the first attempt at that hook was placed
+			// somewhere a load never reaches, and the only reason that was noticed at all is that this
+			// restore had been dropped and the divergence came straight back. So the copy stays until the
+			// line below reports zero cells restored across a long session, and then it can go.
 			void CaptureCellPassability(std::vector<unsigned char>& out)
 			{
 				const int count = std::max(std::min(MapClass::Instance.MaxNumCells, MapClass::MaxCells), 0);
@@ -2769,94 +2789,25 @@ namespace ReplaySystem
 				}
 			}
 
-			// CellClass::Passability is not the only copy. MapClass keeps a second one per playfield cell in
-			// LevelAndPassability, alongside that cell's level and the index of the zone it belongs to, and
-			// that array is what the zone lookups actually read. MapClass::IsCellInPassableZone (0x56D230)
-			// ends with
-			//
-			//     return MoveZones[mzone][2 * LevelAndPassabilityArray[index].ZoneArrayIndex];
-			//
-			// indexed by X + Y * (MapRect.Height + MapRect.Width + 1), and FootClass::Basic_Path consults
-			// Is_In_Same_Zone before it does anything else. The Tiberian Sun source keeps the two in step by
-			// hand - CellClass::Recalc_Attributes ends with
-			//
-			//     Recalc_Passability();
-			//     zone->Height = Height;
-			//     zone->Passability = Passability;
-			//
-			// - so whatever the load does to one it does to the other, and putting the cells back on their own
-			// left this array still describing a map whose border was walkable.
-			//
-			// It travels with the keyframe for the same reason the cell copy does: what has to be matched is
-			// the recording, not what a recalculation would arrive at.
-			void CaptureZonePassability(std::vector<CellLevelPassabilityStruct>& out)
+			uint32_t HashBytes(uint32_t hash, const void* data, size_t size)
 			{
-				out.clear();
+				const auto* const pBytes = static_cast<const unsigned char*>(data);
+				for (size_t i = 0; i < size; ++i)
+					hash = (hash ^ pBytes[i]) * 16777619u;
 
+				return hash;
+			}
+			uint32_t HashZonePassability()
+			{
 				const auto& map = MapClass::Instance;
 				const int count = map.ValidMapCellCount;
 				if (!map.LevelAndPassability || count <= 0 || count > MapClass::MaxCells)
-					return;
+					return 0u;
 
-				out.assign(map.LevelAndPassability, map.LevelAndPassability + count);
+				return HashBytes(2166136261u, map.LevelAndPassability,
+					sizeof(CellLevelPassabilityStruct) * static_cast<size_t>(count));
 			}
 
-			void RestoreZonePassability(const std::vector<CellLevelPassabilityStruct>& zones, int keyframeFrame)
-			{
-				if (zones.empty())
-					return;
-
-				auto& map = MapClass::Instance;
-				const int count = map.ValidMapCellCount;
-				if (!map.LevelAndPassability || count <= 0 || static_cast<size_t>(count) != zones.size())
-				{
-					Debug::Log("[Replay] Keyframe %d holds zone passability for %d cells but the map now has "
-						"%d; leaving it as the load built it.\n", keyframeFrame,
-						static_cast<int>(zones.size()), count);
-					return;
-				}
-
-				int passability = 0;
-				int level = 0;
-				int zoneIndex = 0;
-
-				for (int i = 0; i < count; ++i)
-				{
-					const CellLevelPassabilityStruct& wanted = zones[static_cast<size_t>(i)];
-					CellLevelPassabilityStruct& live = map.LevelAndPassability[i];
-
-					if (live.CellPassability != wanted.CellPassability)
-						++passability;
-					if (live.CellLevel != wanted.CellLevel)
-						++level;
-					if (live.ZoneArrayIndex != wanted.ZoneArrayIndex)
-						++zoneIndex;
-
-					live = wanted;
-				}
-
-				if (passability > 0 || level > 0 || zoneIndex > 0)
-				{
-					Debug::Log("[Replay] Keyframe %d put back the map's own copy of the zone data: %d cells "
-						"differed in passability, %d in level, %d in which zone they belong to.\n",
-						keyframeFrame, passability, level, zoneIndex);
-				}
-				else
-				{
-					Debug::Log("[Replay] Keyframe %d found the map's copy of the zone data already correct.\n",
-						keyframeFrame);
-				}
-			}
-
-			// The graph's other half is the per-cell array at MapClass+0x70. A hierarchical search
-			// starts by reading word_0[level] from the start and destination cells (0x42C34A and
-			// 0x42C36E), then uses those values directly as indices into SubzoneTracking[level].
-			// Load rebuilds this array and the graph together. Restoring the old graph without restoring
-			// these IDs therefore makes every shifted cell point at an unrelated recorded node.
-			static_assert(sizeof(LevelAndPassabilityStruct2) == 0x0A);
-			static_assert(offsetof(LevelAndPassabilityStruct2, word_0) == 0x00);
-			static_assert(offsetof(LevelAndPassabilityStruct2, CellLevel) == 0x08);
-			static_assert(offsetof(LevelAndPassabilityStruct2, field_9) == 0x09);
 
 			bool CaptureCellSubzones(std::vector<LevelAndPassabilityStruct2>& out)
 			{
@@ -2942,67 +2893,54 @@ namespace ReplaySystem
 
 				return highest;
 			}
-
-			void CaptureMovementZones(std::array<std::vector<uint16_t>, 13>& out)
-			{
-				for (auto& table : out)
-					table.clear();
-
-				const int highest = HighestZoneArrayIndex();
-				if (highest < 0)
-					return;
-
-				const auto entries = static_cast<size_t>(highest) + 1u;
-				for (size_t zone = 0; zone < out.size(); ++zone)
-				{
-					if (const auto* const pTable = static_cast<const uint16_t*>(MapClass::Instance.MovementZones[zone]))
-						out[zone].assign(pTable, pTable + entries);
-				}
-			}
-
-			void RestoreMovementZones(const std::array<std::vector<uint16_t>, 13>& zones, int keyframeFrame)
+			uint32_t HashMovementZones()
 			{
 				const int highest = HighestZoneArrayIndex();
 				if (highest < 0)
-					return;
+					return 0u;
 
 				const auto entries = static_cast<size_t>(highest) + 1u;
-				int differed = 0;
-				int compared = 0;
-
-				for (size_t zone = 0; zone < zones.size(); ++zone)
+				uint32_t hash = 2166136261u;
+				for (size_t zone = 0; zone < 13; ++zone)
 				{
-					const std::vector<uint16_t>& wanted = zones[zone];
-					auto* const pTable = static_cast<uint16_t*>(MapClass::Instance.MovementZones[zone]);
-					if (wanted.size() != entries || !pTable)
-						continue;
-
-					for (size_t i = 0; i < entries; ++i)
-					{
-						++compared;
-						if (pTable[i] == wanted[i])
-							continue;
-
-						++differed;
-						pTable[i] = wanted[i];
-					}
+					if (const auto* const pTable = MapClass::Instance.MovementZones[zone])
+						hash = HashBytes(hash, pTable, sizeof(uint16_t) * entries);
 				}
 
-				if (compared == 0)
+				return hash;
+			}
+
+			void CaptureDerivedMapHashes(DerivedMapHashes& out)
+			{
+				out.ZonePassability = HashZonePassability();
+				out.MovementZones = HashMovementZones();
+				out.Present = true;
+			}
+
+			// Reported rather than repaired. If one of these stops matching, the engine-side save/load fix
+			// that should be deriving it has regressed, and putting a copy back here would hide that from
+			// the next person while leaving ordinary save/load broken.
+			void VerifyDerivedMapHashes(const Keyframe& keyframe)
+			{
+				if (!keyframe.DerivedMap.Present)
 					return;
 
-				if (differed > 0)
+				const uint32_t zones = HashZonePassability();
+				const uint32_t movement = HashMovementZones();
+
+				if (zones == keyframe.DerivedMap.ZonePassability
+					&& movement == keyframe.DerivedMap.MovementZones)
 				{
-					Debug::Log("[Replay] Keyframe %d put back the movement zone tables: %d of %d entries "
-						"differed across %d zones of %d.\n", keyframeFrame, differed, compared,
-						static_cast<int>(entries), static_cast<int>(zones.size()));
+					return;
 				}
-				else
-				{
-					Debug::Log("[Replay] Keyframe %d found the movement zone tables already correct (%d "
-						"entries).\n", keyframeFrame, compared);
-				}
+
+				Debug::Log("[Replay] Keyframe %d came back from the load deriving the map differently: "
+					"zone passability %s, movement zones %s. Both of these are rebuilt from the cells, so "
+					"look at what the cells came back holding first.\n", keyframe.Frame,
+					zones == keyframe.DerivedMap.ZonePassability ? "matches" : "DIFFERS",
+					movement == keyframe.DerivedMap.MovementZones ? "matches" : "DIFFERS");
 			}
+
 
 			// A third copy of passability, and the one that decides the shape of a long route rather than its
 			// first step. Above the cell grid the map keeps a subzone graph, and the pathfinder searches that
@@ -3879,10 +3817,9 @@ namespace ReplaySystem
 				CaptureLoadResetTimerState(keyframe.LoadResetTimers);
 				CaptureSlaveManagerState(keyframe.SlaveManagers);
 				CaptureCellPassability(keyframe.CellPassability);
-				CaptureZonePassability(keyframe.ZonePassability);
+				CaptureDerivedMapHashes(keyframe.DerivedMap);
 				if (!CaptureCellSubzones(keyframe.CellSubzones))
 					return false;
-				CaptureMovementZones(keyframe.MovementZones);
 				CaptureSubzoneTracking(keyframe.SubzoneGraph);
 
 				int orderIndex = 0;
@@ -3942,10 +3879,9 @@ namespace ReplaySystem
 					return false;
 				RestoreTiberiumState(keyframe.Tiberium, keyframe.Frame);
 				RestoreCellPassability(keyframe.CellPassability, keyframe.Frame);
-				RestoreZonePassability(keyframe.ZonePassability, keyframe.Frame);
+				VerifyDerivedMapHashes(keyframe);
 				if (!RestoreCellSubzones(keyframe.CellSubzones, keyframe.Frame))
 					return false;
-				RestoreMovementZones(keyframe.MovementZones, keyframe.Frame);
 				if (!RestoreSubzoneTracking(keyframe.SubzoneGraph, keyframe.Frame))
 					return false;
 
@@ -3998,8 +3934,14 @@ namespace ReplaySystem
 				wchar_t description[64] = { 0 };
 				swprintf_s(description, L"Replay keyframe %d", frame);
 
-				Keyframe keyframe;
-				if (!CaptureKeyframeState(frame, keyframe))
+				// Only for the comparison below, which is a diagnostic. A capture walks every techno, every
+				// ordered collection and the whole subzone graph, and a seek across a long replay writes one
+				// keyframe every few hundred frames - so taking it twice was a large part of what made the
+				// first pass through a replay slow, to answer a question nobody is asking unless they have
+				// turned the diagnostics on.
+				Keyframe beforeSave;
+				const bool wantSaveComparison = DiagnosticsWanted();
+				if (wantSaveComparison && !CaptureKeyframeState(frame, beforeSave))
 				{
 					Debug::Log("[Replay] Could not capture simulation state for keyframe %d.\n", frame);
 					return false;
@@ -4017,23 +3959,29 @@ namespace ReplaySystem
 				// save must describe that post-save world too. Capturing it before SaveGame made a
 				// keyframe internally consistent with the file but subtly different from the timeline
 				// being recorded whenever a save changed an iteration order or extension-owned cache.
-				Keyframe postSaveKeyframe;
-				if (!CaptureKeyframeState(frame, postSaveKeyframe))
+				Keyframe keyframe;
+				if (!CaptureKeyframeState(frame, keyframe))
 				{
 					Debug::Log("[Replay] Could not capture post-save simulation state for keyframe %d.\n",
 						frame);
 					return false;
 				}
 
+				if (!wantSaveComparison)
+				{
+					State.Keyframes.push_back(std::move(keyframe));
+					return true;
+				}
+
 				int changedOrders = 0;
 				for (size_t i = 0; i < keyframe.Orders.size(); ++i)
-					changedOrders += keyframe.Orders[i] != postSaveKeyframe.Orders[i] ? 1 : 0;
+					changedOrders += beforeSave.Orders[i] != keyframe.Orders[i] ? 1 : 0;
 				for (size_t i = 0; i < keyframe.LayerOrders.size(); ++i)
-					changedOrders += keyframe.LayerOrders[i] != postSaveKeyframe.LayerOrders[i] ? 1 : 0;
+					changedOrders += beforeSave.LayerOrders[i] != keyframe.LayerOrders[i] ? 1 : 0;
 
-				const bool randomChanged = keyframe.Random != postSaveKeyframe.Random;
-				const bool planningChanged = keyframe.Planning != postSaveKeyframe.Planning;
-				const bool aresParticlesChanged = keyframe.AresParticles != postSaveKeyframe.AresParticles;
+				const bool randomChanged = beforeSave.Random != keyframe.Random;
+				const bool planningChanged = beforeSave.Planning != keyframe.Planning;
+				const bool aresParticlesChanged = beforeSave.AresParticles != keyframe.AresParticles;
 				if (changedOrders || randomChanged || planningChanged || aresParticlesChanged)
 				{
 					Debug::Log("[Replay] Writing keyframe %d changed live state; retaining the post-save "
@@ -4042,8 +3990,6 @@ namespace ReplaySystem
 						planningChanged ? "changed" : "same",
 						aresParticlesChanged ? "changed" : "same");
 				}
-				keyframe = std::move(postSaveKeyframe);
-
 				State.Keyframes.push_back(std::move(keyframe));
 				return true;
 			}
