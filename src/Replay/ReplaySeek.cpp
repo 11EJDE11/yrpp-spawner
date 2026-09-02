@@ -1344,9 +1344,16 @@ namespace ReplaySystem
 				if (WatchedLayerSampleCount >= MaxWatchedLayerSamples)
 					return;
 
-				std::vector<LayerSample>& sample = WatchedLayersByFrame[frame];
+				std::vector<LayerSample> sample;
 				SampleLayerObjects(sample);
+				if (!ChargeDiagnosticMemory(sample.size() * sizeof(LayerSample)
+					+ sizeof(std::vector<LayerSample>)))
+				{
+					return;
+				}
+
 				WatchedLayerSampleCount += sample.size();
+				WatchedLayersByFrame[frame] = std::move(sample);
 			}
 
 			#pragma endregion Per-frame layer watch
@@ -1669,14 +1676,26 @@ namespace ReplaySystem
 				}
 				else if (WatchedCellChangeCount < MaxWatchedCellChanges)
 				{
-					if (State.Interval > 0 && frame % State.Interval == 0)
+					// A whole cell table is 0x40000 snapshots of a hundred bytes - 25MB - kept for the
+					// life of the replay, once per keyframe. Twenty-seven keyframes of that is 675MB in a
+					// 32-bit process, and it was charged against nothing: it is what ran the game out of
+					// address space. It is worth having for the first several keyframes, because it is the
+					// only thing that can say what a cell held before a load as well as after, so it is
+					// paid for out of the budget rather than dropped.
+					if (State.Interval > 0 && frame % State.Interval == 0
+						&& ChargeDiagnosticMemory(
+							static_cast<size_t>(std::max(WatchedCellCount(), 0)) * sizeof(CellSnapshot)))
 					{
 						SampleAllCells();
 						CellBaselines[frame] = CellScratch;
 					}
 
-					WatchedCellChangeCount += delta.size();
-					CellChangesByFrame[frame] = std::move(delta);
+					if (ChargeDiagnosticMemory(delta.size() * sizeof(CellChange)
+						+ sizeof(std::vector<CellChange>)))
+					{
+						WatchedCellChangeCount += delta.size();
+						CellChangesByFrame[frame] = std::move(delta);
+					}
 				}
 
 				LiveCellHashes = std::move(now);
@@ -2377,9 +2396,16 @@ namespace ReplaySystem
 				if (WatchedObjectSampleCount >= MaxWatchedObjectSamples)
 					return;
 
-				std::vector<WatchSample>& sample = WatchedObjectsByFrame[frame];
+				std::vector<WatchSample> sample;
 				SampleObjectWatch(sample);
+				if (!ChargeDiagnosticMemory(sample.size() * sizeof(WatchSample)
+					+ sizeof(std::vector<WatchSample>)))
+				{
+					return;
+				}
+
 				WatchedObjectSampleCount += sample.size();
+				WatchedObjectsByFrame[frame] = std::move(sample);
 			}
 
 			#pragma endregion Per-frame object watch
@@ -4619,6 +4645,7 @@ namespace ReplaySystem
 			ResetObjectWatch();
 			ResetCellWatch();
 			ResetLayerWatch();
+			ResetDiagnosticMemory();
 			State = SeekState {};
 
 			const auto* pConfig = GetConfig();
@@ -4647,6 +4674,7 @@ namespace ReplaySystem
 			ResetObjectWatch();
 			ResetCellWatch();
 			ResetLayerWatch();
+			ResetDiagnosticMemory();
 			State = SeekState {};
 		}
 

@@ -1996,7 +1996,8 @@ namespace ReplaySystem
 				return;
 			}
 
-			if (TracedRandomDrawCount < MaxTracedRandomDraws)
+			if (TracedRandomDrawCount < MaxTracedRandomDraws
+				&& ChargeDiagnosticMemory(sizeof(std::vector<RandomDrawSite>) + 2 * sizeof(RandomDrawSite)))
 				TracedRandomTarget = &RandomDrawsByFrame[frame];
 		}
 
@@ -2078,7 +2079,7 @@ namespace ReplaySystem
 				return;
 			}
 
-			if (TracedRandomTarget)
+			if (TracedRandomTarget && ChargeDiagnosticMemory(2 * sizeof(RandomDrawSite)))
 			{
 				TracedRandomTarget->push_back(site);
 				++TracedRandomDrawCount;
@@ -2161,7 +2162,8 @@ namespace ReplaySystem
 				return;
 			}
 
-			if (TracedMissionCount < MaxTracedMissions)
+			if (TracedMissionCount < MaxTracedMissions
+				&& ChargeDiagnosticMemory(sizeof(std::vector<MissionAssignment>) + 2 * sizeof(MissionAssignment)))
 				TracedMissionTarget = &MissionsByFrame[frame];
 		}
 
@@ -2290,7 +2292,8 @@ namespace ReplaySystem
 				return;
 			}
 
-			if (TracedPathRequestCount < MaxTracedPathRequests)
+			if (TracedPathRequestCount < MaxTracedPathRequests
+				&& ChargeDiagnosticMemory(sizeof(std::vector<PathRequest>) + 2 * sizeof(PathRequest)))
 				TracedPathTarget = &PathRequestsByFrame[frame];
 		}
 
@@ -2494,7 +2497,8 @@ namespace ReplaySystem
 				return;
 			}
 
-			if (TracedLandingZoneCount < MaxTracedLandingZones)
+			if (TracedLandingZoneCount < MaxTracedLandingZones
+				&& ChargeDiagnosticMemory(sizeof(std::vector<LandingZoneRequest>) + 2 * sizeof(LandingZoneRequest)))
 				TracedLandingZoneTarget = &LandingZonesByFrame[frame];
 		}
 
@@ -2688,7 +2692,7 @@ namespace ReplaySystem
 				return;
 			}
 
-			if (TracedUpdateTarget)
+			if (TracedUpdateTarget && ChargeDiagnosticMemory(2 * sizeof(UpdateEntry)))
 			{
 				TracedUpdateTarget->push_back(entry);
 				++TracedUpdateCount;
@@ -2719,7 +2723,9 @@ namespace ReplaySystem
 				return;
 			}
 
-			if (TracedUpdateCount < MaxTracedUpdateEntries)
+			if (TracedUpdateCount < MaxTracedUpdateEntries
+				&& ChargeDiagnosticMemory(sizeof(std::vector<UpdateEntry>)
+					+ 2 * sizeof(UpdateEntry)))
 				TracedUpdateTarget = &UpdateOrderByFrame[frame];
 		}
 
@@ -2752,6 +2758,42 @@ namespace ReplaySystem
 		// frame opening over it, and a frame that asks when the first pass asked nothing at all now
 		// has an empty list to be measured against instead of quietly recording over it.
 		//
+		// 192MB. Generous next to what any one store needs and small enough to leave the game the
+		// address space it wants: gamemd with a large map, Ares and Phobos loaded, and the keyframe
+		// savegames on top of it, all inside 2GB.
+		constexpr size_t MaxDiagnosticBytes = 192u * 1024u * 1024u;
+		size_t DiagnosticBytesUsed = 0;
+		bool DiagnosticBudgetReported = false;
+
+		// Charged before a store grows, never after, so the allocation that would have gone over is
+		// the one that does not happen.
+		bool ChargeDiagnosticMemory(size_t bytes)
+		{
+			if (DiagnosticBytesUsed + bytes > MaxDiagnosticBytes)
+			{
+				if (!DiagnosticBudgetReported)
+				{
+					DiagnosticBudgetReported = true;
+					Debug::Log("[Replay] The diagnostics have used the whole %u MB they are allowed, on "
+						"frame %d. They will stop recording new frames from here; frames already recorded "
+						"are still compared, and playback itself is unaffected.\n",
+						static_cast<unsigned int>(MaxDiagnosticBytes / (1024u * 1024u)),
+						static_cast<int>(Unsorted::CurrentFrame));
+				}
+
+				return false;
+			}
+
+			DiagnosticBytesUsed += bytes;
+			return true;
+		}
+
+		void ResetDiagnosticMemory()
+		{
+			DiagnosticBytesUsed = 0;
+			DiagnosticBudgetReported = false;
+		}
+
 		// This runs at the top of the frame, before anything in it has run.
 		void ServiceTraces()
 		{

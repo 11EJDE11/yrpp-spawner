@@ -252,6 +252,15 @@ namespace ReplaySystem
 		void ResetUpdateOrderTrace();
 		// Run once a frame so a frame that stops asking is caught; see ServiceTraces.
 		void ServiceTraces();
+
+		// Every trace and watch keeps what it records for the whole replay, and the game is a
+		// 32-bit process. Each store had its own cap and nobody had added them up: the cell watch
+		// alone kept a whole 25MB table per keyframe, uncounted, and a long replay ran the process
+		// out of address space and died on a std::bad_alloc that no catch would have helped. They
+		// now share one budget and stop recording when it is gone, which costs coverage late in a
+		// long replay and costs nothing else.
+		bool ChargeDiagnosticMemory(size_t bytes);
+		void ResetDiagnosticMemory();
 		// Names the object behind the next draw, for call sites where knowing it matters.
 		void SetRandomDrawContext(const TechnoClass* pTechno);
 		FrameObjectCensus CurrentObjectCensus();
