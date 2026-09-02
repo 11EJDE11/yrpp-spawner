@@ -135,9 +135,8 @@ public:
 	// through, and name the first object, cell or randomiser draw the two disagree about. They
 	// walk every cell on the map every frame, so they are far too slow to leave on: this is for
 	// chasing a divergence, not for watching a replay.
-	// TEMPORARY: defaulted on while a seek divergence is being chased, because the client
-	// rewrites spawn.ini on every launch and will not carry the key. Back to false once it is
-	// found.
+	// They also keep everything they record for the life of the replay, inside a 192MB budget
+	// they report reaching, so leaving them on costs memory as well as time.
 	bool ReplayDiagnostics;
 
 	// A seek draws one frame in sixty so a long one does not look like a hang. That makes the
@@ -241,7 +240,7 @@ public:
 		, ReplayViewPlayer { -1 }
 		, ReplayControlBar { true }
 		, ReplayKeyframeInterval { 750 }
-		, ReplayDiagnostics { true }
+		, ReplayDiagnostics { false }
 		, ReplaySeekRenderEveryFrame { false }
 
 		// Scenario Options
