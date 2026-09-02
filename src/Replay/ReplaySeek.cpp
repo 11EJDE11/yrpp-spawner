@@ -64,6 +64,7 @@
 #include <TechnoClass.h>
 #include <TiberiumClass.h>
 #include <Surface.h>
+#include <TacticalClass.h>
 #include <TeleportLocomotionClass.h>
 #include <TunnelLocomotionClass.h>
 #include <Randomizer.h>
@@ -4570,6 +4571,16 @@ namespace ReplaySystem
 				char fileName[MAX_PATH] = { 0 };
 				FormatKeyframeName(fileName, sizeof(fileName), keyframe.Frame);
 
+				// A locked replay deliberately replaces the camera with the recorded viewport as the
+				// repositioned frame stream is read. With locking off, however, the camera belongs to
+				// the viewer and LoadMission must not replace it with the keyframe save's viewport.
+				// Keep the committed position rather than the desired one so a half-finished scroll
+				// cannot resume from a different world state after the load.
+				const bool restoreViewerViewport = !ReplayState.LockViewport && TacticalClass::Instance;
+				const Point2D viewerViewport = restoreViewerViewport
+					? TacticalClass::Instance->TacticalCoord1
+					: Point2D { 0, 0 };
+
 				ClearTransientEventQueuesForLoad("before", keyframe.Frame);
 				State.LoadInProgress = true;
 				// LoadOptionsClass::LoadMission is the engine's own in-game load: it stops the
@@ -4586,7 +4597,47 @@ namespace ReplaySystem
 				}
 
 				ClearTransientEventQueuesForLoad("after", keyframe.Frame);
-				return RestorePlaybackAfterLoad(keyframe);
+				if (!RestorePlaybackAfterLoad(keyframe))
+					return false;
+
+				Point2D viewportAfterLoad {};
+				bool restoreViewport = false;
+				if (restoreViewerViewport)
+				{
+					viewportAfterLoad = viewerViewport;
+					restoreViewport = true;
+				}
+				else if (ReplayState.LockViewport)
+				{
+					// RepositionPlaybackStreamToFrame leaves the target frame's record pending. A seek
+					// which lands exactly on a keyframe can re-pause before RestoreFrameState consumes
+					// it, so include its sticky viewport here instead of displaying the savegame's view.
+					const auto& pending = ReplayState.PendingPlaybackFrame;
+					if (ReplayState.HasPendingPlaybackFrame
+						&& pending.FrameNumber == keyframe.Frame
+						&& (pending.Flags & FrameRecordFlag_TacticalPos) != 0u)
+					{
+						ReplayState.LockedViewportPos = pending.TacticalPos;
+						ReplayState.HasLockedViewportPos = true;
+					}
+
+					if (ReplayState.HasLockedViewportPos)
+					{
+						viewportAfterLoad = ReplayState.LockedViewportPos;
+						restoreViewport = true;
+					}
+				}
+
+				if (restoreViewport && TacticalClass::Instance)
+				{
+					auto* const pTactical = TacticalClass::Instance;
+					pTactical->TacticalCoord1 = viewportAfterLoad;
+					pTactical->TacticalCoord2 = viewportAfterLoad;
+					pTactical->RecalculateViewport();
+					pTactical->Redrawing = true;
+				}
+
+				return true;
 			}
 
 			void EndSeek()
