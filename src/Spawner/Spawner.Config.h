@@ -140,6 +140,18 @@ public:
 	// found.
 	bool ReplayDiagnostics;
 
+	// A seek draws one frame in sixty so a long one does not look like a hang. That makes the
+	// frames it replays differ from the frames playback drew the first time round, which matters
+	// only if anything on the draw path writes state the simulation reads - as AircraftClass::
+	// Draw_It once did, calling Set_Height(0) for its shadow and recalculating the cell under it.
+	// That one is patched out in Bugfixes.Desyncs.cpp; this exists to answer whether anything
+	// else does the same, by drawing every frame of a seek so the two passes match.
+	//
+	// That test came back negative - the divergence was identical either way - so this is off
+	// and a seek draws one frame in sixty again. Kept because it costs nothing and re-tests the
+	// whole question in one run.
+	bool ReplaySeekRenderEveryFrame;
+
 	// Scenario Options
 	int  Seed;
 	int  TechLevel;
@@ -230,6 +242,7 @@ public:
 		, ReplayControlBar { true }
 		, ReplayKeyframeInterval { 750 }
 		, ReplayDiagnostics { true }
+		, ReplaySeekRenderEveryFrame { false }
 
 		// Scenario Options
 		, Seed { 0 }

@@ -75,6 +75,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		ReplayControlBar         = pINI->ReadBool(pSettingsSection, "ReplayControlBar", ReplayControlBar);
 		ReplayKeyframeInterval   = pINI->ReadInteger(pSettingsSection, "ReplayKeyframeInterval", ReplayKeyframeInterval);
 		ReplayDiagnostics        = pINI->ReadBool(pSettingsSection, "ReplayDiagnostics", ReplayDiagnostics);
+		ReplaySeekRenderEveryFrame = pINI->ReadBool(pSettingsSection, "ReplaySeekRenderEveryFrame", ReplaySeekRenderEveryFrame);
 	}
 
 	{ // Scenario Options

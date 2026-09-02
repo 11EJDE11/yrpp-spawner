@@ -238,6 +238,20 @@ namespace ReplaySystem
 		// questions in the same order before anyone blames the pathfinder for the answers.
 		void TracePathRequest(const void* object, int cell, int pathOffset, int avoidance);
 		void ResetPathRequestTrace();
+		// AircraftClass::New_LZ, recorded on entry rather than at its draw, so a run that never
+		// reached the draw can be told from one that reached it and turned back.
+		void TraceLandingZoneCell(int site, const TechnoClass* pAircraft, int cellX, int cellY,
+			const AbstractClass* pOther = nullptr, const void* caller = nullptr,
+			const void* engineCaller = nullptr, int inRadar = -1, int isInPlayfield = -1,
+			int isALoaner = -1, int mission = -1, const AbstractClass* pTarget = nullptr,
+			int mapWidth = -1, int mapHeight = -1);
+		void ResetLandingZoneTrace();
+		// The order LogicClass::AI hands objects to their own AI, which is the order everything
+		// downstream of it draws from the randomiser in.
+		void TraceObjectUpdate(const void* object);
+		void ResetUpdateOrderTrace();
+		// Run once a frame so a frame that stops asking is caught; see ServiceTraces.
+		void ServiceTraces();
 		// Names the object behind the next draw, for call sites where knowing it matters.
 		void SetRandomDrawContext(const TechnoClass* pTechno);
 		FrameObjectCensus CurrentObjectCensus();

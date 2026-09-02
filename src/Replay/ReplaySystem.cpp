@@ -923,6 +923,8 @@ namespace ReplaySystem
 			ResetRandomDrawTrace();
 			ResetMissionTrace();
 			ResetPathRequestTrace();
+			ResetLandingZoneTrace();
+			ResetUpdateOrderTrace();
 			ResetRuntimeFlagsForScenario();
 			CloseReplayFile();
 		}
@@ -1861,6 +1863,10 @@ namespace ReplaySystem
 		uint32_t PendingRandomDrawContext = 0;
 		const TechnoClass* PendingRandomDrawTechno = nullptr;
 
+		// Every draw the simulation makes this frame, so an object update can be measured by how
+		// many of them it consumed. See the object update order trace.
+		unsigned int DrawsThisFrame = 0;
+
 		std::unordered_map<int, std::vector<RandomDrawSite>> RandomDrawsByFrame;
 		size_t TracedRandomDrawCount = 0;
 		int TracedRandomFrame = -1;
@@ -1884,6 +1890,37 @@ namespace ReplaySystem
 			PendingRandomDrawTechno = nullptr;
 		}
 
+		// A caller address is only worth printing if it can be looked up afterwards. gamemd is fixed
+		// at its preferred base, but Ares and Phobos are relocatable, and the same call site came
+		// back as 71798C1F on one run and 71788C1F on the next - two addresses for one place, and no
+		// way to resolve either without the base they were relative to. So anything outside the
+		// executable is named module and offset, which is what a disassembler wants.
+		const char* DescribeCodeAddress(uint32_t address, char* buffer, size_t size)
+		{
+			HMODULE hModule = nullptr;
+			if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+				| GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(address), &hModule) || !hModule)
+			{
+				sprintf_s(buffer, size, "%08X", address);
+				return buffer;
+			}
+
+			char path[MAX_PATH] = { 0 };
+			if (!GetModuleFileNameA(hModule, path, sizeof(path)))
+			{
+				sprintf_s(buffer, size, "%08X", address);
+				return buffer;
+			}
+
+			const char* pName = strrchr(path, '\\');
+			pName = pName ? pName + 1 : path;
+
+			const auto base = reinterpret_cast<uint32_t>(hModule);
+			sprintf_s(buffer, size, "%s+0x%X", pName, address - base);
+			return buffer;
+		}
+
 		void ReportRandomDrawMismatch(const char* what, int frame, size_t drawIndex,
 			const RandomDrawSite& before, const RandomDrawSite& now)
 		{
@@ -1891,12 +1928,17 @@ namespace ReplaySystem
 				return;
 
 			TracedRandomMismatchReported = true;
+			char beforeCaller[MAX_PATH + 32] = { 0 };
+			char nowCaller[MAX_PATH + 32] = { 0 };
+
 			Debug::Log("[Replay] Frame %d used the randomiser differently the second time round: %s at "
-				"draw %u. First pass: caller %08X, cursor %d, object %u. After the keyframe load: "
-				"caller %08X, cursor %d, object %u.\n",
+				"draw %u. First pass: caller %s, cursor %d, object %u. After the keyframe load: "
+				"caller %s, cursor %d, object %u.\n",
 				frame, what, static_cast<unsigned int>(drawIndex + 1),
-				before.Caller, before.Cursor, before.Context,
-				now.Caller, now.Cursor, now.Context);
+				DescribeCodeAddress(before.Caller, beforeCaller, sizeof(beforeCaller)),
+				before.Cursor, before.Context,
+				DescribeCodeAddress(now.Caller, nowCaller, sizeof(nowCaller)),
+				now.Cursor, now.Context);
 
 			// The gate on this call is Frame - TargetingTimer.StartTime >= TimeLeft, so those two
 			// numbers say whether the object was scheduled to look for a target on this frame at all.
@@ -1954,6 +1996,9 @@ namespace ReplaySystem
 		{
 			if (!DiagnosticsWanted())
 				return;
+
+			if (ScenarioClass::Instance && randomiser == &ScenarioClass::Instance->Random)
+				++DrawsThisFrame;
 
 			// Only the scenario's own randomiser drives the simulation. The map generator and the shell
 			// menus have their own, and draws from those mean nothing here.
@@ -2270,6 +2315,437 @@ namespace ReplaySystem
 
 		#pragma endregion Pathfinder request trace
 
+		#pragma region Aircraft landing zone trace
+
+		// AircraftClass::New_LZ (0x418E20) is where the frame-7508 divergence first shows: the recording
+		// drew a random number there and the run after the keyframe load did not. The draw is buried five
+		// conditions deep, and only the last two of them are expensive to ask about:
+		//
+		//     if (oldlz
+		//         && (!Team || !TeamClass::Is_Leaving_Map(Team))
+		//         && (!Is_LZ_Clear(oldlz) || !Cell_Seems_Ok(oldlz->Destination_Coord()))
+		//         && !ScenarioInit
+		//         && Rule->LZScanRadius / 256 > 0)
+		//     { ... Random2Class::operator()(&Scen->RandomNumber, 0, 7) ... }
+		//
+		// The randomiser trace can only see the draw, so a run that never reached it and a run that
+		// reached it and turned back look the same. This records the entry instead, with the three inputs
+		// that are free to read - which aircraft, which zone, and what its team is doing - so the next
+		// report says whether the two runs disagreed before the landing zone was even examined, or only
+		// about whether it was clear.
+		struct LandingZoneRequest
+		{
+			// A ladder of four points along the path to the landing zone scan, so the first one that
+			// differs names the condition that changed rather than only its consequence:
+			//
+			//   1  FlyLocomotionClass::Nearing_Target entered, with the coord it was given
+			//   2  the destination cell handed to CellClass::Cell_Building
+			//   3  RadioClass::Has_Contact_Index asked, so a building was found and the aircraft is
+			//      not a hunter-seeker
+			//   0  AircraftClass::New_LZ entered, which is where the six random draws happen
+			int32_t Site;
+			uint32_t Aircraft;
+			// Whatever the site is about besides the aircraft - the building, at site 3.
+			uint32_t Other;
+			// Who called, at site 0. New_LZ has two call sites and they mean different things:
+			// Nearing_Target at 0x4CF0FB and Stop_Moving at 0x4CD117.
+			uint32_t Caller;
+			// The first frame above Caller still inside the executable. When a hook in a mod DLL is
+			// the caller, this is the engine function it was hooked onto, which names the decision
+			// context without that DLL's symbols or a source tree that matches the shipped build.
+			uint32_t EngineCaller;
+			uint32_t Team;
+			int32_t ZoneX;
+			int32_t ZoneY;
+			int32_t LeavingMap;
+			// Inputs to the off-map removal branch in AircraftClass::AI. They are -1 at
+			// every other trace site. Site 9 is the MapClass::In_Radar call at 0x414FB6.
+			int32_t InRadar;
+			int32_t IsInPlayfield;
+			int32_t IsALoaner;
+			int32_t Mission;
+			uint32_t Target;
+			int32_t MapWidth;
+			int32_t MapHeight;
+
+			// EngineCaller is deliberately left out. It is worked out by scanning the stack for the
+			// first executable address above the caller, which is a guess: a stale value left in an
+			// unused slot reads exactly like a live return address. Defaulting the comparison swept
+			// it in, and two runs that agreed about everything real were reported as differing
+			// because the scan landed on different rubbish - which masked the divergence being
+			// chased. It is context for reading a report, never evidence of one.
+			bool operator==(const LandingZoneRequest& other) const
+			{
+				return Site == other.Site && Aircraft == other.Aircraft && Other == other.Other
+					&& Team == other.Team && ZoneX == other.ZoneX && ZoneY == other.ZoneY
+					&& LeavingMap == other.LeavingMap && Caller == other.Caller
+					&& InRadar == other.InRadar && IsInPlayfield == other.IsInPlayfield
+					&& IsALoaner == other.IsALoaner && Mission == other.Mission
+					&& Target == other.Target && MapWidth == other.MapWidth
+					&& MapHeight == other.MapHeight;
+			}
+		};
+
+		std::unordered_map<int, std::vector<LandingZoneRequest>> LandingZonesByFrame;
+		size_t TracedLandingZoneCount = 0;
+		int TracedLandingZoneFrame = -1;
+		std::vector<LandingZoneRequest>* TracedLandingZoneTarget = nullptr;
+		const std::vector<LandingZoneRequest>* TracedLandingZoneReference = nullptr;
+		size_t TracedLandingZoneCompareIndex = 0;
+		bool TracedLandingZoneMismatchReported = false;
+
+		constexpr size_t MaxTracedLandingZones = 200000;
+
+		void ResetLandingZoneTrace()
+		{
+			LandingZonesByFrame.clear();
+			TracedLandingZoneCount = 0;
+			TracedLandingZoneFrame = -1;
+			TracedLandingZoneTarget = nullptr;
+			TracedLandingZoneReference = nullptr;
+			TracedLandingZoneCompareIndex = 0;
+			TracedLandingZoneMismatchReported = false;
+		}
+
+		void ReportLandingZoneMismatch(const char* what, int frame, size_t index,
+			const LandingZoneRequest& before, const LandingZoneRequest& now)
+		{
+			if (TracedLandingZoneMismatchReported)
+				return;
+
+			TracedLandingZoneMismatchReported = true;
+
+			char beforeCaller[MAX_PATH + 32] = { 0 };
+			char nowCaller[MAX_PATH + 32] = { 0 };
+			Debug::Log("[Replay] Frame %d looked for a landing zone differently the second time round: %s "
+				"at request %u. First pass: site %d, aircraft %u, other %u, cell %d,%d, called from "
+				"%s. After the keyframe load: site %d, aircraft %u, other %u, cell %d,%d, called "
+				"from %s.\n", frame, what, static_cast<unsigned int>(index + 1),
+				before.Site, before.Aircraft, before.Other, before.ZoneX, before.ZoneY,
+				DescribeCodeAddress(before.Caller, beforeCaller, sizeof(beforeCaller)),
+				now.Site, now.Aircraft, now.Other, now.ZoneX, now.ZoneY,
+				DescribeCodeAddress(now.Caller, nowCaller, sizeof(nowCaller)));
+
+			if (before.EngineCaller || now.EngineCaller)
+			{
+				char beforeEngine[MAX_PATH + 32] = { 0 };
+				char nowEngine[MAX_PATH + 32] = { 0 };
+				Debug::Log("[Replay]   entered from %s the first time round, %s the second.\n",
+					DescribeCodeAddress(before.EngineCaller, beforeEngine, sizeof(beforeEngine)),
+					DescribeCodeAddress(now.EngineCaller, nowEngine, sizeof(nowEngine)));
+			}
+
+			if (before.Site == 9 || now.Site == 9)
+			{
+				Debug::Log("[Replay]   off-map inputs: radar %d, in-playfield %d, loaner %d, mission %d, "
+					"target %u, team %u/leaving %d, map %dx%d; were %d, %d, %d, %d, %u, "
+					"%u/%d, %dx%d.\n",
+					now.InRadar, now.IsInPlayfield, now.IsALoaner, now.Mission, now.Target,
+					now.Team, now.LeavingMap, now.MapWidth, now.MapHeight,
+					before.InRadar, before.IsInPlayfield, before.IsALoaner, before.Mission,
+					before.Target, before.Team, before.LeavingMap, before.MapWidth,
+					before.MapHeight);
+			}
+		}
+
+		void BeginLandingZoneFrame(int frame)
+		{
+			if (TracedLandingZoneReference
+				&& TracedLandingZoneCompareIndex < TracedLandingZoneReference->size())
+			{
+				ReportLandingZoneMismatch("it stopped looking early", TracedLandingZoneFrame,
+					TracedLandingZoneCompareIndex,
+					(*TracedLandingZoneReference)[TracedLandingZoneCompareIndex], LandingZoneRequest {});
+			}
+
+			TracedLandingZoneFrame = frame;
+			TracedLandingZoneTarget = nullptr;
+			TracedLandingZoneReference = nullptr;
+			TracedLandingZoneCompareIndex = 0;
+
+			const auto it = LandingZonesByFrame.find(frame);
+			if (it != LandingZonesByFrame.end())
+			{
+				TracedLandingZoneReference = &it->second;
+				return;
+			}
+
+			if (TracedLandingZoneCount < MaxTracedLandingZones)
+				TracedLandingZoneTarget = &LandingZonesByFrame[frame];
+		}
+
+		void TraceLandingZoneCell(int site, const TechnoClass* pAircraft, int cellX, int cellY,
+			const AbstractClass* pOther, const void* caller, const void* engineCaller,
+			int inRadar, int isInPlayfield, int isALoaner, int mission,
+			const AbstractClass* pTarget, int mapWidth, int mapHeight)
+		{
+			if (!DiagnosticsWanted() || !ReplayState.Playback || Seek::IsLoadInProgress())
+				return;
+
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+			if (frame != TracedLandingZoneFrame)
+				BeginLandingZoneFrame(frame);
+
+			const auto* const pFoot = abstract_cast<const FootClass*>(pAircraft);
+			const TeamClass* const pTeam = pFoot ? pFoot->Team : nullptr;
+
+			const LandingZoneRequest entry {
+				site,
+				UniqueIDOfAbstract(pAircraft),
+				UniqueIDOfAbstract(pOther),
+				reinterpret_cast<uint32_t>(caller),
+				reinterpret_cast<uint32_t>(engineCaller),
+				UniqueIDOfAbstract(pTeam),
+				cellX,
+				cellY,
+				pTeam ? (pTeam->IsLeavingMap ? 1 : 0) : -1,
+				inRadar,
+				isInPlayfield,
+				isALoaner,
+				mission,
+				UniqueIDOfAbstract(pTarget),
+				mapWidth,
+				mapHeight
+			};
+
+			if (TracedLandingZoneReference)
+			{
+				if (TracedLandingZoneCompareIndex >= TracedLandingZoneReference->size())
+				{
+					ReportLandingZoneMismatch("it looked more than before", frame,
+						TracedLandingZoneCompareIndex, LandingZoneRequest {}, entry);
+				}
+				else
+				{
+					const LandingZoneRequest& before =
+						(*TracedLandingZoneReference)[TracedLandingZoneCompareIndex];
+					if (!(before == entry))
+					{
+						ReportLandingZoneMismatch("a different aircraft or zone", frame,
+							TracedLandingZoneCompareIndex, before, entry);
+					}
+				}
+
+				++TracedLandingZoneCompareIndex;
+				return;
+			}
+
+			if (TracedLandingZoneTarget)
+			{
+				TracedLandingZoneTarget->push_back(entry);
+				++TracedLandingZoneCount;
+			}
+		}
+
+		#pragma endregion Aircraft landing zone trace
+
+		#pragma region Object update order trace
+
+		// LogicClass::AI ends with the loop that runs the simulation:
+		//
+		//     for (m = 0; m < Logic.Objects.ActiveCount; ++m) {
+		//         v50 = Logic.Objects.Vector[m];
+		//         v50->AI(v50);                       // 0x55B610
+		//     }
+		//
+		// Every object's update goes through that one call, in that one order, and everything downstream
+		// of it - including Ares, whose particle handler is hooked onto ParticleSystemClass::Update -
+		// draws from the synchronised randomiser in whatever order this loop hands out.
+		//
+		// Frame 8251 has the recording drawing from Ares' smoke handler where the run after the load draws
+		// from BuildingClass::Repair_AI, and the two runs are back in step by the next frame. That is two
+		// objects swapping places, not a missing object or a lost piece of state, and nothing that watches
+		// state at the top of a frame can see it: the layer watch compares the logic queue and finds it
+		// identical, because the queue is identical - it is what happens while walking it that differs.
+		//
+		// So the walk itself is recorded: every object the loop touches, in order, every frame. A frame
+		// replayed after a seek is checked against the order it ran the first time, and the first
+		// disagreement names both objects and where in the frame it happened.
+		constexpr size_t MaxTracedUpdateEntries = 6000000;
+
+		// What each object's update consumed from the randomiser, which is the thing the order trace
+		// on its own cannot see: frame 8251 runs the same objects in the same order in both passes
+		// and still draws differently, so the difference is inside one object's update rather than
+		// in which updates ran.
+		struct UpdateEntry
+		{
+			uint32_t Object;
+			uint32_t Draws;
+			bool operator==(const UpdateEntry&) const = default;
+		};
+
+		uint32_t PendingUpdateObject = 0;
+		unsigned int PendingUpdateMark = 0;
+		bool HavePendingUpdate = false;
+
+		std::unordered_map<int, std::vector<UpdateEntry>> UpdateOrderByFrame;
+		size_t TracedUpdateCount = 0;
+		int TracedUpdateFrame = -1;
+		std::vector<UpdateEntry>* TracedUpdateTarget = nullptr;
+		const std::vector<UpdateEntry>* TracedUpdateReference = nullptr;
+		size_t TracedUpdateCompareIndex = 0;
+		bool TracedUpdateMismatchReported = false;
+
+		void ResetUpdateOrderTrace()
+		{
+			UpdateOrderByFrame.clear();
+			TracedUpdateCount = 0;
+			TracedUpdateFrame = -1;
+			TracedUpdateTarget = nullptr;
+			TracedUpdateReference = nullptr;
+			TracedUpdateCompareIndex = 0;
+			TracedUpdateMismatchReported = false;
+			DrawsThisFrame = 0;
+			HavePendingUpdate = false;
+		}
+
+		void DescribeUpdatedObject(const char* when, uint32_t id)
+		{
+			const AbstractClass* pFound = nullptr;
+			for (int i = 0; i < AbstractClass::Array.Count && !pFound; ++i)
+			{
+				if (auto* const pItem = AbstractClass::Array.Items[i])
+				{
+					if (UniqueIDOfAbstract(pItem) == id)
+						pFound = pItem;
+				}
+			}
+
+			if (!pFound)
+			{
+				Debug::Log("[Replay]   %s object %u, which is not in the world now.\n", when, id);
+				return;
+			}
+
+			const auto* const pTechno = abstract_cast<const TechnoClass*>(pFound);
+			Debug::Log("[Replay]   %s object %u, abstract type %d (%s).\n", when, id,
+				static_cast<int>(pFound->WhatAmI()),
+				pTechno && pTechno->get_ID() ? pTechno->get_ID() : "<not a techno>");
+		}
+
+		void ReportUpdateOrderMismatch(const char* what, int frame, size_t index,
+			const UpdateEntry& before, const UpdateEntry& now)
+		{
+			if (TracedUpdateMismatchReported)
+				return;
+
+			TracedUpdateMismatchReported = true;
+			Debug::Log("[Replay] Frame %d ran its objects in a different order the second time round: %s "
+				"at position %u of the update loop.\n", frame, what,
+				static_cast<unsigned int>(index + 1));
+
+			DescribeUpdatedObject("first pass ran", before.Object);
+			DescribeUpdatedObject("after the keyframe load it ran", now.Object);
+			Debug::Log("[Replay]   it drew %u random numbers there the first time round, %u the "
+				"second.\n", before.Draws, now.Draws);
+		}
+
+		// An update is closed out by the next one starting, or by the frame ending. Only then is it
+		// known how much of the randomiser it consumed.
+		void ClosePendingUpdate()
+		{
+			if (!HavePendingUpdate)
+				return;
+
+			HavePendingUpdate = false;
+			const UpdateEntry entry { PendingUpdateObject, DrawsThisFrame - PendingUpdateMark };
+
+			if (TracedUpdateReference)
+			{
+				if (TracedUpdateCompareIndex >= TracedUpdateReference->size())
+					ReportUpdateOrderMismatch("it ran more objects than before", TracedUpdateFrame,
+						TracedUpdateCompareIndex, UpdateEntry {}, entry);
+				else if (!((*TracedUpdateReference)[TracedUpdateCompareIndex] == entry))
+					ReportUpdateOrderMismatch("a different object, or the same one drawing differently",
+						TracedUpdateFrame, TracedUpdateCompareIndex,
+						(*TracedUpdateReference)[TracedUpdateCompareIndex], entry);
+
+				++TracedUpdateCompareIndex;
+				return;
+			}
+
+			if (TracedUpdateTarget)
+			{
+				TracedUpdateTarget->push_back(entry);
+				++TracedUpdateCount;
+			}
+		}
+
+		void BeginUpdateOrderFrame(int frame)
+		{
+			ClosePendingUpdate();
+
+			if (TracedUpdateReference && TracedUpdateCompareIndex < TracedUpdateReference->size())
+			{
+				ReportUpdateOrderMismatch("it stopped early", TracedUpdateFrame, TracedUpdateCompareIndex,
+					(*TracedUpdateReference)[TracedUpdateCompareIndex], UpdateEntry {});
+			}
+
+			DrawsThisFrame = 0;
+
+			TracedUpdateFrame = frame;
+			TracedUpdateTarget = nullptr;
+			TracedUpdateReference = nullptr;
+			TracedUpdateCompareIndex = 0;
+
+			const auto it = UpdateOrderByFrame.find(frame);
+			if (it != UpdateOrderByFrame.end())
+			{
+				TracedUpdateReference = &it->second;
+				return;
+			}
+
+			if (TracedUpdateCount < MaxTracedUpdateEntries)
+				TracedUpdateTarget = &UpdateOrderByFrame[frame];
+		}
+
+		void TraceObjectUpdate(const void* object)
+		{
+			if (!DiagnosticsWanted() || !ReplayState.Playback || Seek::IsLoadInProgress())
+				return;
+
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+			if (frame != TracedUpdateFrame)
+				BeginUpdateOrderFrame(frame);
+
+			// The previous object's update ends where this one begins.
+			ClosePendingUpdate();
+
+			PendingUpdateObject = UniqueIDOfAbstract(static_cast<const AbstractClass*>(object));
+			PendingUpdateMark = DrawsThisFrame;
+			HavePendingUpdate = true;
+		}
+
+		#pragma endregion Object update order trace
+
+		// Each trace compares a replayed frame against its first pass as its hook fires, so a frame
+		// that asked five times the first time round and none at all the second reported nothing:
+		// there was no call left to notice the shortfall. The landing zone trace ran into exactly
+		// that - the run after the load never entered New_LZ again, and its silence said nothing.
+		//
+		// Opening each frame from here instead fixes both halves of it. Every frame gets its list
+		// opened whether or not anything asks, so a frame that stops asking is caught by the next
+		// frame opening over it, and a frame that asks when the first pass asked nothing at all now
+		// has an empty list to be measured against instead of quietly recording over it.
+		//
+		// This runs at the top of the frame, before anything in it has run.
+		void ServiceTraces()
+		{
+			if (!DiagnosticsWanted() || !ReplayState.Playback)
+				return;
+
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+
+			if (frame != TracedMissionFrame)
+				BeginMissionTraceFrame(frame);
+			if (frame != TracedPathFrame)
+				BeginPathRequestFrame(frame);
+			if (frame != TracedLandingZoneFrame)
+				BeginLandingZoneFrame(frame);
+			if (frame != TracedUpdateFrame)
+				BeginUpdateOrderFrame(frame);
+		}
+
 		// A trace that reports nothing is only worth something if it can be told apart from a trace
 		// that never ran. One pathfinder run came back silent and there was no way to know whether
 		// the questions matched or the hook had simply never fired.
@@ -2278,14 +2754,16 @@ namespace ReplaySystem
 			if (!DiagnosticsWanted())
 				return;
 
-			Debug::Log("[Replay] Traces recorded %u randomiser draws, %u mission assignments and %u "
-				"pathfinder requests over %u, %u and %u frames.\n",
+			Debug::Log("[Replay] Traces recorded %u randomiser draws, %u mission assignments, %u "
+				"pathfinder requests and %u landing zone searches over %u, %u, %u and %u frames.\n",
 				static_cast<unsigned int>(TracedRandomDrawCount),
 				static_cast<unsigned int>(TracedMissionCount),
 				static_cast<unsigned int>(TracedPathRequestCount),
+				static_cast<unsigned int>(TracedLandingZoneCount),
 				static_cast<unsigned int>(RandomDrawsByFrame.size()),
 				static_cast<unsigned int>(MissionsByFrame.size()),
-				static_cast<unsigned int>(PathRequestsByFrame.size()));
+				static_cast<unsigned int>(PathRequestsByFrame.size()),
+				static_cast<unsigned int>(LandingZonesByFrame.size()));
 		}
 
 		void CaptureGameCRCForCurrentFrame()

@@ -31,6 +31,7 @@
 #include <FactoryClass.h>
 #include <ParticleClass.h>
 #include <ParticleSystemClass.h>
+#include <ParticleTypeClass.h>
 #include <RadSiteClass.h>
 #include <SmudgeClass.h>
 #include <SuperClass.h>
@@ -42,6 +43,7 @@
 #include <AircraftClass.h>
 #include <AStarClass.h>
 #include <BuildingClass.h>
+#include <EventClass.h>
 #include <GameModeOptionsClass.h>
 #include <GameOptionsClass.h>
 #include <FootClass.h>
@@ -101,8 +103,9 @@ namespace ReplaySystem
 			// starts. Frame 0 is the state before the first frame ran.
 			constexpr int FirstKeyframeFrame = 0;
 
-			// What a techno was doing when the keyframe was taken. Nothing here is restored - it is
-			// checked after the load, to catch per-object state that the savegame did not carry across.
+			// What a techno was doing when the keyframe was taken. Most of this remains diagnostic:
+			// it is checked after the load to catch per-object state that the savegame did not carry
+			// across. IsInPlayfield is the one confirmed exception and is restored below.
 			// Both branches the divergence trace pointed at turn on the target: a guarding building only
 			// draws its idle jitter while it has none, and Can_Opportunity_Fire only lets a techno go
 			// looking for one while it has none. Target is a pointer, so it is saved as an ID and
@@ -135,6 +138,23 @@ namespace ReplaySystem
 				// frames.
 				int32_t NavQueueCount;
 				uint32_t NavQueueHeadId;
+				bool IsALoaner;
+				bool IsInPlayfield;
+				uint32_t TeamId;
+				bool TeamLeavingMap;
+			};
+
+			// HouseClass::Repairing is HouseClass::DidRepair in the Tiberian Sun source: a
+			// one-repair-per-house gate which BuildingClass::Repair_AI tests before its random
+			// repair-delay draw. The frame-8251 trace found that exact draw appearing only after
+			// a keyframe load, so keep the gate and its timer beside the keyframe to determine
+			// whether the load changed the house or one of the building-side conditions.
+			struct HouseRepairSnapshot
+			{
+				uint32_t Id;
+				bool DidRepair;
+				int32_t RepairTimerStart;
+				int32_t RepairTimerLeft;
 			};
 
 			constexpr uint32_t InvalidPlanningNode = UINT32_MAX;
@@ -203,6 +223,44 @@ namespace ReplaySystem
 
 			bool CapturePlanningState(PlanningSnapshot& snapshot);
 			bool RestorePlanningState(const PlanningSnapshot& snapshot, int keyframeFrame);
+
+			// Ares 3.0p1 replaces several particle-system behaviours and keeps their live
+			// particles in extension-owned std::vectors. Those vectors are gameplay state:
+			// the smoke handler draws once per entry on odd frames before it does anything
+			// else. A load which returns a different vector therefore changes the random
+			// stream immediately, even though the vanilla ParticleSystemClass is identical.
+			//
+			// Keep the records as opaque 44-byte values, exactly as Ares streams them. The
+			// one pointer in a draw record is replaced by its ParticleTypeClass array index,
+			// so the sidecar never preserves an address from the pre-load object graph.
+			constexpr size_t AresParticleRecordSize = 0x2C;
+
+			struct AresParticleRecordSnapshot
+			{
+				std::array<unsigned char, AresParticleRecordSize> Bytes {};
+				int32_t LinkedParticleTypeIndex = -1;
+				bool operator==(const AresParticleRecordSnapshot&) const = default;
+			};
+
+			struct AresParticleSystemSnapshot
+			{
+				uint32_t OwnerId = 0;
+				int32_t Behave = 0;
+				int32_t HeldParticleTypeIndex = -1;
+				std::vector<std::array<unsigned char, AresParticleRecordSize>> MovementData;
+				std::vector<AresParticleRecordSnapshot> DrawData;
+				bool operator==(const AresParticleSystemSnapshot&) const = default;
+			};
+
+			struct AresParticleSnapshot
+			{
+				bool Captured = false;
+				std::vector<AresParticleSystemSnapshot> Systems;
+				bool operator==(const AresParticleSnapshot&) const = default;
+			};
+
+			bool CaptureAresParticleState(AresParticleSnapshot& snapshot);
+			bool RestoreAresParticleState(const AresParticleSnapshot& snapshot, int keyframeFrame);
 
 			// Several vanilla locomotor Load methods read the complete saved object and then run a
 			// constructor over one of their value-type members. That silently destroys state which was
@@ -371,7 +429,9 @@ namespace ReplaySystem
 				// vectors below in their current order, so both are part of what has to match.
 				std::array<unsigned char, sizeof(Randomizer)> Random {};
 				std::vector<TechnoSnapshot> Technos;
+				std::vector<HouseRepairSnapshot> HouseRepairs;
 				PlanningSnapshot Planning;
+				AresParticleSnapshot AresParticles;
 				TiberiumSnapshot Tiberium;
 				std::vector<unsigned char> CellPassability;
 				std::vector<CellLevelPassabilityStruct> ZonePassability;
@@ -481,6 +541,376 @@ namespace ReplaySystem
 			{
 				return pObject ? static_cast<uint32_t>(pObject->UniqueID) : 0u;
 			}
+
+			#pragma region Ares particle-system state
+
+			// Reversed from the supplied Ares 3.0p1 build. Do not use std::vector here:
+			// Ares and the spawner both link the CRT statically, so storage allocated by
+			// one DLL must be released by that same DLL.
+			struct AresVectorView
+			{
+				unsigned char* Begin;
+				unsigned char* End;
+				unsigned char* Capacity;
+			};
+
+			struct AresParticleExtView
+			{
+				ParticleSystemClass* Owner;
+				int Initialized;
+				int Behave;
+				ParticleTypeClass* HeldParticleType;
+				AresVectorView MovementData;
+				AresVectorView DrawData;
+			};
+
+			static_assert(sizeof(AresVectorView) == 0x0C);
+			static_assert(offsetof(AresParticleExtView, Behave) == 0x08);
+			static_assert(offsetof(AresParticleExtView, HeldParticleType) == 0x0C);
+			static_assert(offsetof(AresParticleExtView, MovementData) == 0x10);
+			static_assert(offsetof(AresParticleExtView, DrawData) == 0x1C);
+
+			constexpr size_t AresDrawLinkedParticleTypeOffset = 0x24;
+			constexpr size_t MaximumAresParticleRecords = 1u << 20;
+
+			struct AresParticleApi
+			{
+				using FindExtension = AresParticleExtView* (__thiscall*)(void*, ParticleSystemClass*);
+				using AllocateRecords = unsigned char* (__stdcall*)(unsigned int);
+				using AdoptRecords = void (__thiscall*)(AresVectorView*, unsigned char*,
+					unsigned int, unsigned int);
+
+				unsigned char* Module = nullptr;
+				void* ExtensionMap = nullptr;
+				FindExtension Find = nullptr;
+				AllocateRecords Allocate = nullptr;
+				AdoptRecords Adopt = nullptr;
+				bool Compatible = false;
+			};
+
+			bool BytesMatch(const unsigned char* address, const unsigned char* expected, size_t count)
+			{
+				return address && memcmp(address, expected, count) == 0;
+			}
+
+			const AresParticleApi& GetAresParticleApi()
+			{
+				static const AresParticleApi api = []()
+				{
+					AresParticleApi result {};
+					result.Module = reinterpret_cast<unsigned char*>(GetModuleHandleA("Ares.dll"));
+					if (!result.Module)
+					{
+						Debug::Log("[Replay] Ares is not loaded; its particle state will not travel with a "
+							"keyframe.\n");
+						return result;
+					}
+
+					const auto* const dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(result.Module);
+					if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+						return result;
+					const auto* const nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+						result.Module + dos->e_lfanew);
+					if (nt->Signature != IMAGE_NT_SIGNATURE
+						|| nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386
+						|| nt->OptionalHeader.SizeOfImage <= 0xC2B84)
+						return result;
+
+					// ExtContainer::Find, vector<44-byte-record>::allocate and its
+					// _Change_array/adopt helper in the exact reversed release build.
+					const unsigned char findSignature[] = {
+						// mov ebx, [esp+10h] - the ParticleSystemClass argument, which sits there after the
+						// sub esp, 8 and the push ebx. This byte read 0x0C for a while, which is the return
+						// address rather than the argument, and no build ever matched: the capture below then
+						// returned early leaving Captured false, and every keyframe restored nothing at all.
+						0x83, 0xEC, 0x08, 0x53, 0x8B, 0x5C, 0x24, 0x10,
+						0x0F, 0xB6, 0xC3, 0x35, 0xC5, 0x9D, 0x1C, 0x81
+					};
+					const unsigned char allocateSignature[] = {
+						0x8B, 0x44, 0x24, 0x04, 0x3D, 0x5D, 0x74, 0xD1,
+						0x05, 0x77, 0x41, 0x6B, 0xC0, 0x2C
+					};
+					const unsigned char adoptSignature[] = {
+						0x56, 0x57, 0x8B, 0xF9, 0x8B, 0x37, 0x85, 0xF6
+					};
+
+					auto* const find = result.Module + 0x58900;
+					auto* const allocate = result.Module + 0x29730;
+					auto* const adopt = result.Module + 0x296B0;
+					const bool findOk = BytesMatch(find, findSignature, sizeof(findSignature));
+					const bool allocateOk = BytesMatch(allocate, allocateSignature, sizeof(allocateSignature));
+					const bool adoptOk = BytesMatch(adopt, adoptSignature, sizeof(adoptSignature));
+					if (!findOk || !allocateOk || !adoptOk)
+					{
+						Debug::Log("[Replay] This Ares build does not match the one the particle state was "
+							"reversed from (Find %s, allocate %s, adopt %s); its particle state will not "
+							"travel with a keyframe.\n", findOk ? "matches" : "does not match",
+							allocateOk ? "matches" : "does not match", adoptOk ? "matches" : "does not match");
+						return result;
+					}
+
+					result.ExtensionMap = result.Module + 0xC2B84;
+					result.Find = reinterpret_cast<AresParticleApi::FindExtension>(find);
+					result.Allocate = reinterpret_cast<AresParticleApi::AllocateRecords>(allocate);
+					result.Adopt = reinterpret_cast<AresParticleApi::AdoptRecords>(adopt);
+					result.Compatible = true;
+					return result;
+				}();
+				return api;
+			}
+
+			bool AresVectorCount(const AresVectorView& vector, size_t& count, size_t& capacity)
+			{
+				count = 0;
+				capacity = 0;
+				if (!vector.Begin && !vector.End && !vector.Capacity)
+					return true;
+				if (!vector.Begin || !vector.End || !vector.Capacity)
+					return false;
+
+				const uintptr_t begin = reinterpret_cast<uintptr_t>(vector.Begin);
+				const uintptr_t end = reinterpret_cast<uintptr_t>(vector.End);
+				const uintptr_t cap = reinterpret_cast<uintptr_t>(vector.Capacity);
+				if (end < begin || cap < end
+					|| (end - begin) % AresParticleRecordSize
+					|| (cap - begin) % AresParticleRecordSize)
+					return false;
+
+				count = (end - begin) / AresParticleRecordSize;
+				capacity = (cap - begin) / AresParticleRecordSize;
+				return count <= MaximumAresParticleRecords
+					&& capacity <= MaximumAresParticleRecords;
+			}
+
+			int ParticleTypeIndex(const ParticleTypeClass* pType)
+			{
+				if (!pType)
+					return -1;
+				for (int i = 0; i < ParticleTypeClass::Array.Count; ++i)
+				{
+					if (ParticleTypeClass::Array.Items[i] == pType)
+						return i;
+				}
+				return -2;
+			}
+
+			ParticleTypeClass* ParticleTypeAt(int index)
+			{
+				if (index < 0)
+					return nullptr;
+				return index < ParticleTypeClass::Array.Count
+					? ParticleTypeClass::Array.Items[index]
+					: nullptr;
+			}
+
+			bool CopyAresVector(const AresVectorView& source,
+				std::vector<std::array<unsigned char, AresParticleRecordSize>>& destination)
+			{
+				size_t count = 0;
+				size_t capacity = 0;
+				if (!AresVectorCount(source, count, capacity))
+					return false;
+
+				destination.resize(count);
+				if (count)
+					memcpy(destination.data(), source.Begin, count * AresParticleRecordSize);
+				return true;
+			}
+
+			bool RestoreAresVector(const AresParticleApi& api, AresVectorView& destination,
+				const unsigned char* source, size_t count)
+			{
+				if (count > MaximumAresParticleRecords)
+					return false;
+
+				size_t oldCount = 0;
+				size_t capacity = 0;
+				if (!AresVectorCount(destination, oldCount, capacity))
+					return false;
+
+				if (count <= capacity)
+				{
+					if (count)
+						memcpy(destination.Begin, source, count * AresParticleRecordSize);
+					destination.End = count
+						? destination.Begin + count * AresParticleRecordSize
+						: destination.Begin;
+					return true;
+				}
+
+				auto* const memory = api.Allocate(static_cast<unsigned int>(count));
+				if (!memory)
+					return count == 0;
+				memcpy(memory, source, count * AresParticleRecordSize);
+				api.Adopt(&destination, memory, static_cast<unsigned int>(count),
+					static_cast<unsigned int>(count));
+				return true;
+			}
+
+			bool CaptureAresParticleState(AresParticleSnapshot& snapshot)
+			{
+				snapshot = {};
+				const auto& api = GetAresParticleApi();
+				if (!api.Compatible)
+					return true;
+
+				snapshot.Captured = true;
+				snapshot.Systems.reserve(static_cast<size_t>(
+					std::max(ParticleSystemClass::Array.Count, 0)));
+
+				for (int i = 0; i < ParticleSystemClass::Array.Count; ++i)
+				{
+					auto* const pSystem = ParticleSystemClass::Array.Items[i];
+					if (!pSystem)
+						continue;
+					auto* const pExt = api.Find(api.ExtensionMap, pSystem);
+					if (!pExt || pExt->Owner != pSystem)
+						return false;
+
+					AresParticleSystemSnapshot saved {};
+					saved.OwnerId = UniqueIDOf(pSystem);
+					saved.Behave = pExt->Behave;
+					saved.HeldParticleTypeIndex = ParticleTypeIndex(pExt->HeldParticleType);
+					if (saved.HeldParticleTypeIndex == -2
+						|| !CopyAresVector(pExt->MovementData, saved.MovementData))
+						return false;
+
+					std::vector<std::array<unsigned char, AresParticleRecordSize>> draw;
+					if (!CopyAresVector(pExt->DrawData, draw))
+						return false;
+					saved.DrawData.reserve(draw.size());
+					for (auto& bytes : draw)
+					{
+						AresParticleRecordSnapshot item {};
+						item.Bytes = bytes;
+						ParticleTypeClass* pType = nullptr;
+						memcpy(&pType, item.Bytes.data() + AresDrawLinkedParticleTypeOffset,
+							sizeof(pType));
+						item.LinkedParticleTypeIndex = ParticleTypeIndex(pType);
+						if (item.LinkedParticleTypeIndex == -2)
+							return false;
+						memset(item.Bytes.data() + AresDrawLinkedParticleTypeOffset, 0,
+							sizeof(pType));
+						saved.DrawData.push_back(std::move(item));
+					}
+					snapshot.Systems.push_back(std::move(saved));
+				}
+				return true;
+			}
+
+			bool RestoreAresParticleState(const AresParticleSnapshot& snapshot, int keyframeFrame)
+			{
+			// This used to fail silently in a dozen places, so a run where it restored nothing looked
+			// exactly like a run where it had nothing to do. Every way out now says which it was.
+			auto Give_Up = [keyframeFrame](const char* why)
+			{
+				Debug::Log("[Replay] Keyframe %d could not restore the Ares particle state: %s.\n",
+					keyframeFrame, why);
+				return false;
+			};
+
+				if (!snapshot.Captured)
+				{
+					Debug::Log("[Replay] Keyframe %d holds no Ares particle state to restore.\n",
+						keyframeFrame);
+					return true;
+				}
+				const auto& api = GetAresParticleApi();
+				if (!api.Compatible)
+					return Give_Up("the Ares build does not match the one this was reversed from");
+
+				std::unordered_map<uint32_t, ParticleSystemClass*> systems;
+				systems.reserve(static_cast<size_t>(std::max(ParticleSystemClass::Array.Count, 0)));
+				for (int i = 0; i < ParticleSystemClass::Array.Count; ++i)
+				{
+					auto* const pSystem = ParticleSystemClass::Array.Items[i];
+					if (pSystem)
+						systems.emplace(UniqueIDOf(pSystem), pSystem);
+				}
+				if (systems.size() != snapshot.Systems.size())
+					{
+						Debug::Log("[Replay] Keyframe %d holds %u particle systems but the load left %u.\n",
+							keyframeFrame, static_cast<unsigned int>(snapshot.Systems.size()),
+							static_cast<unsigned int>(systems.size()));
+						return Give_Up("the number of particle systems changed");
+					}
+
+				int changedSystems = 0;
+				size_t movementRecords = 0;
+				size_t drawRecords = 0;
+				for (const auto& saved : snapshot.Systems)
+				{
+					const auto found = systems.find(saved.OwnerId);
+					if (found == systems.end())
+						return Give_Up("a particle system is missing after the load");
+					auto* const pExt = api.Find(api.ExtensionMap, found->second);
+					if (!pExt || pExt->Owner != found->second)
+						return Give_Up("a particle system has no Ares extension, or one belonging to something else");
+
+					size_t liveMovement = 0;
+					size_t movementCapacity = 0;
+					size_t liveDraw = 0;
+					size_t drawCapacity = 0;
+					if (!AresVectorCount(pExt->MovementData, liveMovement, movementCapacity)
+						|| !AresVectorCount(pExt->DrawData, liveDraw, drawCapacity))
+						return Give_Up("an Ares particle vector does not look like a vector");
+
+					const bool changed = pExt->Behave != saved.Behave
+						|| ParticleTypeIndex(pExt->HeldParticleType) != saved.HeldParticleTypeIndex
+						|| liveMovement != saved.MovementData.size()
+						|| liveDraw != saved.DrawData.size();
+
+					pExt->Behave = saved.Behave;
+					pExt->HeldParticleType = ParticleTypeAt(saved.HeldParticleTypeIndex);
+					if (saved.HeldParticleTypeIndex >= 0 && !pExt->HeldParticleType)
+						return Give_Up("the held particle type is no longer in the array");
+
+					if (!RestoreAresVector(api, pExt->MovementData,
+						saved.MovementData.empty() ? nullptr : saved.MovementData.front().data(),
+						saved.MovementData.size()))
+						return Give_Up("the movement record vector could not be rebuilt");
+
+					std::vector<std::array<unsigned char, AresParticleRecordSize>> draw;
+					draw.reserve(saved.DrawData.size());
+					for (const auto& item : saved.DrawData)
+					{
+						auto bytes = item.Bytes;
+						auto* const pType = ParticleTypeAt(item.LinkedParticleTypeIndex);
+						if (item.LinkedParticleTypeIndex >= 0 && !pType)
+							return Give_Up("a draw record names a particle type no longer in the array");
+						memcpy(bytes.data() + AresDrawLinkedParticleTypeOffset, &pType,
+							sizeof(pType));
+						draw.push_back(bytes);
+					}
+					if (!RestoreAresVector(api, pExt->DrawData,
+						draw.empty() ? nullptr : draw.front().data(), draw.size()))
+						return Give_Up("the draw record vector could not be rebuilt");
+
+					changedSystems += changed ? 1 : 0;
+					movementRecords += saved.MovementData.size();
+					drawRecords += saved.DrawData.size();
+				}
+
+				AresParticleSnapshot rebuilt {};
+				if (!CaptureAresParticleState(rebuilt) || rebuilt != snapshot)
+				{
+					Debug::Log("[Replay] Keyframe %d Ares particle state did not reproduce exactly "
+						"after restoring it.\n", keyframeFrame);
+					return Give_Up("the state read back differently from what was written");
+				}
+
+				if (changedSystems)
+				{
+					Debug::Log("[Replay] Keyframe %d restored Ares particle state for %d systems "
+						"(%u movement records, %u draw records; %d systems differed after load).\n",
+						keyframeFrame, static_cast<int>(snapshot.Systems.size()),
+						static_cast<unsigned int>(movementRecords),
+						static_cast<unsigned int>(drawRecords), changedSystems);
+				}
+				return true;
+			}
+
+			#pragma endregion Ares particle-system state
 
 			template <typename T>
 			void AddLocomotorResetSnapshot(std::vector<LocomotorResetSnapshot>& out, uint32_t ownerId,
@@ -1181,7 +1611,9 @@ namespace ReplaySystem
 			// against the same frame the first time round. It reports the first frame anything drifted -
 			// where the load actually went wrong, rather than where the consequences first showed - and
 			// names the fields that moved.
-			constexpr size_t MaxWatchedObjectSamples = 600000;
+			// Each sample now carries the locomotor bytes, so the cap comes down to keep the total
+			// bounded in a 32-bit process.
+			constexpr size_t MaxWatchedObjectSamples = 200000;
 
 			struct WatchSample
 			{
@@ -1216,6 +1648,10 @@ namespace ReplaySystem
 				int32_t Y;
 				int32_t Z;
 				int32_t Health;
+				bool IsALoaner;
+				bool IsInPlayfield;
+				uint32_t TeamId;
+				bool TeamLeavingMap;
 				// Copied rather than pointed at: the load destroys and rebuilds the type objects too, so
 				// a pointer taken on the first pass reads freed memory once the keyframe is back.
 				std::array<char, 32> TypeId {};
@@ -1245,6 +1681,34 @@ namespace ReplaySystem
 				int32_t LocomotorTimerStart = 0;
 				int32_t LocomotorTimerLeft = 0;
 				int32_t LocomotorTimerRate = 0;
+				// The locomotor is a COM sub-object with its own state, and none of the fields above
+				// reach into it beyond the four value members whose Load methods are known to reset
+				// themselves. The spy plane at frame 7508 drew six random numbers in its update the
+				// first time round and none the second with every watched field identical, which is
+				// what state living somewhere unwatched looks like. LocomotionClass::Load reads
+				// Size_Of() bytes, so that is what is hashed - the whole thing, whatever it is.
+				// Kept as bytes rather than a hash: every locomotor in the game came back different
+				// after a load, and a hash can only say that, not which field. Capped at the largest
+				// locomotor seen so far (112 bytes for the drive one).
+				// RadioClass::Has_Contact_Index decides whether an aircraft docks with the building it
+				// is over or goes looking for somewhere else to be. At frame 7508 both runs asked it
+				// the same question about the same building and only one went on to the landing zone
+				// scan, so the answer differed - and nothing here has ever looked at the links it
+				// answers from.
+				// Phobos decides an object should vanish from TechnoExt::UpdateAutoDeath, and its first
+				// condition is ammunition:
+				//
+				//     if (pTypeExt->OwnerObject()->Ammo > 0 && pThis->Ammo <= 0
+				//         && pTypeExt->AutoDeath_OnAmmoDepletion)
+				//         TechnoExt::KillSelf(pThis, howToDie, ...);
+				//
+				// which is Stun, Limbo, RegisterKill, UnInit - the exact chain the spy plane goes
+				// through on the pass where it dies. Ammo has never been sampled here.
+				int32_t Ammo = 0;
+				int32_t RadioLinkCount = 0;
+				std::array<uint32_t, 8> RadioLinks {};
+				int32_t LocomotorSize = 0;
+				std::array<unsigned char, 0x70> LocomotorBytes {};
 			};
 
 			std::unordered_map<int, std::vector<WatchSample>> WatchedObjectsByFrame;
@@ -1303,7 +1767,11 @@ namespace ReplaySystem
 						pTechno->Location.X,
 						pTechno->Location.Y,
 						pTechno->Location.Z,
-						static_cast<int32_t>(pTechno->Health)
+						static_cast<int32_t>(pTechno->Health),
+						pTechno->IsALoaner,
+						pTechno->IsInPlayfield,
+						pFoot ? UniqueIDOf(pFoot->Team) : 0u,
+						pFoot && pFoot->Team ? pFoot->Team->IsLeavingMap : false
 					};
 
 					if (const char* const pTypeId = pTechno->get_ID())
@@ -1331,9 +1799,49 @@ namespace ReplaySystem
 						sample.LastMapY = pFoot->LastMapCoords.Y;
 						sample.LastDestinationId = UniqueIDOf(pFoot->LastDestination);
 
+					sample.Ammo = pTechno->Ammo;
+					sample.RadioLinkCount = pTechno->RadioLinks.Capacity;
+					for (int link = 0; link < pTechno->RadioLinks.Capacity
+						&& link < static_cast<int>(sample.RadioLinks.size()); ++link)
+					{
+						sample.RadioLinks[static_cast<size_t>(link)] =
+							UniqueIDOf(pTechno->RadioLinks[link]);
+					}
+
 						if (pFoot->Locomotor)
 						{
 							ILocomotion* const pInterface = pFoot->Locomotor.GetInterfacePtr();
+
+							// LocomotionClass::Load (0x55AAC0) reads Size_Of() bytes over the object, so that
+							// is exactly the state a load is meant to bring back. Hashing all of it means no
+							// locomotor can differ without the watch noticing, whatever kind it is.
+							// static_cast, never reinterpret_cast: LocomotionClass inherits IPersistStream and
+							// ILocomotion both, so an ILocomotion* points at the second subobject and needs the
+							// offset applied. Reinterpreting it and calling a virtual went through the wrong
+							// vtable and took the game down at 0x4AFFC0 with a null this.
+							if (auto* const pLocomotion = static_cast<LocomotionClass*>(pInterface))
+							{
+								const int size = pLocomotion->Size();
+								if (size > 0 && size <= 0x400)
+								{
+									sample.LocomotorSize = size;
+
+									const auto* const bytes =
+										reinterpret_cast<const unsigned char*>(pLocomotion);
+									// LocomotionClass is two vtables at 0x00 and 0x04, Owner and LinkedTo at
+									// 0x08 and 0x0C, Powered and Dirty at 0x10 and 0x11, and RefCount at
+									// 0x14. The vtables, the two owner pointers and the reference count all
+									// move with the allocation rather than with the state - Load even saves
+									// and restores RefCount around its read - so hashing them would report
+									// every locomotor in the game as different after any load. The derived
+									// state starts at 0x18; the two flags are folded in by hand.
+									const int kept = std::min(size,
+										static_cast<int>(sample.LocomotorBytes.size()));
+									std::copy(bytes, bytes + kept, sample.LocomotorBytes.begin());
+
+								}
+							}
+
 							if (const auto* const pHover =
 								locomotion_cast<const HoverLocomotionClass*>(pInterface))
 							{
@@ -1429,6 +1937,28 @@ namespace ReplaySystem
 				return std::equal(a.begin(), a.begin() + readable, c.begin());
 			}
 
+			// Only the part of a locomotor that a load is meant to bring back. The two vtables at 0x00
+			// and 0x04, Owner and LinkedTo at 0x08 and 0x0C and RefCount at 0x14 all move with the
+			// allocation - LocomotionClass::Load even saves and restores RefCount around its read - so
+			// comparing them would report every locomotor in the game as different after any load.
+			// Powered and Dirty at 0x10 and 0x11 are real state and are kept.
+			constexpr int LocomotorStateStart = 0x18;
+
+			bool SameLocomotorState(const WatchSample& a, const WatchSample& c)
+			{
+				if (a.LocomotorSize <= 0)
+					return true;
+
+				if (a.LocomotorBytes[0x10] != c.LocomotorBytes[0x10]
+					|| a.LocomotorBytes[0x11] != c.LocomotorBytes[0x11])
+					return false;
+
+				const int kept = std::min(a.LocomotorSize,
+					static_cast<int>(a.LocomotorBytes.size()));
+				return std::equal(a.LocomotorBytes.begin() + LocomotorStateStart,
+					a.LocomotorBytes.begin() + kept, c.LocomotorBytes.begin() + LocomotorStateStart);
+			}
+
 			bool SameWatchSample(const WatchSample& a, const WatchSample& c)
 			{
 				return a.Id == c.Id && a.PrimaryFacing == c.PrimaryFacing
@@ -1453,7 +1983,11 @@ namespace ReplaySystem
 					&& a.PlanningClosedLoopNodeCount == c.PlanningClosedLoopNodeCount
 					&& a.PlanningStepsToClosedLoop == c.PlanningStepsToClosedLoop
 					&& a.X == c.X && a.Y == c.Y && a.Z == c.Z
-					&& a.Health == c.Health && a.OwnerIndex == c.OwnerIndex
+					&& a.Health == c.Health
+					&& a.IsALoaner == c.IsALoaner
+					&& a.IsInPlayfield == c.IsInPlayfield
+					&& a.TeamId == c.TeamId && a.TeamLeavingMap == c.TeamLeavingMap
+					&& a.OwnerIndex == c.OwnerIndex
 					&& a.PrimaryStart == c.PrimaryStart && a.PrimaryROT == c.PrimaryROT
 					&& a.PrimaryRotationStart == c.PrimaryRotationStart
 					&& a.PrimaryRotationLeft == c.PrimaryRotationLeft
@@ -1475,24 +2009,59 @@ namespace ReplaySystem
 					&& a.LocomotorROT == c.LocomotorROT
 					&& a.LocomotorTimerStart == c.LocomotorTimerStart
 					&& a.LocomotorTimerLeft == c.LocomotorTimerLeft
-					&& a.LocomotorTimerRate == c.LocomotorTimerRate;
+					&& a.LocomotorTimerRate == c.LocomotorTimerRate
+					&& a.Ammo == c.Ammo
+					&& a.RadioLinkCount == c.RadioLinkCount && a.RadioLinks == c.RadioLinks
+					&& a.LocomotorSize == c.LocomotorSize
+					&& SameLocomotorState(a, c);
 			}
 
 			void ReportObjectDrift(int frame, const std::vector<WatchSample>& before,
 				const std::vector<WatchSample>& now)
 			{
+				std::unordered_map<uint32_t, const WatchSample*> beforeById;
+				std::unordered_map<uint32_t, const WatchSample*> nowById;
+				beforeById.reserve(before.size());
+				nowById.reserve(now.size());
+				for (const auto& sample : before)
+					beforeById.emplace(sample.Id, &sample);
+				for (const auto& sample : now)
+					nowById.emplace(sample.Id, &sample);
+
 				if (before.size() != now.size())
 				{
 					++WatchedObjectDriftReports;
 					Debug::Log("[Replay] Frame %d holds %d objects on the way back through, %d the first time "
 						"round.\n", frame, static_cast<int>(now.size()), static_cast<int>(before.size()));
-					return;
+
+					int reported = 0;
+					for (const auto& sample : now)
+					{
+						if (beforeById.find(sample.Id) == beforeById.end() && reported++ < 4)
+						{
+							Debug::Log("[Replay]   only after the keyframe load: object %u (%s), house %d, "
+								"mission %d at %d,%d,%d.\n", sample.Id, sample.TypeId.data(),
+								sample.OwnerIndex, sample.Mission, sample.X, sample.Y, sample.Z);
+						}
+					}
+					reported = 0;
+					for (const auto& sample : before)
+					{
+						if (nowById.find(sample.Id) == nowById.end() && reported++ < 4)
+						{
+							Debug::Log("[Replay]   only on the first pass: object %u (%s), house %d, "
+								"mission %d at %d,%d,%d.\n", sample.Id, sample.TypeId.data(),
+								sample.OwnerIndex, sample.Mission, sample.X, sample.Y, sample.Z);
+						}
+					}
 				}
 
-				for (size_t i = 0; i < before.size(); ++i)
+				for (const auto& is : now)
 				{
-					const WatchSample& was = before[i];
-					const WatchSample& is = now[i];
+					const auto found = beforeById.find(is.Id);
+					if (found == beforeById.end())
+						continue;
+					const WatchSample& was = *found->second;
 					if (SameWatchSample(was, is) || !ReportedDriftObjects.insert(is.Id).second)
 						continue;
 
@@ -1623,6 +2192,38 @@ namespace ReplaySystem
 							was.CurrentMapX, was.CurrentMapY, was.LastMapX, was.LastMapY,
 							was.LastDestinationId);
 					}
+					if (was.Ammo != is.Ammo)
+						Debug::Log("[Replay]   %d ammo, was %d.\n", is.Ammo, was.Ammo);
+					if (was.RadioLinkCount != is.RadioLinkCount || was.RadioLinks != is.RadioLinks)
+					{
+						Debug::Log("[Replay]   %d radio links (%u %u %u %u %u %u %u %u), was %d "
+							"(%u %u %u %u %u %u %u %u).\n", is.RadioLinkCount,
+							is.RadioLinks[0], is.RadioLinks[1], is.RadioLinks[2], is.RadioLinks[3],
+							is.RadioLinks[4], is.RadioLinks[5], is.RadioLinks[6], is.RadioLinks[7],
+							was.RadioLinkCount,
+							was.RadioLinks[0], was.RadioLinks[1], was.RadioLinks[2], was.RadioLinks[3],
+							was.RadioLinks[4], was.RadioLinks[5], was.RadioLinks[6], was.RadioLinks[7]);
+					}
+					if (!SameLocomotorState(was, is) || was.LocomotorSize != is.LocomotorSize)
+					{
+						Debug::Log("[Replay]   its locomotor is %d bytes, was %d.\n",
+							is.LocomotorSize, was.LocomotorSize);
+
+						const int kept = std::min(is.LocomotorSize,
+							static_cast<int>(is.LocomotorBytes.size()));
+						int named = 0;
+						for (int at = 0x10; at < kept && named < 8; ++at)
+						{
+							if (at >= 0x12 && at < LocomotorStateStart)
+								continue;
+							if (was.LocomotorBytes[at] == is.LocomotorBytes[at])
+								continue;
+
+							++named;
+							Debug::Log("[Replay]     locomotor byte 0x%02X is %02X, was %02X.\n", at,
+								is.LocomotorBytes[at], was.LocomotorBytes[at]);
+						}
+					}
 					if (was.LocomotorResetKind != is.LocomotorResetKind
 						|| was.LocomotorFacing != is.LocomotorFacing
 						|| was.LocomotorDesired != is.LocomotorDesired
@@ -1650,6 +2251,16 @@ namespace ReplaySystem
 					}
 					if (was.Health != is.Health)
 						Debug::Log("[Replay]   %d health, was %d.\n", is.Health, was.Health);
+					if (was.IsALoaner != is.IsALoaner
+						|| was.IsInPlayfield != is.IsInPlayfield
+						|| was.TeamId != is.TeamId
+						|| was.TeamLeavingMap != is.TeamLeavingMap)
+					{
+						Debug::Log("[Replay]   off-map state loaner %d in-playfield %d team %u/leaving %d, "
+							"was %d %d %u/%d.\n", is.IsALoaner, is.IsInPlayfield, is.TeamId,
+							is.TeamLeavingMap, was.IsALoaner, was.IsInPlayfield, was.TeamId,
+							was.TeamLeavingMap);
+					}
 
 					return;
 				}
@@ -1728,8 +2339,156 @@ namespace ReplaySystem
 						static_cast<int32_t>(pTechno->MissionStatus),
 						static_cast<int32_t>(pTechno->MissionAccumulateTime),
 						pFoot ? pFoot->NavQueue.Count : 0,
-						pFoot && pFoot->NavQueue.Count > 0 ? UniqueIDOf(pFoot->NavQueue.Items[0]) : 0u
+						pFoot && pFoot->NavQueue.Count > 0 ? UniqueIDOf(pFoot->NavQueue.Items[0]) : 0u,
+						pTechno->IsALoaner,
+						pTechno->IsInPlayfield,
+						pFoot ? UniqueIDOf(pFoot->Team) : 0u,
+						pFoot && pFoot->Team ? pFoot->Team->IsLeavingMap : false
 					});
+				}
+			}
+
+			void CaptureHouseRepairSnapshots(std::vector<HouseRepairSnapshot>& out)
+			{
+				out.clear();
+				out.reserve(static_cast<size_t>(std::max(HouseClass::Array.Count, 0)));
+				for (int i = 0; i < HouseClass::Array.Count; ++i)
+				{
+					const auto* const pHouse = HouseClass::Array.Items[i];
+					if (!pHouse)
+						continue;
+
+					out.push_back(HouseRepairSnapshot {
+						UniqueIDOf(pHouse),
+						pHouse->Repairing,
+						pHouse->RepairTimer.StartTime,
+						pHouse->RepairTimer.TimeLeft
+					});
+				}
+			}
+
+			void ReportHouseRepairSnapshotDifferences(const Keyframe& keyframe)
+			{
+				std::unordered_map<uint32_t, const HouseClass*> byId;
+				byId.reserve(static_cast<size_t>(std::max(HouseClass::Array.Count, 0)));
+				for (int i = 0; i < HouseClass::Array.Count; ++i)
+				{
+					if (const auto* const pHouse = HouseClass::Array.Items[i])
+						byId.emplace(UniqueIDOf(pHouse), pHouse);
+				}
+
+				for (const auto& saved : keyframe.HouseRepairs)
+				{
+					const auto found = byId.find(saved.Id);
+					if (found == byId.end())
+						continue;
+
+					const auto* const pHouse = found->second;
+					if (pHouse->Repairing == saved.DidRepair
+						&& pHouse->RepairTimer.StartTime == saved.RepairTimerStart
+						&& pHouse->RepairTimer.TimeLeft == saved.RepairTimerLeft)
+					{
+						continue;
+					}
+
+					Debug::Log("[Replay] Keyframe %d: house %u repair gate is %d with timer %d/%d "
+						"after loading; it was %d with timer %d/%d.\n", keyframe.Frame, saved.Id,
+						pHouse->Repairing, pHouse->RepairTimer.StartTime,
+						pHouse->RepairTimer.TimeLeft, saved.DidRepair,
+						saved.RepairTimerStart, saved.RepairTimerLeft);
+				}
+			}
+
+			// HouseClass::AI uses Repairing as a one-repair-per-house gate. RepairTimer controls when
+			// that gate is released. The save/load path preserves the gate byte but reconstructs the
+			// timer as an already-expired timer at the current frame. On the frame after a load this
+			// clears Repairing early, allowing a building to perform an extra repair allocation and,
+			// for an AI house, consume an extra random number in BuildingClass::Repair_AI.
+			//
+			// Keep both values together: restoring only Repairing would still release it at the wrong
+			// frame, while restoring only the timer could leave a stale gate after other save/load cases.
+			void RestoreHouseRepairState(const Keyframe& keyframe)
+			{
+				std::unordered_map<uint32_t, HouseClass*> byId;
+				byId.reserve(static_cast<size_t>(std::max(HouseClass::Array.Count, 0)));
+				for (int i = 0; i < HouseClass::Array.Count; ++i)
+				{
+					if (auto* const pHouse = HouseClass::Array.Items[i])
+						byId.emplace(UniqueIDOf(pHouse), pHouse);
+				}
+
+				int restored = 0;
+				uint32_t first = 0;
+				for (const auto& saved : keyframe.HouseRepairs)
+				{
+					const auto found = byId.find(saved.Id);
+					if (found == byId.end())
+						continue;
+
+					auto* const pHouse = found->second;
+					if (pHouse->Repairing == saved.DidRepair
+						&& pHouse->RepairTimer.StartTime == saved.RepairTimerStart
+						&& pHouse->RepairTimer.TimeLeft == saved.RepairTimerLeft)
+					{
+						continue;
+					}
+
+					if (!first)
+						first = saved.Id;
+					pHouse->Repairing = saved.DidRepair;
+					pHouse->RepairTimer.StartTime = saved.RepairTimerStart;
+					pHouse->RepairTimer.TimeLeft = saved.RepairTimerLeft;
+					++restored;
+				}
+
+				if (restored > 0)
+				{
+					Debug::Log("[Replay] Keyframe %d restored the repair gate and timer on %d houses "
+						"after the load (first house %u).\n", keyframe.Frame, restored, first);
+				}
+			}
+
+			// AbstractClass::Load reads the complete saved object, including TechnoClass::IsInPlayfield,
+			// but the load then reconstructs and places every object. An overflight aircraft already
+			// beyond the playable rectangle cannot be placed back into the map and that process clears
+			// IsInPlayfield. The live timeline deliberately still has it set until AircraftClass::AI
+			// observes that it is outside the radar rectangle and removes it:
+			//
+			//     if (!Map.In_Radar(cell) && Should_Delete_Off_Map())
+			//         Remove_This();
+			//
+			// Should_Delete_Off_Map returns false when IsInPlayfield is clear. That left SPYP 1068707
+			// alive after a frame-7500 load when the recording removed it on frame 7508, with the unique
+			// ID counter still perfectly matched. The keyframe therefore puts this one history-dependent
+			// placement bit back after the engine has finished reconstructing and resuming the session.
+			void RestoreTechnoInPlayfieldState(const Keyframe& keyframe)
+			{
+				std::unordered_map<uint32_t, TechnoClass*> byId;
+				byId.reserve(static_cast<size_t>(std::max(TechnoClass::Array.Count, 0)));
+				for (int i = 0; i < TechnoClass::Array.Count; ++i)
+				{
+					if (auto* const pTechno = TechnoClass::Array.Items[i])
+						byId.emplace(UniqueIDOf(pTechno), pTechno);
+				}
+
+				int restored = 0;
+				uint32_t first = 0;
+				for (const auto& saved : keyframe.Technos)
+				{
+					const auto found = byId.find(saved.Id);
+					if (found == byId.end() || found->second->IsInPlayfield == saved.IsInPlayfield)
+						continue;
+
+					if (!first)
+						first = saved.Id;
+					found->second->IsInPlayfield = saved.IsInPlayfield;
+					++restored;
+				}
+
+				if (restored > 0)
+				{
+					Debug::Log("[Replay] Keyframe %d restored IsInPlayfield on %d technos after the load "
+						"(first object %u).\n", keyframe.Frame, restored, first);
 				}
 			}
 
@@ -1772,7 +2531,11 @@ namespace ReplaySystem
 						&& before.MissionStatus == after.MissionStatus
 						&& before.MissionAccumulate == after.MissionAccumulate
 						&& before.NavQueueCount == after.NavQueueCount
-						&& before.NavQueueHeadId == after.NavQueueHeadId)
+						&& before.NavQueueHeadId == after.NavQueueHeadId
+						&& before.IsALoaner == after.IsALoaner
+						&& before.IsInPlayfield == after.IsInPlayfield
+						&& before.TeamId == after.TeamId
+						&& before.TeamLeavingMap == after.TeamLeavingMap)
 					{
 						continue;
 					}
@@ -1785,7 +2548,8 @@ namespace ReplaySystem
 							"mission %d (was %d) started frame %d (was %d), targeting timer %d/%d "
 							"(was %d/%d), mission timer %d/%d (was %d/%d), status %d (was %d), "
 							"accumulated %d (was %d), %d queued destinations heading for %u "
-							"(was %d heading for %u).\n",
+							"(was %d heading for %u), loaner %d (was %d), in-playfield %d (was %d), "
+							"team %u/leaving %d (was %u/%d).\n",
 							keyframe.Frame, before.Id,
 							after.TargetId, before.TargetId,
 							after.ArchiveTargetId, before.ArchiveTargetId,
@@ -1799,7 +2563,11 @@ namespace ReplaySystem
 							after.MissionStatus, before.MissionStatus,
 							after.MissionAccumulate, before.MissionAccumulate,
 							after.NavQueueCount, after.NavQueueHeadId,
-							before.NavQueueCount, before.NavQueueHeadId);
+							before.NavQueueCount, before.NavQueueHeadId,
+							after.IsALoaner, before.IsALoaner,
+							after.IsInPlayfield, before.IsInPlayfield,
+							after.TeamId, after.TeamLeavingMap,
+							before.TeamId, before.TeamLeavingMap);
 					}
 					else
 					{
@@ -2545,7 +3313,10 @@ namespace ReplaySystem
 				memcpy(keyframe.Random.data(), &ScenarioClass::Instance->Random, sizeof(Randomizer));
 
 				CaptureTechnoSnapshots(keyframe.Technos);
+				CaptureHouseRepairSnapshots(keyframe.HouseRepairs);
 				if (!CapturePlanningState(keyframe.Planning))
+					return false;
+				if (!CaptureAresParticleState(keyframe.AresParticles))
 					return false;
 				CaptureLocomotorResetStates(keyframe.LocomotorResetStates);
 				CaptureTiberiumState(keyframe.Tiberium);
@@ -2607,6 +3378,8 @@ namespace ReplaySystem
 
 				if (!RestorePlanningState(keyframe.Planning, keyframe.Frame))
 					return false;
+				if (!RestoreAresParticleState(keyframe.AresParticles, keyframe.Frame))
+					return false;
 				if (!RestoreLocomotorResetStates(keyframe.LocomotorResetStates, keyframe.Frame))
 					return false;
 				RestoreTiberiumState(keyframe.Tiberium, keyframe.Frame);
@@ -2617,6 +3390,34 @@ namespace ReplaySystem
 				RestoreMovementZones(keyframe.MovementZones, keyframe.Frame);
 				if (!RestoreSubzoneTracking(keyframe.SubzoneGraph, keyframe.Frame))
 					return false;
+
+				{
+					// A silent watch has been mistaken for a passing one three times in this file now.
+					// This says outright how much locomotor state is actually being compared, so
+					// "no locomotor differences" can be told from "no locomotors sampled".
+					int sampled = 0;
+					int bytesKept = 0;
+					for (int i = 0; i < FootClass::Array.Count; ++i)
+					{
+						const auto* const pFoot = FootClass::Array.Items[i];
+						if (!pFoot || !pFoot->Locomotor)
+							continue;
+
+						if (auto* const pLoco = static_cast<LocomotionClass*>(
+							const_cast<FootClass*>(pFoot)->Locomotor.GetInterfacePtr()))
+						{
+							const int size = pLoco->Size();
+							if (size > 0 && size <= 0x400)
+							{
+								++sampled;
+								bytesKept += std::min(size, 0x70) - 0x18;
+							}
+						}
+					}
+
+					Debug::Log("[Replay] Keyframe %d is watching %d locomotors, %d bytes of state.\n",
+						keyframe.Frame, sampled, bytesKept);
+				}
 
 				if (randomChanged || reorderedCollectionCount > 0)
 				{
@@ -2651,6 +3452,39 @@ namespace ReplaySystem
 					Debug::Log("[Replay] Failed to write the keyframe for frame %d.\n", frame);
 					return false;
 				}
+
+				// SaveGame is not a const operation on the running world. It codes and decodes the
+				// object graph and lets every loaded extension write its own stream. Playback continues
+				// from the state after all of that has returned, so the sidecar state paired with the
+				// save must describe that post-save world too. Capturing it before SaveGame made a
+				// keyframe internally consistent with the file but subtly different from the timeline
+				// being recorded whenever a save changed an iteration order or extension-owned cache.
+				Keyframe postSaveKeyframe;
+				if (!CaptureKeyframeState(frame, postSaveKeyframe))
+				{
+					Debug::Log("[Replay] Could not capture post-save simulation state for keyframe %d.\n",
+						frame);
+					return false;
+				}
+
+				int changedOrders = 0;
+				for (size_t i = 0; i < keyframe.Orders.size(); ++i)
+					changedOrders += keyframe.Orders[i] != postSaveKeyframe.Orders[i] ? 1 : 0;
+				for (size_t i = 0; i < keyframe.LayerOrders.size(); ++i)
+					changedOrders += keyframe.LayerOrders[i] != postSaveKeyframe.LayerOrders[i] ? 1 : 0;
+
+				const bool randomChanged = keyframe.Random != postSaveKeyframe.Random;
+				const bool planningChanged = keyframe.Planning != postSaveKeyframe.Planning;
+				const bool aresParticlesChanged = keyframe.AresParticles != postSaveKeyframe.AresParticles;
+				if (changedOrders || randomChanged || planningChanged || aresParticlesChanged)
+				{
+					Debug::Log("[Replay] Writing keyframe %d changed live state; retaining the post-save "
+						"timeline (ordered collections %d, RNG %s, planning %s, Ares particles %s).\n",
+						frame, changedOrders, randomChanged ? "changed" : "same",
+						planningChanged ? "changed" : "same",
+						aresParticlesChanged ? "changed" : "same");
+				}
+				keyframe = std::move(postSaveKeyframe);
 
 				State.Keyframes.push_back(std::move(keyframe));
 				return true;
@@ -3073,6 +3907,48 @@ namespace ReplaySystem
 				DSurface::Temp = DSurface::Hidden;
 			}
 
+			// Savegames do not carry the networking queues, and Load_Game does not clear them either.
+			// They are normally initialised only when Select_Game starts a new session. That is fatal
+			// for a replay seek: an event injected just after one restored frame can survive a second
+			// load, where Execute_DoList treats it as overdue and executes it in the later world. A
+			// stale ARCHIVE event, for example, changes a factory rally point on the first frame after
+			// the second load and the unit leaving that factory subsequently takes a different route.
+			//
+			// The replay stream is the complete source of gameplay events during playback, so none of
+			// these transient queues belongs to the restored state. Clear on both sides of LoadMission:
+			// before it, to discard events from the old timeline, and after it, to discard anything the
+			// teardown/resume path happened to enqueue.
+			void ClearTransientEventQueuesForLoad(const char* phase, int keyframeFrame)
+			{
+				const int outCount = EventClass::OutList.Count;
+				const int doCount = EventClass::DoList.Count;
+				const int megaMissionCount = EventClass::MegaMissionList.Count;
+
+				if (outCount > 0 || doCount > 0 || megaMissionCount > 0)
+				{
+					Debug::Log("[Replay] Keyframe %d discarded transient event queues %s loading "
+						"(out %d, do %d, deferred mega-missions %d).\n",
+						keyframeFrame, phase, outCount, doCount, megaMissionCount);
+
+					const int reportCount = std::min(doCount, 4);
+					for (int i = 0; i < reportCount; ++i)
+					{
+						const auto& event = EventClass::DoList[i];
+						Debug::Log("[Replay]   discarded DoList event type %d from frame %u "
+							"(executed %s).\n", static_cast<int>(event.Type), event.Frame,
+							(event.IsExecuted & 1) != 0 ? "yes" : "no");
+					}
+				}
+
+				EventClass::OutList.Init();
+				EventClass::DoList.Init();
+				EventClass::MegaMissionList.Init();
+				std::memset(EventClass::MegaMissionTargetNum, 0,
+					sizeof(EventClass::MegaMissionTargetNum));
+				std::memset(EventClass::MegaMissionTargets, 0,
+					sizeof(EventClass::MegaMissionTargets));
+			}
+
 			bool RestorePlaybackAfterLoad(const Keyframe& keyframe)
 			{
 				RestartDriftReporting();
@@ -3103,9 +3979,12 @@ namespace ReplaySystem
 					return false;
 
 				ReportTechnoSnapshotDifferences(keyframe);
+				ReportHouseRepairSnapshotDifferences(keyframe);
 
 				RepointTempSurfaceAfterLoad();
 				ResumeInGameSessionAfterLoad();
+				RestoreHouseRepairState(keyframe);
+				RestoreTechnoInPlayfieldState(keyframe);
 
 				// Both the teardown and the resume above have their own opinion about the game speed -
 				// the teardown puts back whatever a live game last used, and the resume forces 2 for a
@@ -3132,6 +4011,7 @@ namespace ReplaySystem
 				char fileName[MAX_PATH] = { 0 };
 				FormatKeyframeName(fileName, sizeof(fileName), keyframe.Frame);
 
+				ClearTransientEventQueuesForLoad("before", keyframe.Frame);
 				State.LoadInProgress = true;
 				// LoadOptionsClass::LoadMission is the engine's own in-game load: it stops the
 				// sounds and the movies, tears the world down and rebuilds it from the file. Going
@@ -3146,6 +4026,7 @@ namespace ReplaySystem
 					return false;
 				}
 
+				ClearTransientEventQueuesForLoad("after", keyframe.Frame);
 				return RestorePlaybackAfterLoad(keyframe);
 			}
 
@@ -3264,6 +4145,7 @@ namespace ReplaySystem
 			if (ReplayState.PlaybackStreamEnded && State.Seeking)
 				EndSeek();
 
+			ServiceTraces();
 			ServiceObjectWatch();
 			ServiceCellWatch();
 			ServiceLayerWatch();
@@ -3331,7 +4213,14 @@ namespace ReplaySystem
 
 		bool ShouldSkipRenderThisFrame()
 		{
-			return State.Seeking && State.FramesSinceRender < SeekRenderInterval;
+			if (!State.Seeking)
+				return false;
+
+			const auto* const pConfig = GetConfig();
+			if (pConfig && pConfig->ReplaySeekRenderEveryFrame)
+				return false;
+
+			return State.FramesSinceRender < SeekRenderInterval;
 		}
 
 		void CountRenderedFrame()
