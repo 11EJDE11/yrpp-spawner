@@ -38,6 +38,8 @@
 #include <MapClass.h>
 #include <MessageListClass.h>
 #include <MouseClass.h>
+#include <ObjectClass.h>
+#include <OverlayClass.h>
 #include <RulesClass.h>
 #include <SessionClass.h>
 #include <TechnoClass.h>
@@ -50,11 +52,13 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
 #include <deque>
 #include <limits>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1779,12 +1783,76 @@ namespace ReplaySystem
 			return state;
 		}
 
+		// Overlays are counted out, on both sides. There is no TClassFactory<OverlayClass>, so a load
+		// never reconstructs one and every crate on the map loses its wrapper object - the crate is
+		// unaffected, it lives in the cell's overlay bytes, but the count does not. Left in, the
+		// census reported a mismatch on the load frame of every game with a crate on it, and that
+		// report latches: one false alarm and the sharpest detector in the diagnostics is blind to
+		// the real one for the rest of the replay. It cost exactly that at keyframe 59250.
+		//
+		// Subtracted rather than filtered because OverlayClass::Array is precisely the live overlay
+		// objects, so the answer is one subtraction rather than a walk of every object every frame.
+		//
+		// This changes what the number in the replay file means, so a census recorded before this
+		// will read low against a playback after it, by however many overlays were on the map.
 		FrameObjectCensus CurrentObjectCensus()
 		{
 			FrameObjectCensus census {};
-			census.AbstractCount = AbstractClass::Array.Count;
+			census.AbstractCount = AbstractClass::Array.Count - OverlayClass::Array.Count;
 			census.ScenarioUniqueID = ScenarioClass::Instance ? ScenarioClass::Instance->UniqueID : 0;
 			return census;
+		}
+
+		// What an object is, in the words whoever reads the log will search the rules for. Only the
+		// abstract types that really are ObjectClass-derived are asked for a type; everything else
+		// names itself and its abstract type and leaves it there.
+		const char* DescribeAbstract(const AbstractClass* pAbstract)
+		{
+			static char description[64];
+
+			const AbstractType what = pAbstract->WhatAmI();
+			const char* kind = "object";
+			bool hasObjectType = false;
+
+			switch (what)
+			{
+			case AbstractType::Unit:           kind = "unit";            hasObjectType = true; break;
+			case AbstractType::Aircraft:       kind = "aircraft";        hasObjectType = true; break;
+			case AbstractType::Infantry:       kind = "infantry";        hasObjectType = true; break;
+			case AbstractType::Building:       kind = "building";        hasObjectType = true; break;
+			case AbstractType::Anim:           kind = "anim";            hasObjectType = true; break;
+			case AbstractType::Bullet:         kind = "bullet";          hasObjectType = true; break;
+			case AbstractType::Particle:       kind = "particle";        hasObjectType = true; break;
+			case AbstractType::ParticleSystem: kind = "particle system"; hasObjectType = true; break;
+			case AbstractType::VoxelAnim:      kind = "voxel anim";      hasObjectType = true; break;
+			case AbstractType::Terrain:        kind = "terrain object";  hasObjectType = true; break;
+			case AbstractType::Smudge:         kind = "smudge";          hasObjectType = true; break;
+			case AbstractType::Overlay:        kind = "overlay";         hasObjectType = true; break;
+			case AbstractType::Wave:           kind = "wave";            break;
+			case AbstractType::Team:           kind = "team";            break;
+			case AbstractType::Factory:        kind = "factory";         break;
+			case AbstractType::House:          kind = "house";           break;
+			case AbstractType::Super:          kind = "superweapon";     break;
+			case AbstractType::RadSite:        kind = "radiation site";  break;
+			case AbstractType::Bomb:           kind = "bomb";            break;
+			case AbstractType::Temporal:       kind = "temporal warp";   break;
+			case AbstractType::Parasite:       kind = "parasite";        break;
+			case AbstractType::Tag:            kind = "tag";             break;
+			case AbstractType::Trigger:        kind = "trigger";         break;
+			default: break;
+			}
+
+			if (hasObjectType)
+			{
+				if (const auto* const pType = static_cast<const ObjectClass*>(pAbstract)->GetType())
+				{
+					sprintf_s(description, "%s [%s]", kind, pType->ID);
+					return description;
+				}
+			}
+
+			sprintf_s(description, "%s (abstract type %u)", kind, static_cast<unsigned int>(what));
+			return description;
 		}
 
 		// Reports the first frame on which playback is not holding the same set of objects the
@@ -1810,12 +1878,56 @@ namespace ReplaySystem
 				return;
 
 			ReplayState.CensusMismatchReported = true;
+
+			// Nothing has been seeked yet and nothing has been loaded, so the two runs cannot have
+			// parted company - the recording and this build simply do not count the same things.
+			// Subtracting the overlays did that to every replay recorded before it, and the report
+			// latches, so one line about a build difference would otherwise read as a divergence and
+			// switch the census off for the rest of the watch without saying why.
+			if (Seek::CurrentFrame() <= 0)
+			{
+				Debug::Log("[Replay] The recording counts %d objects on the first frame where this "
+					"build counts %d, before any seek. That is a recording made by a different build, "
+					"not a divergence; the object census is off for this replay.\n",
+					expected.AbstractCount, census.AbstractCount);
+				return;
+			}
+
 			Debug::Log("[Replay] Frame %d holds a different set of objects than the recording did "
 				"(objects %d, recorded %d; next unique ID %d, recorded %d). Something created or destroyed "
 				"an object on one side only - playback will diverge from here.\n",
 				Unsorted::CurrentFrame,
 				census.AbstractCount, expected.AbstractCount,
 				census.ScenarioUniqueID, expected.ScenarioUniqueID);
+
+			// Two counts say the runs are different games. They do not say what the difference is,
+			// and that is the entire question. The counter only ever goes up, so every object this
+			// frame made that the recording did not carries an ID above the one the recording ended
+			// the frame with - which makes them nameable outright rather than something to go and
+			// look for. "Three anims from the same warhead" and "three infantry out of a barracks"
+			// send you to completely different code.
+			if (census.ScenarioUniqueID > expected.ScenarioUniqueID)
+			{
+				constexpr int MaxListedExtraObjects = 12;
+				int listed = 0;
+
+				for (int i = 0; i < AbstractClass::Array.Count && listed < MaxListedExtraObjects; ++i)
+				{
+					const auto* const pAbstract = AbstractClass::Array.Items[i];
+					if (!pAbstract || static_cast<int>(pAbstract->UniqueID) <= expected.ScenarioUniqueID)
+						continue;
+
+					++listed;
+					Debug::Log("[Replay]   the recording never made unique ID %u: a %s.\n",
+						static_cast<unsigned int>(pAbstract->UniqueID), DescribeAbstract(pAbstract));
+				}
+
+				if (listed == 0)
+				{
+					Debug::Log("[Replay]   none of them is still in the world at the end of the frame; "
+						"whatever was made was removed again before the hash was taken.\n");
+				}
+			}
 		}
 
 		// See ReplaySeek.cpp. The traces below are hooked into the randomiser and into every mission
@@ -2019,9 +2131,6 @@ namespace ReplaySystem
 			if (!DiagnosticsWanted())
 				return;
 
-			if (ScenarioClass::Instance && randomiser == &ScenarioClass::Instance->Random)
-				++DrawsThisFrame;
-
 			// Only the scenario's own randomiser drives the simulation. The map generator and the shell
 			// menus have their own, and draws from those mean nothing here.
 			if (!ReplayState.Playback || !ScenarioClass::Instance
@@ -2037,6 +2146,11 @@ namespace ReplaySystem
 			// simulation and comparing them against the first pass only ever reports the load itself.
 			if (Seek::IsLoadInProgress())
 				return;
+
+			// Counted here rather than above the load check, which is what made the update trace say
+			// an object drew 580 numbers where it had drawn 2: the load's own construction draws were
+			// landing in the count of whichever object update happened to be open when the seek fired.
+			++DrawsThisFrame;
 
 			const int frame = static_cast<int>(Unsorted::CurrentFrame);
 			if (frame != TracedRandomFrame)
@@ -2103,6 +2217,11 @@ namespace ReplaySystem
 			uint32_t Object;
 			int32_t Mission;
 			uint32_t Caller;
+			// The code above a thin virtual override, which is the part worth reading. Every aircraft
+			// assignment in the game reports AircraftClass::Assign_Mission as its caller and always
+			// will, so the caller alone said an aircraft was assigned something and nothing about who
+			// decided it.
+			uint32_t Originator;
 		};
 
 		std::unordered_map<int, std::vector<MissionAssignment>> MissionsByFrame;
@@ -2133,12 +2252,38 @@ namespace ReplaySystem
 				return;
 
 			TracedMissionMismatchReported = true;
+			char beforeOrigin[MAX_PATH + 32] = { 0 };
+			char nowOrigin[MAX_PATH + 32] = { 0 };
+
 			Debug::Log("[Replay] Frame %d assigned missions differently the second time round: %s at "
-				"assignment %u. First pass: object %u given mission %d by %08X. After the keyframe "
-				"load: object %u given mission %d by %08X.\n",
+				"assignment %u. First pass: object %u given mission %d by %s. After the keyframe "
+				"load: object %u given mission %d by %s.\n",
 				frame, what, static_cast<unsigned int>(index + 1),
-				before.Object, before.Mission, before.Caller,
-				now.Object, now.Mission, now.Caller);
+				before.Object, before.Mission,
+				DescribeCodeAddress(before.Originator, beforeOrigin, sizeof(beforeOrigin)),
+				now.Object, now.Mission,
+				DescribeCodeAddress(now.Originator, nowOrigin, sizeof(nowOrigin)));
+
+			// A few entries either side, because the first difference on its own cannot tell two very
+			// different things apart. An assignment that simply did not happen leaves the rest of the
+			// first pass's list intact one place further along - so the entry that now reads first
+			// will be sitting at position two in the list below. A genuine reorder shows the same
+			// entries in a different order. They need looking at in completely different places.
+			if (TracedMissionReference)
+			{
+				Debug::Log("[Replay]   the first pass made %u assignments on this frame; from this one "
+					"they were:\n", static_cast<unsigned int>(TracedMissionReference->size()));
+
+				const size_t to = std::min(TracedMissionReference->size(), index + 5);
+				for (size_t at = index; at < to; ++at)
+				{
+					const MissionAssignment& entry = (*TracedMissionReference)[at];
+					char origin[MAX_PATH + 32] = { 0 };
+					Debug::Log("[Replay]     %u: object %u given mission %d by %s.\n",
+						static_cast<unsigned int>(at + 1), entry.Object, entry.Mission,
+						DescribeCodeAddress(entry.Originator, origin, sizeof(origin)));
+				}
+			}
 		}
 
 		void BeginMissionTraceFrame(int frame)
@@ -2147,7 +2292,7 @@ namespace ReplaySystem
 			{
 				ReportMissionMismatch("it stopped assigning early", TracedMissionFrame,
 					TracedMissionCompareIndex, (*TracedMissionReference)[TracedMissionCompareIndex],
-					MissionAssignment { 0u, 0, 0u });
+					MissionAssignment { 0u, 0, 0u, 0u });
 			}
 
 			TracedMissionFrame = frame;
@@ -2167,7 +2312,8 @@ namespace ReplaySystem
 				TracedMissionTarget = &MissionsByFrame[frame];
 		}
 
-		void TraceMissionAssignment(const void* object, int mission, const void* caller)
+		void TraceMissionAssignment(const void* object, int mission, const void* caller,
+			const void* originator)
 		{
 			if (!DiagnosticsWanted() || !ReplayState.Playback || Seek::IsLoadInProgress())
 				return;
@@ -2179,7 +2325,8 @@ namespace ReplaySystem
 			const MissionAssignment entry {
 				UniqueIDOfAbstract(static_cast<const AbstractClass*>(object)),
 				static_cast<int32_t>(mission),
-				reinterpret_cast<uint32_t>(caller)
+				reinterpret_cast<uint32_t>(caller),
+				reinterpret_cast<uint32_t>(originator)
 			};
 
 			if (TracedMissionReference)
@@ -2187,7 +2334,7 @@ namespace ReplaySystem
 				if (TracedMissionCompareIndex >= TracedMissionReference->size())
 				{
 					ReportMissionMismatch("it assigned more than before", frame, TracedMissionCompareIndex,
-						MissionAssignment { 0u, 0, 0u }, entry);
+						MissionAssignment { 0u, 0, 0u, 0u }, entry);
 				}
 				else
 				{
@@ -2758,40 +2905,154 @@ namespace ReplaySystem
 		// frame opening over it, and a frame that asks when the first pass asked nothing at all now
 		// has an empty list to be measured against instead of quietly recording over it.
 		//
-		// 192MB. Generous next to what any one store needs and small enough to leave the game the
-		// address space it wants: gamemd with a large map, Ares and Phobos loaded, and the keyframe
-		// savegames on top of it, all inside 2GB.
-		constexpr size_t MaxDiagnosticBytes = 192u * 1024u * 1024u;
+		// The budget used to buy a prefix of the replay: every store recorded until the whole 192MB
+		// was gone and then stopped, and what it had kept was the opening frames. That is the wrong
+		// end. A seek is always somewhere later - the divergence at frame 32250 was diagnosed with
+		// traces that had stopped recording at frame 1500, so every trace was silent about the frame
+		// that mattered and the log could only say that the two runs differed, not where.
+		//
+		// It now buys a window on the recent past instead. When a frame does not fit, the oldest
+		// frame recorded is given back to make room, so what is held is always the frames leading up
+		// to wherever playback has got to - which is exactly the span a backwards seek replays.
+		//
+		// The traces here and the watches in ReplaySeek.cpp hold separate shares of the same total
+		// rather than one pool. A frame of watch samples costs a hundred times a frame of traces, so
+		// sharing meant the watches set the window for everything and the traces - which are the ones
+		// that name a call site - were held to the watches' few hundred frames for no reason.
+		//
+		// 64MB here, 128MB there. The total is what it was: gamemd with a large map, Ares and Phobos
+		// loaded, and the keyframe savegames on top of it, all inside 2GB.
+		constexpr size_t MaxDiagnosticBytes = 64u * 1024u * 1024u;
+
+		// The frame being recorded and the one before it are never given back. Each BeginXTraceFrame
+		// closes the previous frame out through a pointer into that frame's list, so it is still
+		// being read at the moment the new frame is charged for.
+		constexpr int TraceFramesAlwaysHeld = 2;
+
 		size_t DiagnosticBytesUsed = 0;
+		// What each frame has been charged, in frame order, so the oldest is the one at the front.
+		std::map<int, size_t> DiagnosticBytesByFrame;
 		bool DiagnosticBudgetReported = false;
+
+		// Forgetting a frame has to walk every store that keeps one, and put back what the store's
+		// running total says it held: those totals gate whether new frames are opened at all, so a
+		// store that dropped a frame without crediting it back would seize up a few thousand frames
+		// later for no visible reason.
+		template <typename TStore>
+		void ForgetTracedFrame(TStore& store, int frame, size_t& entryCount)
+		{
+			const auto it = store.find(frame);
+			if (it == store.end())
+				return;
+
+			entryCount -= std::min(entryCount, it->second.size());
+			store.erase(it);
+		}
+
+		void ForgetTracedFrameAt(std::map<int, size_t>::iterator it)
+		{
+			const int frame = it->first;
+
+			ForgetTracedFrame(RandomDrawsByFrame, frame, TracedRandomDrawCount);
+			ForgetTracedFrame(MissionsByFrame, frame, TracedMissionCount);
+			ForgetTracedFrame(PathRequestsByFrame, frame, TracedPathRequestCount);
+			ForgetTracedFrame(LandingZonesByFrame, frame, TracedLandingZoneCount);
+			ForgetTracedFrame(UpdateOrderByFrame, frame, TracedUpdateCount);
+
+			DiagnosticBytesUsed -= std::min(DiagnosticBytesUsed, it->second);
+			DiagnosticBytesByFrame.erase(it);
+		}
+
+		// The frame furthest from where playback is now, which is not always the oldest. A seek
+		// backwards leaves the store full of frames ahead of the current one, and a rule that only
+		// ever dropped the oldest could not touch any of them: the first backwards seek filled the
+		// budget with frames it was forbidden to reclaim and the traces stopped recording, which is
+		// what "a single frame does not fit in the 64 MB" meant in the log.
+		//
+		// Frames behind playback go first, because playback will not reach them again without
+		// another seek. Only when there are none left does a frame ahead go, the furthest ahead
+		// first. The current frame and the one before it are never reclaimed either way: each
+		// BeginXTraceFrame closes the previous frame out through a pointer into that frame's list.
+		bool ForgetOneTracedFrame(int frame)
+		{
+			if (DiagnosticBytesByFrame.empty())
+				return false;
+
+			const auto oldest = DiagnosticBytesByFrame.begin();
+			if (oldest->first < frame - (TraceFramesAlwaysHeld - 1))
+			{
+				ForgetTracedFrameAt(oldest);
+				return true;
+			}
+
+			const auto newest = std::prev(DiagnosticBytesByFrame.end());
+			if (newest->first > frame)
+			{
+				ForgetTracedFrameAt(newest);
+				return true;
+			}
+
+			return false;
+		}
 
 		// Charged before a store grows, never after, so the allocation that would have gone over is
 		// the one that does not happen.
 		bool ChargeDiagnosticMemory(size_t bytes)
 		{
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+
+			while (DiagnosticBytesUsed + bytes > MaxDiagnosticBytes && ForgetOneTracedFrame(frame))
+				;
+
 			if (DiagnosticBytesUsed + bytes > MaxDiagnosticBytes)
 			{
+				// Only reachable if one frame on its own does not fit, which no trace can manage.
 				if (!DiagnosticBudgetReported)
 				{
 					DiagnosticBudgetReported = true;
-					Debug::Log("[Replay] The diagnostics have used the whole %u MB they are allowed, on "
-						"frame %d. They will stop recording new frames from here; frames already recorded "
-						"are still compared, and playback itself is unaffected.\n",
-						static_cast<unsigned int>(MaxDiagnosticBytes / (1024u * 1024u)),
-						static_cast<int>(Unsorted::CurrentFrame));
+					Debug::Log("[Replay] A single frame does not fit in the %u MB the traces are allowed, "
+						"on frame %d. They will record nothing more; frames already recorded are still "
+						"compared, and playback itself is unaffected.\n",
+						static_cast<unsigned int>(MaxDiagnosticBytes / (1024u * 1024u)), frame);
 				}
 
 				return false;
 			}
 
 			DiagnosticBytesUsed += bytes;
+			DiagnosticBytesByFrame[frame] += bytes;
 			return true;
 		}
 
 		void ResetDiagnosticMemory()
 		{
 			DiagnosticBytesUsed = 0;
+			DiagnosticBytesByFrame.clear();
 			DiagnosticBudgetReported = false;
+		}
+
+		// How far back the traces reach right now, so a report that says nothing can be told from one
+		// that had nothing to say about.
+		int OldestTracedFrame()
+		{
+			return DiagnosticBytesByFrame.empty() ? -1 : DiagnosticBytesByFrame.begin()->first;
+		}
+
+		// Each trace reports its first difference and then goes quiet, because after one the two runs
+		// are different games and every later report is a consequence. That was right per seek and
+		// wrong per replay, which is how it was written: the mission trace fired on a seek to keyframe
+		// 35250 and was still silent eight hundred frames later when a seek to 36000 put a V3 rocket's
+		// mission assignment a frame out. The randomiser and update traces named that one; the trace
+		// that would have named who assigned it had already been spent.
+		//
+		// The watches have had this per load since RestartDriftReporting. These now match.
+		void RestartTraceReporting()
+		{
+			TracedRandomMismatchReported = false;
+			TracedMissionMismatchReported = false;
+			TracedPathMismatchReported = false;
+			TracedLandingZoneMismatchReported = false;
+			TracedUpdateMismatchReported = false;
 		}
 
 		// This runs at the top of the frame, before anything in it has run.
@@ -2802,6 +3063,12 @@ namespace ReplaySystem
 
 			const int frame = static_cast<int>(Unsorted::CurrentFrame);
 
+			// The draw trace opens its frame lazily, off the first draw, which was fine while a frame
+			// was never forgotten: the frame it holds a pointer into could not go away underneath it.
+			// Now that the oldest frames are given back it has to be opened here with the rest, so the
+			// pointer is always into a frame the budget knows is current and will not reclaim.
+			if (frame != TracedRandomFrame)
+				BeginRandomDrawTraceFrame(frame);
 			if (frame != TracedMissionFrame)
 				BeginMissionTraceFrame(frame);
 			if (frame != TracedPathFrame)
@@ -2821,7 +3088,8 @@ namespace ReplaySystem
 				return;
 
 			Debug::Log("[Replay] Traces recorded %u randomiser draws, %u mission assignments, %u "
-				"pathfinder requests and %u landing zone searches over %u, %u, %u and %u frames.\n",
+				"pathfinder requests and %u landing zone searches over %u, %u, %u and %u frames, "
+				"reaching back to frame %d.\n",
 				static_cast<unsigned int>(TracedRandomDrawCount),
 				static_cast<unsigned int>(TracedMissionCount),
 				static_cast<unsigned int>(TracedPathRequestCount),
@@ -2829,7 +3097,8 @@ namespace ReplaySystem
 				static_cast<unsigned int>(RandomDrawsByFrame.size()),
 				static_cast<unsigned int>(MissionsByFrame.size()),
 				static_cast<unsigned int>(PathRequestsByFrame.size()),
-				static_cast<unsigned int>(LandingZonesByFrame.size()));
+				static_cast<unsigned int>(LandingZonesByFrame.size()),
+				OldestTracedFrame());
 		}
 
 		void CaptureGameCRCForCurrentFrame()

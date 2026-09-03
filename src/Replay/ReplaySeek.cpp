@@ -51,6 +51,7 @@
 #include <HoverLocomotionClass.h>
 #include <HouseClass.h>
 #include <InfantryClass.h>
+#include <Kamikaze.h>
 #include <RocketLocomotionClass.h>
 #include <LoadOptionsClass.h>
 #include <MapClass.h>
@@ -79,6 +80,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -134,6 +136,15 @@ namespace ReplaySystem
 				int32_t MissionTimerLeft;
 				int32_t MissionStatus;
 				int32_t MissionAccumulate;
+				// The mission an object has been told to take up next, and the one it will go back to.
+				// MissionClass::NextMission pops the queued one and calls Assign_Mission, which resets
+				// the status to zero and stamps the current frame into MissionStartTime - so a queued
+				// mission that arrives one frame late puts the object a whole step behind for the rest
+				// of its life. That is exactly what a V3 rocket did at keyframe 36000, and neither
+				// field was being looked at: the load-time comparison was clean and the frame after it
+				// was not.
+				int32_t QueuedMission;
+				int32_t SuspendedMission;
 				// The queued movement destinations behind the first one - what a player builds up by
 				// shift-clicking a route. FootClass::Mission_Guard_Area reads the count and the head of
 				// this queue and can hand the object a new destination off the back of it, on a path that
@@ -227,6 +238,47 @@ namespace ReplaySystem
 
 			bool CapturePlanningState(PlanningSnapshot& snapshot);
 			bool RestorePlanningState(const PlanningSnapshot& snapshot, int keyframeFrame);
+
+			// Kamikaze::Save (0x54E750) writes the node count and then the eight bytes of each node,
+			// and stops. UpdateTimer is not in the save format at all - there is no version of a YR
+			// savegame that carries it - so a load leaves the tracker holding whatever phase the
+			// world it was loaded over happened to be in.
+			//
+			// Kamikaze::Update (0x54E4D0) is gated on that timer, re-arms it for thirty frames when
+			// it fires, and gives every tracked aircraft MISSION_ATTACK. A V3 rocket is a missile
+			// spawn and is tracked, so the whole batch takes its attack mission on one frame in
+			// thirty - and after a seek that frame is a different one. Five rockets were assigned a
+			// frame late at keyframe 36000, and one of them then ran a mission step behind for the
+			// rest of its life.
+			//
+			// The nodes themselves are in the save and come back swizzled. They are kept here as
+			// unique IDs anyway, to check rather than to restore: Kamikaze::Load appends to the
+			// vector without clearing it first, which is only safe if something else empties it, and
+			// a silent duplicate would look exactly like this bug.
+			struct KamikazeSnapshot
+			{
+				int32_t TimerStart = -1;
+				int32_t TimerLeft = 0;
+				std::vector<uint32_t> Aircraft;
+				bool operator==(const KamikazeSnapshot&) const = default;
+			};
+
+			void CaptureKamikazeState(KamikazeSnapshot& snapshot);
+			void RestoreKamikazeState(const KamikazeSnapshot& snapshot, int keyframeFrame);
+
+			struct KeyframeObjectName
+			{
+				uint32_t Id = 0;
+				int32_t Type = 0;
+				std::array<char, 24> TypeId {};
+			};
+
+			// The watches' share of the diagnostic budget. Defined below the stores it reclaims
+			// from; declared here because the stores charge against it before that point. See the
+			// budget itself for why the watches no longer share one pool with the traces.
+			bool ChargeWatchMemory(size_t bytes);
+			bool ChargeCellBaselineMemory(size_t bytes);
+			void ResetWatchMemory();
 
 			// Ares 3.0p1 replaces several particle-system behaviours and keeps their live
 			// particles in extension-owned std::vectors. Those vectors are gameplay state:
@@ -535,6 +587,12 @@ namespace ReplaySystem
 				std::vector<LevelAndPassabilityStruct2> CellSubzones;
 				SubzoneGraphSnapshot SubzoneGraph;
 				std::vector<LocomotorResetSnapshot> LocomotorResetStates;
+				KamikazeSnapshot Kamikaze;
+				// What each object in AbstractClass::Array was, beside the order itself. When the load
+				// brings back fewer objects than the keyframe held - which is a whole class of bug on
+				// its own, not an ordering problem - the ones that are gone cannot be asked what they
+				// were, because they are gone. So they are written down while they are still here.
+				std::vector<KeyframeObjectName> AbstractObjects;
 				// Every object array the engine iterates, in the order it held them. None of these is hashed
 				// by Compute_Game_CRC, which is why a shuffle stays invisible: the frame still hashes the
 				// same and the objects still do all the same things. What changes is who gets asked first,
@@ -1158,33 +1216,42 @@ namespace ReplaySystem
 					outOrder.push_back(UniqueIDOf(collection.Items[i]));
 			}
 
-			// Rebuild a collection's pointer order without adding or removing anything. Matching by
-			// UniqueID is stable across a save/load because each object's raw Load restores that ID.
+			// Rebuild a collection's pointer order, as far as the two sides have objects in common.
+			// Matching by UniqueID is stable across a save/load because each object's raw Load restores
+			// that ID.
+			//
+			// It used to give up entirely the moment the counts disagreed, which turned a small loss into
+			// a large one. OverlayClass is not in the savegame object graph at all - there is no class
+			// factory for it - so every crate on the map loses its wrapper object across any YR load, and
+			// two crates were enough to make the whole of AbstractClass::Array come back in the load's own
+			// order rather than the recording's. The crates themselves are fine: the cell keeps the overlay
+			// bytes that Goodie_Check actually reads. The ordering was not.
+			//
+			// So the order is put back for everything that survived, in the sequence the keyframe held it,
+			// and anything the load produced that the keyframe never had is left after them in the order it
+			// arrived. A difference either way is still reported and still returns false, because it is
+			// still worth knowing about - it just no longer costs the ordering as well.
 			template <typename TCollection>
 			bool RestoreObjectOrder(TCollection& collection, const std::vector<uint32_t>& savedOrder,
 				const char* collectionName, bool& changed)
 			{
 				changed = false;
-				if (collection.Count != static_cast<int>(savedOrder.size()))
-				{
-					Debug::Log("[Replay] Keyframe collection %s has %d objects after loading; expected %d.\n",
-						collectionName, collection.Count, static_cast<int>(savedOrder.size()));
-					return false;
-				}
 
 				using Pointer = std::remove_reference_t<decltype(collection.Items[0])>;
-				std::vector<Pointer> reordered(savedOrder.size(), nullptr);
-				std::vector<bool> used(savedOrder.size(), false);
+				std::vector<Pointer> reordered;
+				reordered.reserve(static_cast<size_t>(std::max(collection.Count, 0)));
+				std::vector<bool> used(static_cast<size_t>(std::max(collection.Count, 0)), false);
 
-				for (size_t savedIndex = 0; savedIndex < savedOrder.size(); ++savedIndex)
+				int missing = 0;
+				for (const uint32_t wanted : savedOrder)
 				{
 					bool found = false;
 					for (int currentIndex = 0; currentIndex < collection.Count; ++currentIndex)
 					{
 						const size_t index = static_cast<size_t>(currentIndex);
-						if (!used[index] && UniqueIDOf(collection.Items[currentIndex]) == savedOrder[savedIndex])
+						if (!used[index] && UniqueIDOf(collection.Items[currentIndex]) == wanted)
 						{
-							reordered[savedIndex] = collection.Items[currentIndex];
+							reordered.push_back(collection.Items[currentIndex]);
 							used[index] = true;
 							found = true;
 							break;
@@ -1192,11 +1259,17 @@ namespace ReplaySystem
 					}
 
 					if (!found)
-					{
-						Debug::Log("[Replay] Keyframe collection %s is missing object unique ID %u.\n",
-							collectionName, savedOrder[savedIndex]);
-						return false;
-					}
+						++missing;
+				}
+
+				int extra = 0;
+				for (int i = 0; i < collection.Count; ++i)
+				{
+					if (used[static_cast<size_t>(i)])
+						continue;
+
+					++extra;
+					reordered.push_back(collection.Items[i]);
 				}
 
 				for (int i = 0; i < collection.Count; ++i)
@@ -1207,7 +1280,48 @@ namespace ReplaySystem
 					collection.Items[i] = reordered[static_cast<size_t>(i)];
 				}
 
-				return true;
+				if (missing == 0 && extra == 0)
+					return true;
+
+				// Printed signed. An object whose identity a load threw away reads -1, and -1 through %u
+				// is 4294967295 - a number that looks like a plausible id and is not one, which is exactly
+				// how the SuperClass report read until it was chased down.
+				Debug::Log("[Replay] Keyframe collection %s came back from the load holding %d objects where "
+					"the keyframe held %d: %d of the keyframe's are gone and %d are new. The order has been put "
+					"back for the %d they have in common.\n",
+					collectionName, collection.Count, static_cast<int>(savedOrder.size()), missing, extra,
+					static_cast<int>(savedOrder.size()) - missing);
+
+				constexpr int MaxReportedIDs = 8;
+				int reported = 0;
+				for (size_t i = 0; i < savedOrder.size() && reported < MaxReportedIDs; ++i)
+				{
+					bool present = false;
+					for (int j = 0; j < collection.Count && !present; ++j)
+						present = UniqueIDOf(collection.Items[j]) == savedOrder[i];
+
+					if (!present)
+					{
+						Debug::Log("[Replay]   the keyframe expected unique ID %d at position %u, and nothing "
+							"after the load has it.\n",
+							static_cast<int>(savedOrder[i]), static_cast<unsigned int>(i));
+						++reported;
+					}
+				}
+
+				reported = 0;
+				for (int i = 0; i < collection.Count && reported < MaxReportedIDs; ++i)
+				{
+					const uint32_t liveID = UniqueIDOf(collection.Items[i]);
+					if (std::find(savedOrder.begin(), savedOrder.end(), liveID) == savedOrder.end())
+					{
+						Debug::Log("[Replay]   the load left unique ID %d at position %d, which the keyframe "
+							"never held.\n", static_cast<int>(liveID), i);
+						++reported;
+					}
+				}
+
+				return false;
 			}
 
 			// The three watchers below walk every techno, every layer object and every cell on the map,
@@ -1226,9 +1340,38 @@ namespace ReplaySystem
 			// them over so each seek is diagnosed on its own.
 			constexpr int MaxDriftReports = 8;
 
+			// A frame of object samples is a sample of every techno, so the watches can only afford a
+			// few hundred frames at a time. Spending that on the last few hundred frames played was
+			// the obvious thing and the wrong one: a seek lands on a keyframe, keyframes are hundreds
+			// or thousands of frames back, and the window had always forgotten the one it landed on.
+			// One log had the watches holding frames 27617 onwards while the seek loaded keyframe
+			// 27000, so every watch was blind to the load and the first frame it could see was
+			// reported as the first frame anything went wrong.
+			//
+			// A load's damage shows immediately - the census caught keyframe 32250 on the load frame
+			// itself - so what is worth keeping is a short block after each keyframe rather than a
+			// long run of whatever came last. Recording only inside those blocks makes each one cheap
+			// enough that the budget holds several keyframes' worth, and any backwards seek lands on
+			// one of them.
+			constexpr int WatchFramesAfterKeyframe = 100;
+
+			bool FrameIsWorthWatching(int frame)
+			{
+				if (State.Interval <= 0)
+					return true;
+
+				if (frame - FirstKeyframeFrame >= 0 && frame - FirstKeyframeFrame < WatchFramesAfterKeyframe)
+					return true;
+
+				return frame % State.Interval < WatchFramesAfterKeyframe;
+			}
+
 			// An object is worth reporting once per load, not once per frame for as long as it stays
 			// different.
 			std::unordered_set<uint32_t> ReportedDriftObjects;
+
+			// The keyframe the last load came from, so a watch can say whether it was there for it.
+			int LastLoadedKeyframeFrame = -1;
 
 			#pragma region Per-frame layer watch
 
@@ -1339,7 +1482,7 @@ namespace ReplaySystem
 				if (!DiagnosticsWanted())
 					return;
 
-				if (WatchedLayerDriftReports >= MaxDriftReports || !ScenarioClass::Instance)
+				if (!ScenarioClass::Instance)
 					return;
 
 				const int frame = static_cast<int>(Unsorted::CurrentFrame);
@@ -1350,18 +1493,18 @@ namespace ReplaySystem
 					std::vector<LayerSample> now;
 					SampleLayerObjects(now);
 
-					if (now != it->second)
+					if (now != it->second && WatchedLayerDriftReports < MaxDriftReports)
 						ReportLayerDrift(frame, it->second, now);
 
 					return;
 				}
 
-				if (WatchedLayerSampleCount >= MaxWatchedLayerSamples)
+				if (WatchedLayerSampleCount >= MaxWatchedLayerSamples || !FrameIsWorthWatching(frame))
 					return;
 
 				std::vector<LayerSample> sample;
 				SampleLayerObjects(sample);
-				if (!ChargeDiagnosticMemory(sample.size() * sizeof(LayerSample)
+				if (!ChargeWatchMemory(sample.size() * sizeof(LayerSample)
 					+ sizeof(std::vector<LayerSample>)))
 				{
 					return;
@@ -1446,6 +1589,8 @@ namespace ReplaySystem
 
 			std::vector<CellSnapshot> CellScratch;
 			std::vector<uint32_t> LiveCellHashes;
+			// Set by a keyframe load: the hashes below it are from the world the seek left.
+			bool CellDeltaBaselineStale = false;
 			std::unordered_map<int, std::vector<CellChange>> CellChangesByFrame;
 			std::unordered_map<int, std::vector<CellSnapshot>> CellBaselines;
 			size_t WatchedCellChangeCount = 0;
@@ -1620,14 +1765,33 @@ namespace ReplaySystem
 				if (!DiagnosticsWanted())
 					return;
 
-				if (WatchedCellDriftReports >= MaxDriftReports || !ScenarioClass::Instance
-					|| !MapClass::Instance.Cells.Items)
+				if (!ScenarioClass::Instance || !MapClass::Instance.Cells.Items)
 					return;
 
 				const int frame = static_cast<int>(Unsorted::CurrentFrame);
 
 				std::vector<uint32_t> now;
 				HashAllCells(now);
+
+				// The frame a load lands on has nothing to measure a per-frame change against: the
+				// hashes it would compare with are the ones the seek left behind. Take the baseline and
+				// leave the frame alone; the whole-table comparison below still runs, and that is the
+				// one that can say what the load itself did to a cell.
+				if (CellDeltaBaselineStale)
+				{
+					CellDeltaBaselineStale = false;
+
+					if (const auto baselineOnly = CellBaselines.find(frame);
+						baselineOnly != CellBaselines.end())
+					{
+						SampleAllCells();
+						if (baselineOnly->second.size() == CellScratch.size())
+							ReportLoadCellDrift(frame, baselineOnly->second);
+					}
+
+					LiveCellHashes = std::move(now);
+					return;
+				}
 
 				std::vector<CellChange> delta;
 				if (LiveCellHashes.size() == now.size())
@@ -1654,7 +1818,7 @@ namespace ReplaySystem
 				}
 				else if (changes != CellChangesByFrame.end())
 				{
-					if (changes->second != delta)
+					if (changes->second != delta && WatchedCellDriftReports < MaxDriftReports)
 					{
 						// The first cell the two passes disagree about changing, or changed differently.
 						++WatchedCellDriftReports;
@@ -1689,23 +1853,25 @@ namespace ReplaySystem
 						}
 					}
 				}
-				else if (WatchedCellChangeCount < MaxWatchedCellChanges)
+				else if (WatchedCellChangeCount < MaxWatchedCellChanges && FrameIsWorthWatching(frame))
 				{
 					// A whole cell table is 0x40000 snapshots of a hundred bytes - 25MB - kept for the
 					// life of the replay, once per keyframe. Twenty-seven keyframes of that is 675MB in a
 					// 32-bit process, and it was charged against nothing: it is what ran the game out of
-					// address space. It is worth having for the first several keyframes, because it is the
-					// only thing that can say what a cell held before a load as well as after, so it is
-					// paid for out of the budget rather than dropped.
+					// address space. It is the only thing that can say what a cell held before a load as
+					// well as after, so it is paid for rather than dropped - out of its own small budget,
+					// which keeps the newest baselines and forgets the oldest. Sharing the watches' pool
+					// kept the first few keyframes instead, and the keyframe a seek lands on is always
+					// one of the last.
 					if (State.Interval > 0 && frame % State.Interval == 0
-						&& ChargeDiagnosticMemory(
+						&& ChargeCellBaselineMemory(
 							static_cast<size_t>(std::max(WatchedCellCount(), 0)) * sizeof(CellSnapshot)))
 					{
 						SampleAllCells();
 						CellBaselines[frame] = CellScratch;
 					}
 
-					if (ChargeDiagnosticMemory(delta.size() * sizeof(CellChange)
+					if (ChargeWatchMemory(delta.size() * sizeof(CellChange)
 						+ sizeof(std::vector<CellChange>)))
 					{
 						WatchedCellChangeCount += delta.size();
@@ -2059,19 +2225,64 @@ namespace ReplaySystem
 			// Powered and Dirty at 0x10 and 0x11 are real state and are kept.
 			constexpr int LocomotorStateStart = 0x18;
 
+			// A value that is almost certainly an address rather than anything the simulation reads.
+			// Nothing in a locomotor or a bullet holds a number this large otherwise: coordinates are
+			// leptons, timers are frames, facings are sixteen bits. The bound starts at the module
+			// base, below which nothing is mapped.
+			bool LooksLikeAnAddress(uint32_t value)
+			{
+				return value >= 0x00400000u && value < 0x80000000u;
+			}
+
+			// Which locomotors hold what varies by type and YRpp does not describe every one of them,
+			// so the pointer members cannot be listed the way a bullet's can. They can be recognised
+			// instead: a load moves every allocation, so a field that reads as an address in both
+			// passes and differs is a pointer, not state.
+			//
+			// This is not fastidiousness. Every drive locomotor carries a Piggybackee at the end and
+			// the padding before it picks up whatever the allocator last left there, so every unit on
+			// the map came back "drifted" after every load - and the watch reports eight times per
+			// load and then stops. The eight went on chrono miners with a different Piggybackee every
+			// time, and the object whose state had actually changed was never reached.
+			bool LocomotorDifferenceIsAnAddress(const WatchSample& a, const WatchSample& c, int at)
+			{
+				const int dword = at & ~3;
+				if (dword < LocomotorStateStart || dword + 4 > static_cast<int>(a.LocomotorBytes.size()))
+					return false;
+
+				uint32_t before = 0;
+				uint32_t now = 0;
+				std::memcpy(&before, a.LocomotorBytes.data() + dword, sizeof(before));
+				std::memcpy(&now, c.LocomotorBytes.data() + dword, sizeof(now));
+
+				return LooksLikeAnAddress(before) && LooksLikeAnAddress(now);
+			}
+
 			bool SameLocomotorState(const WatchSample& a, const WatchSample& c)
 			{
 				if (a.LocomotorSize <= 0)
 					return true;
 
-				if (a.LocomotorBytes[0x10] != c.LocomotorBytes[0x10]
-					|| a.LocomotorBytes[0x11] != c.LocomotorBytes[0x11])
+				// Powered is real state. Dirty at 0x11 is not: it is the IPersistStream flag that says
+				// the object has changed since it was last written, so a locomotor that has been
+				// through a save has it set and one that has only been played does not. It differed on
+				// almost every object of every load and never meant anything.
+				if (a.LocomotorBytes[0x10] != c.LocomotorBytes[0x10])
 					return false;
 
 				const int kept = std::min(a.LocomotorSize,
 					static_cast<int>(a.LocomotorBytes.size()));
-				return std::equal(a.LocomotorBytes.begin() + LocomotorStateStart,
-					a.LocomotorBytes.begin() + kept, c.LocomotorBytes.begin() + LocomotorStateStart);
+
+				for (int at = LocomotorStateStart; at < kept; ++at)
+				{
+					if (a.LocomotorBytes[at] == c.LocomotorBytes[at])
+						continue;
+
+					if (!LocomotorDifferenceIsAnAddress(a, c, at))
+						return false;
+				}
+
+				return true;
 			}
 
 			bool SameWatchSample(const WatchSample& a, const WatchSample& c)
@@ -2181,8 +2392,16 @@ namespace ReplaySystem
 						continue;
 
 					++WatchedObjectDriftReports;
-					Debug::Log("[Replay] Frame %d: object %u drifted - the first frame anything did, so this "
-						"is where the load went wrong rather than where it showed.\n", frame, is.Id);
+					// Only the first frame the watch could look at, which is the first frame anything
+					// drifted on only if the watch was there for the load. It says which so a report
+					// three hundred frames after a keyframe is not read as the load's own doing.
+					Debug::Log("[Replay] Frame %d: object %u drifted - the first frame anything did out of "
+						"the frames the watch holds%s.\n", frame, is.Id,
+						WatchedObjectsByFrame.count(LastLoadedKeyframeFrame) != 0
+							? ", the keyframe's own frame among them, so this is where the load went wrong "
+							  "rather than where it showed"
+							: " (the keyframe's own frame is not among them, so the load itself was not "
+							  "watched)");
 					Debug::Log("[Replay]   object is %s owned by house %d; first pass was %s owned by "
 						"house %d.\n", is.TypeId.data(), is.OwnerIndex, was.TypeId.data(), was.OwnerIndex);
 
@@ -2335,8 +2554,12 @@ namespace ReplaySystem
 								continue;
 
 							++named;
-							Debug::Log("[Replay]     locomotor byte 0x%02X is %02X, was %02X.\n", at,
-								is.LocomotorBytes[at], was.LocomotorBytes[at]);
+							// Still printed when something else has reported the object, marked for
+							// what they are, the way the unreachable path entries are.
+							Debug::Log("[Replay]     locomotor byte 0x%02X is %02X, was %02X%s.\n", at,
+								is.LocomotorBytes[at], was.LocomotorBytes[at],
+								LocomotorDifferenceIsAnAddress(was, is, at)
+									? " (an address, not state)" : "");
 						}
 					}
 					if (was.LocomotorResetKind != is.LocomotorResetKind
@@ -2388,7 +2611,7 @@ namespace ReplaySystem
 				if (!DiagnosticsWanted())
 					return;
 
-				if (WatchedObjectDriftReports >= MaxDriftReports || !ScenarioClass::Instance)
+				if (!ScenarioClass::Instance)
 					return;
 
 				const int frame = static_cast<int>(Unsorted::CurrentFrame);
@@ -2402,18 +2625,18 @@ namespace ReplaySystem
 					const bool same = now.size() == it->second.size()
 						&& std::equal(now.begin(), now.end(), it->second.begin(), SameWatchSample);
 
-					if (!same)
+					if (!same && WatchedObjectDriftReports < MaxDriftReports)
 						ReportObjectDrift(frame, it->second, now);
 
 					return;
 				}
 
-				if (WatchedObjectSampleCount >= MaxWatchedObjectSamples)
+				if (WatchedObjectSampleCount >= MaxWatchedObjectSamples || !FrameIsWorthWatching(frame))
 					return;
 
 				std::vector<WatchSample> sample;
 				SampleObjectWatch(sample);
-				if (!ChargeDiagnosticMemory(sample.size() * sizeof(WatchSample)
+				if (!ChargeWatchMemory(sample.size() * sizeof(WatchSample)
 					+ sizeof(std::vector<WatchSample>)))
 				{
 					return;
@@ -2425,12 +2648,693 @@ namespace ReplaySystem
 
 			#pragma endregion Per-frame object watch
 
+			#pragma region Per-frame bullet watch
+
+			// The object watch walks TechnoClass::Array, so a bullet has never been in it, and the
+			// layer watch only ever sees a bullet's id, type and coordinates. That was the blind spot
+			// this was written for: loading keyframe 32250 made a SparkSys, a SmallGreySSys and a
+			// PIFFPIFF on its first frame that the recording never made - a bullet going off - and
+			// nothing in the diagnostics could say which bullet, or what about it had changed. The
+			// keyframes that restored cleanly had no bullets in the air; the ones that did not had
+			// eight and ten.
+			//
+			// A bullet is a small object and there are rarely more than a handful in flight, so the
+			// whole thing is kept rather than a chosen set of fields - including everything YRpp still
+			// calls unknown_, which is exactly where an undiagnosed difference is likely to be. The
+			// pointers are the one part that cannot be compared: they move with the allocation and
+			// would report every bullet as different after any load. They are skipped as bytes and
+			// carried as the unique ID of whatever they point at, which is the part that has to
+			// survive a load.
+			constexpr size_t MaxWatchedBulletBytes = 0x200;
+			constexpr size_t MaxWatchedBulletSamples = 200000;
+
+			struct BulletSample
+			{
+				uint32_t Id;
+				uint32_t OwnerId;
+				uint32_t TargetId;
+				uint32_t NextAnimId;
+				uint32_t NextObjectId;
+				std::array<char, 32> TypeId {};
+				int32_t Size;
+				std::array<unsigned char, MaxWatchedBulletBytes> Bytes {};
+			};
+
+			// Every field of a bullet that holds an address. Named by offsetof rather than by number
+			// so a YRpp layout change moves them rather than silently pointing them somewhere else.
+			struct ByteRange
+			{
+				size_t Offset;
+				size_t Length;
+			};
+
+			const ByteRange BulletPointerBytes[] =
+			{
+				// The four vtables, and the COM reference count LocomotionClass::Load also has to save
+				// and restore around its own read.
+				{ 0, offsetof(AbstractClass, UniqueID) },
+				{ offsetof(AbstractClass, RefCount), sizeof(LONG) },
+				// The notice list head. AbstractClass::AbstractClass nulls it, so an object the game
+				// built has none, but AbstractClass::Load reads Size_Of() bytes and BulletClass::Load
+				// runs only the no-init constructor over the result - so a bullet out of a savegame
+				// carries the address the saving process had. It differed on every bullet of every
+				// load and said nothing about any of them.
+				{ offsetof(AbstractClass, unknown_18), sizeof(DWORD) },
+
+				{ offsetof(ObjectClass, NextObject), sizeof(void*) },
+				{ offsetof(ObjectClass, AttachedTag), sizeof(void*) },
+				{ offsetof(ObjectClass, AttachedBomb), sizeof(void*) },
+				// Both audio controllers own sound handles and pointers into the audio engine, none of
+				// which is simulation state and none of which survives a load.
+				{ offsetof(ObjectClass, AmbientSoundController), sizeof(AudioController) },
+				{ offsetof(ObjectClass, CustomSoundController), sizeof(AudioController) },
+				{ offsetof(ObjectClass, Parachute), sizeof(void*) },
+				{ offsetof(ObjectClass, LineTrailer), sizeof(void*) },
+
+				{ offsetof(BulletClass, Type), sizeof(void*) },
+				{ offsetof(BulletClass, Owner), sizeof(void*) },
+				{ offsetof(BulletClass, Target), sizeof(void*) },
+				{ offsetof(BulletClass, WH), sizeof(void*) },
+				{ offsetof(BulletClass, WeaponType), sizeof(void*) },
+				{ offsetof(BulletClass, NextAnim), sizeof(void*) },
+			};
+
+			// Only bytes that belong to a member the table below names. Keeping the whole object and
+			// skipping the pointers was not enough: a BulletClass is a third alignment padding - three
+			// bytes after every bool, four before the double, the tail of every CDTimerClass - and
+			// none of it is ever written, so each bullet carries whatever the allocator last left
+			// there. A bullet out of a savegame carries the padding the saving process had and a
+			// bullet that was played carries its own, and every one of them read as drifted.
+			//
+			// The table names every real member of AbstractClass, ObjectClass and BulletClass, the
+			// ones YRpp still calls unknown_ included, so nothing that is written is dropped.
+			const char* NameBulletByte(size_t offset);
+
+			bool BulletByteIsComparable(size_t offset)
+			{
+				for (const ByteRange& range : BulletPointerBytes)
+				{
+					if (offset >= range.Offset && offset < range.Offset + range.Length)
+						return false;
+				}
+
+				return NameBulletByte(offset) != nullptr;
+			}
+
+			// So a report says which field moved rather than only where. Anything not named here is
+			// still reported by offset, which YRpp's BulletClass.h reads straight off.
+			struct BulletField
+			{
+				size_t Offset;
+				size_t Length;
+				const char* Name;
+			};
+
+			const BulletField BulletFields[] =
+			{
+				{ offsetof(AbstractClass, UniqueID), 4, "UniqueID" },
+				// One byte, not four. AbstractClass::AbstractClass reads the flags, masks the low
+				// three bits and writes back only cl - the three bytes above it are never touched by
+				// anything that treats them as flags, and they carry the top of a nearby address.
+				{ offsetof(AbstractClass, AbstractFlags), 1, "AbstractFlags" },
+				{ offsetof(AbstractClass, Dirty), 1, "Dirty" },
+				{ offsetof(ObjectClass, unknown_24), 4, "unknown_24" },
+				{ offsetof(ObjectClass, unknown_28), 4, "unknown_28" },
+				{ offsetof(ObjectClass, FallRate), 4, "FallRate" },
+				{ offsetof(ObjectClass, CustomSound), 4, "CustomSound" },
+				{ offsetof(ObjectClass, BombVisible), 1, "BombVisible" },
+				{ offsetof(ObjectClass, Health), 4, "Health" },
+				{ offsetof(ObjectClass, EstimatedHealth), 4, "EstimatedHealth" },
+				{ offsetof(ObjectClass, IsOnMap), 1, "IsOnMap" },
+				{ offsetof(ObjectClass, unknown_78), 4, "unknown_78" },
+				{ offsetof(ObjectClass, unknown_7C), 4, "unknown_7C" },
+				// NeedsRedraw, IsSelected and IsVisible are deliberately absent: they are set by the
+				// draw, and a frame that was played was drawn where a frame reached by loading a
+				// keyframe was not. IsVisible alone reported four bullets a frame for eight frames
+				// and spent the whole report budget on the viewport.
+				{ offsetof(ObjectClass, InLimbo), 1, "InLimbo" },
+				{ offsetof(ObjectClass, InOpenToppedTransport), 1, "InOpenToppedTransport" },
+				{ offsetof(ObjectClass, HasParachute), 1, "HasParachute" },
+				{ offsetof(ObjectClass, OnBridge), 1, "OnBridge" },
+				{ offsetof(ObjectClass, IsFallingDown), 1, "IsFallingDown" },
+				{ offsetof(ObjectClass, WasFallingDown), 1, "WasFallingDown" },
+				{ offsetof(ObjectClass, IsABomb), 1, "IsABomb" },
+				{ offsetof(ObjectClass, IsAlive), 1, "IsAlive" },
+				{ offsetof(ObjectClass, LastLayer), 4, "LastLayer" },
+				{ offsetof(ObjectClass, IsInLogic), 1, "IsInLogic" },
+				{ offsetof(ObjectClass, Location), sizeof(CoordStruct), "Location" },
+
+				// The fuse. Fuse_Checkup fires the bullet when the arming timer has run out and the
+				// distance to HeadTo stops falling, so all four of these decide when it goes off.
+				{ offsetof(BulletClass, Data) + offsetof(BulletData, UnknownTimer)
+					+ offsetof(CDTimerClass, StartTime), 4, "Data.UnknownTimer.StartTime" },
+				{ offsetof(BulletClass, Data) + offsetof(BulletData, UnknownTimer)
+					+ offsetof(CDTimerClass, TimeLeft), 4, "Data.UnknownTimer.TimeLeft" },
+				{ offsetof(BulletClass, Data) + offsetof(BulletData, ArmTimer)
+					+ offsetof(CDTimerClass, StartTime), 4, "Data.ArmTimer.StartTime" },
+				{ offsetof(BulletClass, Data) + offsetof(BulletData, ArmTimer)
+					+ offsetof(CDTimerClass, TimeLeft), 4, "Data.ArmTimer.TimeLeft" },
+				{ offsetof(BulletClass, Data) + offsetof(BulletData, Location),
+					sizeof(CoordStruct), "Data.Location (fuse HeadTo)" },
+				{ offsetof(BulletClass, Data) + offsetof(BulletData, Distance), 4,
+					"Data.Distance (fuse closest approach)" },
+
+				{ offsetof(BulletClass, unknown_B4), 1, "unknown_B4" },
+				{ offsetof(BulletClass, Bright), 1, "Bright" },
+				{ offsetof(BulletClass, unknown_E4), 4, "unknown_E4" },
+				{ offsetof(BulletClass, Velocity), sizeof(BulletVelocity), "Velocity" },
+				{ offsetof(BulletClass, unknown_100), 4, "unknown_100" },
+				{ offsetof(BulletClass, unknown_104), 1, "unknown_104" },
+				{ offsetof(BulletClass, CourseLock), 1, "CourseLock" },
+				{ offsetof(BulletClass, CourseLockCounter), 4, "CourseLockCounter" },
+				{ offsetof(BulletClass, Speed), 4, "Speed" },
+				{ offsetof(BulletClass, InheritedColor), 4, "InheritedColor" },
+				{ offsetof(BulletClass, unknown_118), 4, "unknown_118" },
+				{ offsetof(BulletClass, unknown_11C), 4, "unknown_11C" },
+				{ offsetof(BulletClass, unknown_120), 8, "unknown_120" },
+				{ offsetof(BulletClass, AnimFrame), 1, "AnimFrame" },
+				{ offsetof(BulletClass, AnimRateCounter), 1, "AnimRateCounter" },
+				{ offsetof(BulletClass, SourceCoords), sizeof(CoordStruct), "SourceCoords" },
+				{ offsetof(BulletClass, TargetCoords), sizeof(CoordStruct), "TargetCoords" },
+				{ offsetof(BulletClass, LastMapCoords), sizeof(CellStruct), "LastMapCoords" },
+				{ offsetof(BulletClass, DamageMultiplier), 4, "DamageMultiplier" },
+				{ offsetof(BulletClass, SpawnNextAnim), 1, "SpawnNextAnim" },
+				{ offsetof(BulletClass, Range), 4, "Range" },
+			};
+
+			// Null for a byte no member covers, which is alignment padding and is never compared.
+			const char* NameBulletByte(size_t offset)
+			{
+				for (const BulletField& field : BulletFields)
+				{
+					if (offset >= field.Offset && offset < field.Offset + field.Length)
+						return field.Name;
+				}
+
+				return nullptr;
+			}
+
+			std::unordered_map<int, std::vector<BulletSample>> WatchedBulletsByFrame;
+			size_t WatchedBulletSampleCount = 0;
+			int WatchedBulletDriftReports = 0;
+
+			void ResetBulletWatch()
+			{
+				WatchedBulletsByFrame.clear();
+				WatchedBulletSampleCount = 0;
+				WatchedBulletDriftReports = 0;
+			}
+
+			void SampleBulletWatch(std::vector<BulletSample>& out)
+			{
+				out.clear();
+				out.reserve(static_cast<size_t>(std::max(BulletClass::Array.Count, 0)));
+
+				for (int i = 0; i < BulletClass::Array.Count; ++i)
+				{
+					const auto* const pBullet = BulletClass::Array.Items[i];
+					if (!pBullet)
+						continue;
+
+					BulletSample sample {};
+					sample.Id = UniqueIDOf(pBullet);
+					sample.OwnerId = UniqueIDOf(pBullet->Owner);
+					sample.TargetId = UniqueIDOf(pBullet->Target);
+					sample.NextAnimId = UniqueIDOf(pBullet->NextAnim);
+					sample.NextObjectId = UniqueIDOf(pBullet->NextObject);
+
+					if (pBullet->Type)
+					{
+						strncpy_s(sample.TypeId.data(), sample.TypeId.size(), pBullet->Type->ID,
+							sample.TypeId.size() - 1);
+					}
+
+					const int size = pBullet->Size();
+					sample.Size = std::clamp(size, 0, static_cast<int>(MaxWatchedBulletBytes));
+					std::memcpy(sample.Bytes.data(), pBullet, static_cast<size_t>(sample.Size));
+					out.push_back(sample);
+				}
+			}
+
+			void ReportBulletDrift(int frame, const std::vector<BulletSample>& before,
+				const std::vector<BulletSample>& now)
+			{
+				++WatchedBulletDriftReports;
+
+				if (before.size() != now.size())
+				{
+					Debug::Log("[Replay] Frame %d: %u bullets are in the air, %u the first time round.\n",
+						frame, static_cast<unsigned int>(now.size()),
+						static_cast<unsigned int>(before.size()));
+				}
+
+				constexpr int MaxReportedBullets = 4;
+				constexpr int MaxReportedBytesPerBullet = 24;
+				int reportedBullets = 0;
+
+				for (size_t i = 0; i < now.size() && reportedBullets < MaxReportedBullets; ++i)
+				{
+					// Matched by position rather than by id: the arrays are the same length and in the
+					// same order whenever the order restore succeeded, and when they are not the count
+					// line above has already said so.
+					if (i >= before.size())
+						break;
+
+					const BulletSample& was = before[i];
+					const BulletSample& is = now[i];
+
+					bool differs = was.Id != is.Id || was.OwnerId != is.OwnerId
+						|| was.TargetId != is.TargetId || was.NextAnimId != is.NextAnimId
+						|| was.NextObjectId != is.NextObjectId || was.Size != is.Size
+						|| was.TypeId != is.TypeId;
+
+					const int compared = std::min(was.Size, is.Size);
+					for (int offset = 0; offset < compared && !differs; ++offset)
+					{
+						if (BulletByteIsComparable(static_cast<size_t>(offset))
+							&& was.Bytes[offset] != is.Bytes[offset])
+						{
+							differs = true;
+						}
+					}
+
+					if (!differs)
+						continue;
+
+					++reportedBullets;
+					Debug::Log("[Replay] Frame %d: bullet %u [%s] drifted - owner %u, target %u "
+						"(first pass: %u [%s], owner %u, target %u).\n",
+						frame, is.Id, is.TypeId.data(), is.OwnerId, is.TargetId,
+						was.Id, was.TypeId.data(), was.OwnerId, was.TargetId);
+
+					int reportedBytes = 0;
+					for (int offset = 0; offset < compared
+						&& reportedBytes < MaxReportedBytesPerBullet; ++offset)
+					{
+						if (!BulletByteIsComparable(static_cast<size_t>(offset))
+							|| was.Bytes[offset] == is.Bytes[offset])
+						{
+							continue;
+						}
+
+						++reportedBytes;
+						Debug::Log("[Replay]   byte 0x%02X (%s) is %02X, was %02X.\n",
+							offset, NameBulletByte(static_cast<size_t>(offset)),
+							is.Bytes[offset], was.Bytes[offset]);
+					}
+				}
+			}
+
+			void ServiceBulletWatch()
+			{
+				if (!DiagnosticsWanted())
+					return;
+
+				if (!ScenarioClass::Instance)
+					return;
+
+				const int frame = static_cast<int>(Unsorted::CurrentFrame);
+				const auto it = WatchedBulletsByFrame.find(frame);
+
+				if (it != WatchedBulletsByFrame.end())
+				{
+					std::vector<BulletSample> now;
+					SampleBulletWatch(now);
+
+					bool same = now.size() == it->second.size();
+					for (size_t i = 0; i < now.size() && same; ++i)
+					{
+						const BulletSample& was = it->second[i];
+						const BulletSample& is = now[i];
+						same = was.Id == is.Id && was.OwnerId == is.OwnerId
+							&& was.TargetId == is.TargetId && was.NextAnimId == is.NextAnimId
+							&& was.NextObjectId == is.NextObjectId && was.Size == is.Size
+							&& was.TypeId == is.TypeId;
+
+						const int compared = std::min(was.Size, is.Size);
+						for (int offset = 0; offset < compared && same; ++offset)
+						{
+							if (BulletByteIsComparable(static_cast<size_t>(offset)))
+								same = was.Bytes[offset] == is.Bytes[offset];
+						}
+					}
+
+					if (!same && WatchedBulletDriftReports < MaxDriftReports)
+						ReportBulletDrift(frame, it->second, now);
+
+					return;
+				}
+
+				if (WatchedBulletSampleCount >= MaxWatchedBulletSamples || !FrameIsWorthWatching(frame))
+					return;
+
+				std::vector<BulletSample> sample;
+				SampleBulletWatch(sample);
+				if (!ChargeWatchMemory(sample.size() * sizeof(BulletSample)
+					+ sizeof(std::vector<BulletSample>)))
+				{
+					return;
+				}
+
+				WatchedBulletSampleCount += sample.size();
+				WatchedBulletsByFrame[frame] = std::move(sample);
+			}
+
+			#pragma endregion Per-frame bullet watch
+
+			#pragma region Object names for the keyframe
+
+			void CaptureAbstractObjectNames(std::vector<KeyframeObjectName>& out)
+			{
+				out.clear();
+				out.reserve(static_cast<size_t>(std::max(AbstractClass::Array.Count, 0)));
+
+				for (int i = 0; i < AbstractClass::Array.Count; ++i)
+				{
+					const auto* const pAbstract = AbstractClass::Array.Items[i];
+					if (!pAbstract)
+						continue;
+
+					KeyframeObjectName name {};
+					name.Id = UniqueIDOf(pAbstract);
+					name.Type = static_cast<int32_t>(pAbstract->WhatAmI());
+
+					if (const auto* const pObject = abstract_cast<const ObjectClass*>(pAbstract))
+					{
+						if (const auto* const pType = pObject->GetType())
+							strncpy_s(name.TypeId.data(), name.TypeId.size(), pType->ID,
+								name.TypeId.size() - 1);
+					}
+
+					out.push_back(name);
+				}
+			}
+
+			// The set difference, both ways, with the missing ones named from what the keyframe wrote
+			// down while they were still here. "2437 objects after loading, expected 2439" says two
+			// objects did not survive their own savegame and nothing else; which two, and what they
+			// were, is the whole of the question.
+			void ReportLostKeyframeObjects(const Keyframe& keyframe)
+			{
+				constexpr int MaxReported = 12;
+
+				std::unordered_set<uint32_t> live;
+				live.reserve(static_cast<size_t>(std::max(AbstractClass::Array.Count, 0)));
+				for (int i = 0; i < AbstractClass::Array.Count; ++i)
+				{
+					if (const auto* const pAbstract = AbstractClass::Array.Items[i])
+						live.insert(UniqueIDOf(pAbstract));
+				}
+
+				int reported = 0;
+				for (const auto& saved : keyframe.AbstractObjects)
+				{
+					if (live.count(saved.Id) != 0)
+						continue;
+
+					if (++reported > MaxReported)
+						break;
+
+					Debug::Log("[Replay]   unique ID %d did not come back from the load: abstract type "
+						"%d%s%s.\n", static_cast<int>(saved.Id), saved.Type,
+						saved.TypeId[0] != '\0' ? ", " : "",
+						saved.TypeId[0] != '\0' ? saved.TypeId.data() : "");
+				}
+
+				std::unordered_set<uint32_t> expected;
+				expected.reserve(keyframe.AbstractObjects.size());
+				for (const auto& saved : keyframe.AbstractObjects)
+					expected.insert(saved.Id);
+
+				reported = 0;
+				for (int i = 0; i < AbstractClass::Array.Count && reported < MaxReported; ++i)
+				{
+					const auto* const pAbstract = AbstractClass::Array.Items[i];
+					if (!pAbstract || expected.count(UniqueIDOf(pAbstract)) != 0)
+						continue;
+
+					++reported;
+					Debug::Log("[Replay]   unique ID %d came out of the load and the keyframe never "
+						"held it: a %s.\n", static_cast<int>(UniqueIDOf(pAbstract)),
+						DescribeAbstract(pAbstract));
+				}
+			}
+
+			// OverlayClass is the one thing in AbstractClass::Array that no savegame has ever carried:
+			// there is no TClassFactory<OverlayClass>, so the load never reconstructs one. Every crate
+			// on the map therefore loses its wrapper object across any load, in vanilla YR as much as
+			// here. The crate itself is unaffected - it lives in the cell's overlay bytes, which are
+			// saved with the cell and are what CellClass::Goodie_Check reads.
+			//
+			// Keeping them in the keyframe's order made two crates look like the load had lost two
+			// objects, on every load of every game with a crate on the map, and cost the ordering
+			// restore for the array they were in. Leaving them out makes the two sides agree and the
+			// order exact, and keeps a report of a real loss worth reading.
+			void DropObjectsTheSavegameDoesNotCarry(Keyframe& keyframe)
+			{
+				std::unordered_set<uint32_t> transient;
+				for (const auto& object : keyframe.AbstractObjects)
+				{
+					if (object.Type == static_cast<int32_t>(AbstractType::Overlay))
+						transient.insert(object.Id);
+				}
+
+				if (transient.empty())
+					return;
+
+				auto& order = keyframe.Orders[OrderIndex_AbstractClass];
+				order.erase(std::remove_if(order.begin(), order.end(),
+					[&transient](uint32_t id) { return transient.count(id) != 0; }), order.end());
+
+				auto& names = keyframe.AbstractObjects;
+				names.erase(std::remove_if(names.begin(), names.end(),
+					[](const KeyframeObjectName& name)
+					{
+						return name.Type == static_cast<int32_t>(AbstractType::Overlay);
+					}), names.end());
+			}
+
+			#pragma endregion Object names for the keyframe
+
+			#pragma region Kamikaze tracker
+
+			void CaptureKamikazeState(KamikazeSnapshot& snapshot)
+			{
+				auto& tracker = Kamikaze::Instance;
+
+				snapshot.TimerStart = tracker.UpdateTimer.StartTime;
+				snapshot.TimerLeft = tracker.UpdateTimer.TimeLeft;
+
+				snapshot.Aircraft.clear();
+				snapshot.Aircraft.reserve(static_cast<size_t>(std::max(tracker.Nodes.Count, 0)));
+				for (int i = 0; i < tracker.Nodes.Count; ++i)
+				{
+					const auto* const pNode = tracker.Nodes.Items[i];
+					snapshot.Aircraft.push_back(pNode ? UniqueIDOf(pNode->Item) : 0u);
+				}
+			}
+
+			void RestoreKamikazeState(const KamikazeSnapshot& snapshot, int keyframeFrame)
+			{
+				auto& tracker = Kamikaze::Instance;
+
+				const bool timerChanged = tracker.UpdateTimer.StartTime != snapshot.TimerStart
+					|| tracker.UpdateTimer.TimeLeft != snapshot.TimerLeft;
+
+				// The gate is in the savegame now - see the kamikaze region in Bugfixes.SaveLoad.cpp -
+				// so this should have nothing to do. It is kept as the check on that: if it ever puts
+				// the gate back again, the save format fix is not taking, and the line says so rather
+				// than quietly covering for it.
+				if (timerChanged)
+				{
+					Debug::Log("[Replay] Keyframe %d had to put the kamikaze tracker's gate back to "
+						"%d/%d; the load left it at %d/%d. The savegame is supposed to carry it now, so "
+						"this means Kamikaze::Save or ::Load is not writing what it reads.\n",
+						keyframeFrame, snapshot.TimerStart, snapshot.TimerLeft,
+						tracker.UpdateTimer.StartTime, tracker.UpdateTimer.TimeLeft);
+				}
+
+				tracker.UpdateTimer.StartTime = snapshot.TimerStart;
+				tracker.UpdateTimer.TimeLeft = snapshot.TimerLeft;
+
+				KamikazeSnapshot afterLoad;
+				CaptureKamikazeState(afterLoad);
+				if (afterLoad.Aircraft != snapshot.Aircraft)
+				{
+					Debug::Log("[Replay] Keyframe %d: the kamikaze tracker holds %u aircraft after "
+						"loading; it held %u. Kamikaze::Load appends without clearing, so this is worth "
+						"reading as duplicates before it is read as losses.\n", keyframeFrame,
+						static_cast<unsigned int>(afterLoad.Aircraft.size()),
+						static_cast<unsigned int>(snapshot.Aircraft.size()));
+				}
+			}
+
+			#pragma endregion Kamikaze tracker
+
+			#pragma region Watch memory budget
+
+			// The watches' share of the diagnostic budget; ReplaySystem.cpp holds the traces' share
+			// and explains why the two are no longer one pool. The policy is the same: a frame that
+			// does not fit is paid for by giving back the oldest frame recorded, so what is kept is
+			// the window immediately behind playback rather than the opening of the replay.
+			//
+			// A frame of watch samples is a sample of every techno - some hundreds of bytes each -
+			// plus every object in the six layers, so 128MB buys a few hundred frames rather than the
+			// tens of thousands the traces get. That is enough: a backwards seek lands on a keyframe
+			// and the frames worth comparing are the ones straight after it.
+			constexpr size_t MaxWatchBytes = 128u * 1024u * 1024u;
+
+			// Nothing reads a watch frame outside the call that records it, so only the frame being
+			// recorded has to be safe from reclamation. The frame before it is held as well, to match
+			// the traces and to leave room for a watch that grows a pointer into one later.
+			constexpr int WatchFramesAlwaysHeld = 2;
+
+			size_t WatchBytesUsed = 0;
+			std::map<int, size_t> WatchBytesByFrame;
+			bool WatchBudgetReported = false;
+
+			// The cell baselines are kept apart from the frame window. They are taken once per
+			// keyframe rather than once per frame, and a keyframe is old by the time it is worth
+			// comparing against, so the window would always have forgotten the one that matters.
+			constexpr size_t MaxCellBaselineBytes = 16u * 1024u * 1024u;
+			size_t CellBaselineBytesUsed = 0;
+
+			template <typename TStore>
+			void ForgetWatchedFrame(TStore& store, int frame, size_t& entryCount)
+			{
+				const auto it = store.find(frame);
+				if (it == store.end())
+					return;
+
+				entryCount -= std::min(entryCount, it->second.size());
+				store.erase(it);
+			}
+
+			void ForgetWatchedFrameAt(std::map<int, size_t>::iterator it)
+			{
+				const int frame = it->first;
+
+				ForgetWatchedFrame(WatchedObjectsByFrame, frame, WatchedObjectSampleCount);
+				ForgetWatchedFrame(WatchedLayersByFrame, frame, WatchedLayerSampleCount);
+				ForgetWatchedFrame(WatchedBulletsByFrame, frame, WatchedBulletSampleCount);
+				ForgetWatchedFrame(CellChangesByFrame, frame, WatchedCellChangeCount);
+
+				WatchBytesUsed -= std::min(WatchBytesUsed, it->second);
+				WatchBytesByFrame.erase(it);
+			}
+
+			// The frame furthest from where playback is now, which is not always the oldest. A seek
+			// backwards leaves the store full of frames ahead of the current one, and a rule that only
+			// ever dropped the oldest could not touch any of them: the first backwards seek filled the
+			// budget with frames it was forbidden to reclaim and every watch stopped recording, which
+			// is what "a single frame does not fit in the 128 MB" meant in the log.
+			//
+			// Frames behind playback go first, because playback will not reach them again without
+			// another seek. Only when there are none left does a frame ahead go, the furthest ahead
+			// first, since that is the one playback will need last if it gets there at all.
+			bool ForgetOneWatchedFrame(int frame)
+			{
+				if (WatchBytesByFrame.empty())
+					return false;
+
+				const auto oldest = WatchBytesByFrame.begin();
+				if (oldest->first < frame - (WatchFramesAlwaysHeld - 1))
+				{
+					ForgetWatchedFrameAt(oldest);
+					return true;
+				}
+
+				const auto newest = std::prev(WatchBytesByFrame.end());
+				if (newest->first > frame)
+				{
+					ForgetWatchedFrameAt(newest);
+					return true;
+				}
+
+				return false;
+			}
+
+			bool ChargeWatchMemory(size_t bytes)
+			{
+				const int frame = static_cast<int>(Unsorted::CurrentFrame);
+
+				while (WatchBytesUsed + bytes > MaxWatchBytes && ForgetOneWatchedFrame(frame))
+					;
+
+				if (WatchBytesUsed + bytes > MaxWatchBytes)
+				{
+					// Only reachable if one frame of samples does not fit on its own.
+					if (!WatchBudgetReported)
+					{
+						WatchBudgetReported = true;
+						Debug::Log("[Replay] A single frame does not fit in the %u MB the watches are "
+							"allowed, on frame %d. They will record nothing more; frames already recorded "
+							"are still compared, and playback itself is unaffected.\n",
+							static_cast<unsigned int>(MaxWatchBytes / (1024u * 1024u)), frame);
+					}
+
+					return false;
+				}
+
+				WatchBytesUsed += bytes;
+				WatchBytesByFrame[frame] += bytes;
+				return true;
+			}
+
+			bool ChargeCellBaselineMemory(size_t bytes)
+			{
+				while (CellBaselineBytesUsed + bytes > MaxCellBaselineBytes && !CellBaselines.empty())
+				{
+					// std::unordered_map, so the oldest has to be looked for rather than taken.
+					auto oldest = CellBaselines.begin();
+					for (auto it = CellBaselines.begin(); it != CellBaselines.end(); ++it)
+					{
+						if (it->first < oldest->first)
+							oldest = it;
+					}
+
+					const size_t held = oldest->second.size() * sizeof(CellSnapshot);
+					CellBaselineBytesUsed -= std::min(CellBaselineBytesUsed, held);
+					CellBaselines.erase(oldest);
+				}
+
+				if (CellBaselineBytesUsed + bytes > MaxCellBaselineBytes)
+					return false;
+
+				CellBaselineBytesUsed += bytes;
+				return true;
+			}
+
+			void ResetWatchMemory()
+			{
+				WatchBytesUsed = 0;
+				WatchBytesByFrame.clear();
+				WatchBudgetReported = false;
+				CellBaselineBytesUsed = 0;
+			}
+
+			// How far back the watches reach right now, so a watch that reports nothing can be told
+			// from one that had nothing to look at.
+			int OldestWatchedFrame()
+			{
+				return WatchBytesByFrame.empty() ? -1 : WatchBytesByFrame.begin()->first;
+			}
+
+			#pragma endregion Watch memory budget
+
 			void RestartDriftReporting()
 			{
 				ReportedDriftObjects.clear();
 				WatchedLayerDriftReports = 0;
 				WatchedCellDriftReports = 0;
 				WatchedObjectDriftReports = 0;
+				WatchedBulletDriftReports = 0;
+
+				// The running cell hashes describe the world the seek left, not the one it landed in,
+				// so the first frame after a load measured every cell the load had touched against the
+				// wrong baseline: 2175 cells "changed" where the first pass changed 51, every time,
+				// on every load. The frame after a load takes a fresh baseline and says nothing.
+				CellDeltaBaselineStale = true;
 			}
 
 
@@ -2460,6 +3364,8 @@ namespace ReplaySystem
 						static_cast<int32_t>(pTechno->UpdateTimer.TimeLeft),
 						static_cast<int32_t>(pTechno->MissionStatus),
 						static_cast<int32_t>(pTechno->MissionAccumulateTime),
+						static_cast<int32_t>(pTechno->QueuedMission),
+						static_cast<int32_t>(pTechno->SuspendedMission),
 						pFoot ? pFoot->NavQueue.Count : 0,
 						pFoot && pFoot->NavQueue.Count > 0 ? UniqueIDOf(pFoot->NavQueue.Items[0]) : 0u,
 						pTechno->IsALoaner,
@@ -2652,6 +3558,8 @@ namespace ReplaySystem
 						&& before.MissionTimerLeft == after.MissionTimerLeft
 						&& before.MissionStatus == after.MissionStatus
 						&& before.MissionAccumulate == after.MissionAccumulate
+						&& before.QueuedMission == after.QueuedMission
+						&& before.SuspendedMission == after.SuspendedMission
 						&& before.NavQueueCount == after.NavQueueCount
 						&& before.NavQueueHeadId == after.NavQueueHeadId
 						&& before.IsALoaner == after.IsALoaner
@@ -2669,7 +3577,8 @@ namespace ReplaySystem
 							"target %u (was %u), archive target %u (was %u), destination %u (was %u), "
 							"mission %d (was %d) started frame %d (was %d), targeting timer %d/%d "
 							"(was %d/%d), mission timer %d/%d (was %d/%d), status %d (was %d), "
-							"accumulated %d (was %d), %d queued destinations heading for %u "
+							"accumulated %d (was %d), queued mission %d (was %d), suspended %d "
+							"(was %d), %d queued destinations heading for %u "
 							"(was %d heading for %u), loaner %d (was %d), in-playfield %d (was %d), "
 							"team %u/leaving %d (was %u/%d).\n",
 							keyframe.Frame, before.Id,
@@ -2684,6 +3593,8 @@ namespace ReplaySystem
 							before.MissionTimerStart, before.MissionTimerLeft,
 							after.MissionStatus, before.MissionStatus,
 							after.MissionAccumulate, before.MissionAccumulate,
+							after.QueuedMission, before.QueuedMission,
+							after.SuspendedMission, before.SuspendedMission,
 							after.NavQueueCount, after.NavQueueHeadId,
 							before.NavQueueCount, before.NavQueueHeadId,
 							after.IsALoaner, before.IsALoaner,
@@ -3813,6 +4724,8 @@ namespace ReplaySystem
 				if (!CaptureAresParticleState(keyframe.AresParticles))
 					return false;
 				CaptureLocomotorResetStates(keyframe.LocomotorResetStates);
+				CaptureKamikazeState(keyframe.Kamikaze);
+				CaptureAbstractObjectNames(keyframe.AbstractObjects);
 				CaptureTiberiumState(keyframe.Tiberium);
 				CaptureLoadResetTimerState(keyframe.LoadResetTimers);
 				CaptureSlaveManagerState(keyframe.SlaveManagers);
@@ -3830,6 +4743,8 @@ namespace ReplaySystem
 
 				for (size_t layer = 0; layer < keyframe.LayerOrders.size(); ++layer)
 					CaptureObjectOrder(MapClass::ObjectsInLayers[layer], keyframe.LayerOrders[layer]);
+
+				DropObjectsTheSavegameDoesNotCarry(keyframe);
 				return true;
 			}
 
@@ -3840,19 +4755,31 @@ namespace ReplaySystem
 				memcpy(&random, keyframe.Random.data(), sizeof(Randomizer));
 
 				int reorderedCollectionCount = 0;
-				auto restoreCollection = [&reorderedCollectionCount](auto& collection,
+				auto restoreCollection = [&reorderedCollectionCount, &keyframe](auto& collection,
 					const std::vector<uint32_t>& order, const char* name)
 				{
 					bool changed = false;
-					if (!RestoreObjectOrder(collection, order, name, changed))
-						return false;
+					const bool complete = RestoreObjectOrder(collection, order, name, changed);
 
+					// Reported whether or not the sets matched: a partial restore still put the survivors
+					// back where the recording had them, which is the part that decides who gets asked
+					// first.
 					if (changed)
 					{
 						++reorderedCollectionCount;
 						Debug::Log("[Replay] %s came back from the load out of order; put back.\n", name);
 					}
-					return true;
+
+					// AbstractClass::Array is every object in the world, so a difference there is the
+					// load losing or gaining objects rather than shuffling them, and the names are
+					// worth spending the lookup on.
+					if (!complete && static_cast<const void*>(&collection)
+						== static_cast<const void*>(&AbstractClass::Array))
+					{
+						ReportLostKeyframeObjects(keyframe);
+					}
+
+					return complete;
 				};
 
 				// A collection that cannot be put back in order is worth saying so about, but it is not
@@ -3877,6 +4804,7 @@ namespace ReplaySystem
 					return false;
 				if (!RestoreLocomotorResetStates(keyframe.LocomotorResetStates, keyframe.Frame))
 					return false;
+				RestoreKamikazeState(keyframe.Kamikaze, keyframe.Frame);
 				RestoreTiberiumState(keyframe.Tiberium, keyframe.Frame);
 				RestoreCellPassability(keyframe.CellPassability, keyframe.Frame);
 				VerifyDerivedMapHashes(keyframe);
@@ -4455,7 +5383,26 @@ namespace ReplaySystem
 
 			bool RestorePlaybackAfterLoad(const Keyframe& keyframe)
 			{
+				LastLoadedKeyframeFrame = keyframe.Frame;
 				RestartDriftReporting();
+				RestartTraceReporting();
+
+				// A watch that says nothing about the frame it was loaded on is either a watch that
+				// found nothing or a watch that never saw the frame, and telling those apart by hand
+				// has cost a round of this more than once.
+				if (DiagnosticsWanted())
+				{
+					Debug::Log("[Replay] Keyframe %d is being loaded with the watches holding frames "
+						"%d onwards (%u object, %u bullet, %u layer, %u cell-change frames, %u cell "
+						"baselines); this frame itself is %s.\n",
+						keyframe.Frame, OldestWatchedFrame(),
+						static_cast<unsigned int>(WatchedObjectsByFrame.size()),
+						static_cast<unsigned int>(WatchedBulletsByFrame.size()),
+						static_cast<unsigned int>(WatchedLayersByFrame.size()),
+						static_cast<unsigned int>(CellChangesByFrame.size()),
+						static_cast<unsigned int>(CellBaselines.size()),
+						WatchedObjectsByFrame.count(keyframe.Frame) != 0 ? "held" : "not held");
+				}
 
 				const int keyframeFrame = keyframe.Frame;
 				if (static_cast<int>(Unsorted::CurrentFrame) != keyframeFrame)
@@ -4642,6 +5589,8 @@ namespace ReplaySystem
 			ResetObjectWatch();
 			ResetCellWatch();
 			ResetLayerWatch();
+			ResetBulletWatch();
+			ResetWatchMemory();
 			ResetDiagnosticMemory();
 			State = SeekState {};
 
@@ -4671,6 +5620,8 @@ namespace ReplaySystem
 			ResetObjectWatch();
 			ResetCellWatch();
 			ResetLayerWatch();
+			ResetBulletWatch();
+			ResetWatchMemory();
 			ResetDiagnosticMemory();
 			State = SeekState {};
 		}
@@ -4705,6 +5656,7 @@ namespace ReplaySystem
 
 			ServiceTraces();
 			ServiceObjectWatch();
+			ServiceBulletWatch();
 			ServiceCellWatch();
 			ServiceLayerWatch();
 

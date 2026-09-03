@@ -843,9 +843,27 @@ DEFINE_HOOK(0x4D3920, FootClass_BasicPath_TraceForDivergence, 0x5)
 	return 0;
 }
 
+// AircraftClass::Assign_Mission (0x41BA90) is a thin override: it filters a few missions and then
+// tail-calls this. Every aircraft assignment in the game therefore reported the same caller,
+// 0041BADE, which says an aircraft was assigned something and nothing about who decided it.
+//
+// Its frame is fixed and small - one push at entry, then the two arguments - so the address one
+// level up can be read straight off the stack rather than walked. See the layout below.
+constexpr DWORD AircraftAssignMissionCall = 0x41BADE;
+constexpr DWORD AircraftAssignMissionCallerSlot = 0x10;
+
 DEFINE_HOOK(0x5B35E0, MissionClass_AssignMission_TraceForDivergence, 0x5)
 {
-	TraceMissionAssignment(R->ECX<void*>(), R->Stack<int>(0x4), R->Stack<const void*>(0x0));
+	const DWORD caller = R->Stack<DWORD>(0x0);
+
+	// 0x00 return address into the override, 0x04 mission, 0x08 commence, 0x0C the esi it pushed
+	// on entry, 0x10 the address that called the override.
+	const DWORD originator = caller == AircraftAssignMissionCall
+		? R->Stack<DWORD>(AircraftAssignMissionCallerSlot)
+		: caller;
+
+	TraceMissionAssignment(R->ECX<void*>(), R->Stack<int>(0x4),
+		reinterpret_cast<const void*>(caller), reinterpret_cast<const void*>(originator));
 	return 0;
 }
 

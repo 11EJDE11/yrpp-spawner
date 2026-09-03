@@ -232,7 +232,10 @@ namespace ReplaySystem
 		void ResetRandomDrawTrace();
 		// The same trick for mission changes, which move an object's behaviour without touching
 		// the randomiser and so are invisible to the draw trace.
-		void TraceMissionAssignment(const void* object, int mission, const void* caller);
+		// The originator is the caller above a thin virtual override, where there is one, and the
+		// caller itself otherwise. See MissionClass_AssignMission_TraceForDivergence.
+		void TraceMissionAssignment(const void* object, int mission, const void* caller,
+			const void* originator);
 		void ResetMissionTrace();
 		// Every route request, so two runs can be checked for asking the pathfinder the same
 		// questions in the same order before anyone blames the pathfinder for the answers.
@@ -252,19 +255,28 @@ namespace ReplaySystem
 		void ResetUpdateOrderTrace();
 		// Run once a frame so a frame that stops asking is caught; see ServiceTraces.
 		void ServiceTraces();
+		// Each trace reports its first difference and then stays quiet. Called by every keyframe load
+		// so that is once per seek rather than once per replay; see RestartDriftReporting.
+		void RestartTraceReporting();
 
-		// Every trace and watch keeps what it records for the whole replay, and the game is a
-		// 32-bit process. Each store had its own cap and nobody had added them up: the cell watch
-		// alone kept a whole 25MB table per keyframe, uncounted, and a long replay ran the process
-		// out of address space and died on a std::bad_alloc that no catch would have helped. They
-		// now share one budget and stop recording when it is gone, which costs coverage late in a
-		// long replay and costs nothing else.
+		// Every trace and watch keeps what it records, and the game is a 32-bit process. Each store
+		// had its own cap and nobody had added them up: the cell watch alone kept a whole 25MB table
+		// per keyframe, uncounted, and a long replay ran the process out of address space and died
+		// on a std::bad_alloc that no catch would have helped.
+		//
+		// The budget that fixed that bought a prefix of the replay - record until it is gone, then
+		// stop - and a seek is never in the prefix. It now buys a window on the recent past instead:
+		// a frame that does not fit is paid for by forgetting the oldest frame held. See the budget
+		// in ReplaySystem.cpp, and the watches' own share of it in ReplaySeek.cpp.
 		bool ChargeDiagnosticMemory(size_t bytes);
 		void ResetDiagnosticMemory();
 		// Names the object behind the next draw, for call sites where knowing it matters.
 		void SetRandomDrawContext(const TechnoClass* pTechno);
 		FrameObjectCensus CurrentObjectCensus();
 		void CheckObjectCensusForCurrentFrame();
+		// What an object is, in the words the rules use for it. The result points at a buffer reused
+		// by the next call, so print it before calling again.
+		const char* DescribeAbstract(const AbstractClass* pAbstract);
 		void ComputeAndCaptureGameCRCForCurrentFrame();
 		int GetPlaybackTargetFPS();
 		double PlaybackClockMilliseconds();

@@ -23,12 +23,14 @@
 #include <BulletClass.h>
 #include <HouseClass.h>
 #include <HoverLocomotionClass.h>
+#include <Kamikaze.h>
 #include <RocketLocomotionClass.h>
 #include <ScenarioClass.h>
 #include <SlaveManagerClass.h>
 #include <SpawnManagerClass.h>
 #include <CellClass.h>
 #include <MapClass.h>
+#include <ParasiteClass.h>
 #include <TechnoClass.h>
 #include <TeleportLocomotionClass.h>
 #include <TiberiumClass.h>
@@ -44,9 +46,12 @@
 // interface pointers cannot survive serialisation and have to be repaired - but it also discards
 // gameplay state that the file carried perfectly well.
 //
-// Everything in this file is that pattern, and every fix is the same shape: leave the loaded
-// value alone. None of it changes the save format and all of it works on existing saves. See
-// docs/save-load-correctness.md.
+// Most of this file is that pattern, and those fixes are all the same shape: leave the loaded
+// value alone. None of them changes the save format and all of them work on existing saves.
+//
+// The exception is the kamikaze tracker at the end, where there is no loaded value to leave alone
+// because the field was never written. That one extends the save format, and a savegame written by
+// this build will not load in a build without it. See docs/save-load-correctness.md.
 
 // Frame timers thrown away by savegame loading.
 //
@@ -249,10 +254,106 @@ DEFINE_HOOK(0x663435, RocketLocomotionClass_Load_KeepTrailerTimer, 0x10)
 	return 0x663445;
 }
 
+// ParasiteClass::Load (0x6295B0) reads the parasite whole and then writes both of its timers back
+// to { Frame, 0 } inline:
+//
+//     mov edx, Frame
+//     mov dword ptr [esi+34h], 0    ; SuppressionTimer.TimeLeft  = 0
+//     mov [esi+2Ch], edx            ; SuppressionTimer.StartTime = Frame
+//     mov eax, Frame
+//     mov [esi+38h], eax            ; DamageDeliveryTimer.StartTime = Frame
+//     mov dword ptr [esi+40h], 0    ; DamageDeliveryTimer.TimeLeft  = 0
+//
+// which is the state that fires on the next frame it is asked. ParasiteClass::AI (0x629FD0) opens
+// with the usual gate - nothing happens until Frame - StartTime >= TimeLeft - and re-arms it for
+// the weapon's ROF when it fires, so a terror drone delivers its damage tick on one frame in ROF.
+// Resetting the gate makes it deliver on the first frame after every load instead.
+//
+// That tick is not quiet. For a vehicle victim it spawns Rules' DefaultSparkSystem and the
+// weapon's impact anim, draws from the synchronised randomiser at 0x62A189 to pick which way to
+// rock the victim, and calls Take_Damage. Seeking onto a keyframe with a drone attached to
+// anything therefore made three objects the recording never made and consumed a draw it never
+// consumed - which is the whole of the divergence the replay keyframes were failing on.
+//
+// Six bytes, the frame fetch, and the four stores after it are dropped with it. Nothing between
+// here and the vtable repairs reads edx or eax.
+static_assert(offsetof(ParasiteClass, SuppressionTimer) == 0x2C,
+	"ParasiteClass::Load (0x6295B0) resets the suppression timer at ParasiteClass+0x2C");
+static_assert(offsetof(ParasiteClass, DamageDeliveryTimer) == 0x38,
+	"ParasiteClass::Load (0x6295B0) resets the damage delivery timer at ParasiteClass+0x38");
+
+DEFINE_HOOK(0x6295DB, ParasiteClass_Load_KeepTimers, 0x6)
+{
+	return 0x6295FA;
+}
+
 #pragma endregion Locomotor members reconstructed after load
 
 // Defined with the rest of the passability work further down; the load-path call site is here.
 void RecomputeAllCellPassability();
+
+#pragma region Unique IDs thrown away by the AbstractClass constructor
+
+// AbstractClass::AbstractClass (0x410170) ends with
+//
+//     mov dword ptr [eax+10h], 0FFFFFFFFh   ; UniqueID = -1
+//
+// because a bare abstract has no identity until Create_ID gives it one. Two Load overrides run
+// that constructor over an object AbstractClass::Load has just filled in from the savegame, and
+// the file's own UniqueID goes with it:
+//
+//     SuperClass::Load (0x6CDEF0) at 0x6CDF0E
+//     TubeClass::Load  (0x7281A0) at 0x7281BA
+//
+// Every superweapon in the game therefore comes back from a load identified as -1. The keyframe
+// diagnostics found it by name - "SuperClass is missing object unique ID 1035599 ... the load left
+// unique ID 4294967295 at position 0" is eight supers all reading -1 - and it means the replay
+// seek can never put SuperClass::Array back into the order the recording had it in, because there
+// is nothing left to match the objects by.
+//
+// The rest of what the constructor does is repair: four vtables that cannot be serialised, a COM
+// reference count that has to restart at zero, and the transient flags beside it. Only the
+// identity is wrong to discard, so only the identity is put back.
+//
+// Hooked at the call rather than inside the constructor, which runs for every object the game
+// ever creates. Neither hook returns 0, so neither has to care that it is standing on a relative
+// call: the constructor is invoked from here and execution resumes past it.
+AbstractClass* ConstructAbstractBase(AbstractClass* pAbstract)
+{
+	using Constructor = AbstractClass* (__thiscall*)(AbstractClass*);
+	return reinterpret_cast<Constructor>(0x410170)(pAbstract);
+}
+
+void ConstructAbstractBaseKeepingUniqueID(AbstractClass* pAbstract)
+{
+	if (!pAbstract)
+		return;
+
+	const DWORD uniqueID = pAbstract->UniqueID;
+	ConstructAbstractBase(pAbstract);
+	pAbstract->UniqueID = uniqueID;
+}
+
+static_assert(offsetof(AbstractClass, UniqueID) == 0x10,
+	"AbstractClass::AbstractClass (0x410170) writes the unique ID at AbstractClass+0x10");
+
+DEFINE_HOOK(0x6CDF0E, SuperClass_Load_KeepUniqueID, 0x5)
+{
+	GET(AbstractClass* const, pSuper, ESI);
+
+	ConstructAbstractBaseKeepingUniqueID(pSuper);
+	return 0x6CDF13;
+}
+
+DEFINE_HOOK(0x7281BA, TubeClass_Load_KeepUniqueID, 0x5)
+{
+	GET(AbstractClass* const, pTube, ESI);
+
+	ConstructAbstractBaseKeepingUniqueID(pTube);
+	return 0x7281BF;
+}
+
+#pragma endregion Unique IDs thrown away by the AbstractClass constructor
 
 #pragma region Scenario randomiser and unique-ID counter
 
@@ -449,3 +550,79 @@ DEFINE_HOOK(0x567110, MapClass_LevelAndPassability_RecomputeCellPassability, 0x5
 }
 
 #pragma endregion Cell passability
+
+#pragma region Kamikaze tracker gate
+
+// The only fix in this file that adds to the save format, because it is the only one where the
+// value was never written in the first place.
+//
+// Kamikaze::Save (0x54E750) writes the node count and then the eight bytes of each node, and
+// stops. UpdateTimer is not in the stream at all - no YR savegame has ever carried it - so a load
+// leaves the tracker holding whatever phase the world it was loaded over happened to be in.
+//
+// Kamikaze::Update (0x54E4D0) is gated on that timer, re-arms it for thirty frames when it fires,
+// and gives every tracked aircraft MISSION_ATTACK:
+//
+//     if (Frame - StartTime >= TimeLeft) {
+//         StartTime = Frame; TimeLeft = 30;
+//         for (each node) { Ammo = 1; Assign_Target(...); Assign_Mission(MISSION_ATTACK); }
+//     }
+//
+// A V3 rocket is a missile spawn and is tracked, so every missile in the air takes its attack
+// mission on one frame in thirty - and after a load that is a different frame. Five rockets were
+// assigned a frame late at one keyframe, and one of them then ran a mission step behind for the
+// rest of its life: still on AIR_ATT_VALIDATE_AZ where the first pass had reached
+// AIR_ATT_PICK_ATTACK_LOCATION, which is the branch of AircraftClass::Mission_Attack that draws
+// its delay from the synchronised randomiser. One frame of phase, one draw, and the two runs are
+// different games. It is not a replay-only fault: save an ordinary game with a V3 in the air,
+// reload it, and every missile fires on the wrong tick.
+//
+// The two words go in ahead of the node count, on both sides, so the reader is in step with the
+// writer. Both hooks sit on the function entry, where the stream is still at [esp+4].
+//
+// The tail of a CDTimerClass is an unused word, so StartTime and TimeLeft are written by hand
+// rather than the struct: no point putting an uninitialised four bytes in a savegame.
+struct KamikazeGate
+{
+	int StartTime;
+	int TimeLeft;
+};
+
+static_assert(offsetof(Kamikaze, UpdateTimer) == 0,
+	"Kamikaze::Save (0x54E750) and ::Load (0x54E7B0) carry the gate at Kamikaze+0");
+
+// Seven bytes: the three pushes and the four-byte load of the stream argument after them.
+DEFINE_HOOK(0x54E750, Kamikaze_Save_WriteUpdateTimer, 0x7)
+{
+	GET(Kamikaze* const, pTracker, ECX);
+	GET_STACK(IStream* const, pStream, 0x4);
+
+	if (pTracker && pStream)
+	{
+		const KamikazeGate gate { pTracker->UpdateTimer.StartTime, pTracker->UpdateTimer.TimeLeft };
+		pStream->Write(&gate, sizeof(gate), nullptr);
+	}
+
+	return 0;
+}
+
+// Five bytes: sub esp, 8 and the two pushes after it.
+DEFINE_HOOK(0x54E7B0, Kamikaze_Load_ReadUpdateTimer, 0x5)
+{
+	GET(Kamikaze* const, pTracker, ECX);
+	GET_STACK(IStream* const, pStream, 0x4);
+
+	if (pTracker && pStream)
+	{
+		KamikazeGate gate { -1, 0 };
+		if (SUCCEEDED(pStream->Read(&gate, sizeof(gate), nullptr)))
+		{
+			pTracker->UpdateTimer.StartTime = gate.StartTime;
+			pTracker->UpdateTimer.TimeLeft = gate.TimeLeft;
+		}
+	}
+
+	return 0;
+}
+
+#pragma endregion Kamikaze tracker gate
