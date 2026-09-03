@@ -3776,6 +3776,7 @@ void ReplaySystem::ApplyPlaybackSpectator()
 		return;
 
 	Game::ObserverMode = true;
+
 	if (pPlayer->MakeObserver())
 		TabClass::Instance.ThumbActive = false;
 

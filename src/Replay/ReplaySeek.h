@@ -71,9 +71,6 @@ namespace ReplaySystem
 		// mostly not drawing while this holds.
 		bool IsSeeking();
 
-		// The frame a seek in progress is heading for, or -1.
-		int SeekTargetFrame();
-
 		// Whether this frame's GScreenClass::Render should be skipped. A seek still draws one frame
 		// in every SeekRenderInterval, so a long one does not look like a hang.
 		bool ShouldSkipRenderThisFrame();

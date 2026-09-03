@@ -284,6 +284,8 @@ namespace ReplaySystem
 		// What an object is, in the words the rules use for it. The result points at a buffer reused
 		// by the next call, so print it before calling again.
 		const char* DescribeAbstract(const AbstractClass* pAbstract);
+		// A code address as module and offset, so a caller inside a relocatable DLL is resolvable.
+		const char* DescribeCodeAddress(uint32_t address, char* buffer, size_t size);
 		void ComputeAndCaptureGameCRCForCurrentFrame();
 		int GetPlaybackTargetFPS();
 		double PlaybackClockMilliseconds();

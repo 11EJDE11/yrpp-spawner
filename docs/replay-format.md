@@ -834,8 +834,13 @@ iteration:
 | 0x55DE3A → 0x55DE45 | `mov ProcessingFrames, ecx` | `Queue_AI` (0x55DE40) |
 | 0x55DE73 → 0x55DE9A | `mov edx, Frame` | `++Frame` (0x55DE7E) |
 
-Each hooks a position-independent instruction rather than the relative `call` next to it, so the
-not-paused path can return 0 and re-execute the stolen bytes from Syringe's trampoline safely.
+Each hooks a position-independent instruction rather than the relative `call` next to it. That was
+originally a hard requirement — the not-paused path returns 0, which re-executes the stolen bytes
+from the trampoline, and a relative `call` copied verbatim to a different address lands somewhere
+else entirely. SyringeEx removed the requirement by rebuilding relative branches instead of copying
+them, so returning 0 over a `call` is safe now and several hooks in the tree rely on it. These three
+stay where they are regardless: the instructions above are the ones that need skipping, so hooking
+them is what the change means, not a workaround for the loader.
 
 Skipping `LogicClass::AI` takes panning with it, so the last hook puts it back — as a pair, not a
 single call. `Tactical::AI` (0x6D2540) commits `_DesiredTacticalCoord` — where the arrow-key

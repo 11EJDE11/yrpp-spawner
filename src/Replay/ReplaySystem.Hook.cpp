@@ -48,6 +48,21 @@
 
 using namespace ReplaySystem::Internal;
 
+// Every divergence trace in this file is inert unless the diagnostics are on, which they are not in
+// any ordinary game. Each Trace* function checks this for itself, but the hooks are on the busiest
+// sites in the engine - both Random2Class draw entries, LogicClass::AI's per-object loop, every
+// mission change, every path request - so leaving the check to the callee means a normal game still
+// pays for the trampoline on all of them. Two of the hooks are worse than that and do real work
+// ahead of the gate: RadioClass::Has_Contact_Index repeats a radio-link scan, and the two
+// Remove_This taps walk the stack through Engine_Frame_Above.
+//
+// So it is asked here first. This is exactly DiagnosticsWanted() in ReplaySystem.cpp, which is the
+// first thing every one of those functions tests, so hoisting it changes nothing but the cost.
+static bool ReplayTracesWanted()
+{
+	return ReplayState.DiagnosticsEnabled;
+}
+
 static const EventClass* EventFromScaledDoListSlot(unsigned int scaledSlot)
 {
 	static_assert(sizeof(EventClass) % 3 == 0,
@@ -348,8 +363,11 @@ DEFINE_HOOK(0x6BEC60, Game_Exit_FlushReplayBuffers, 0x5)
 }
 
 // Main_Game, where the frame loop exits - the one point every ending converges on, and the only one
-// a skirmish reaches at all. Hooked next to the loop's own call rather than on it, since a relative
-// call cannot be relocated into a hook's saved bytes.
+// a skirmish reaches at all. Hooked next to the loop's own call rather than on it. That siting was
+// originally chosen because a relative call could not be relocated into a hook's saved bytes, which
+// SyringeEx has since made untrue - it rebuilds relative branches rather than copying them - so the
+// hook could sit on the call now. It stays here because there is nothing to gain by moving it: this
+// instruction is position-independent either way.
 DEFINE_HOOK(0x48CEAF, MainGame_GameLoopFinished_FlushReplayBuffers, 0x5)
 {
 	StopReplaySystem();
@@ -408,9 +426,9 @@ DEFINE_HOOK(0x686060, DoLose_EndGameAfterPlayback, 0x5)
 
 #pragma endregion Ending playback when the mission ends
 
-// Triggers can run off the player discovering an area. If enableShroud=false then
-// they are pre-discovered which leads to divergence.
-// Show enemy units on the minimap when the playback reveals the map.
+// Show enemy units on the minimap when the playback reveals the map. Like the rest of the reveal,
+// this is a drawing decision only: it forces the radar-visible answer for the viewer and writes no
+// cell state, so the simulation still sees the recording player's own shroud.
 DEFINE_HOOK(0x70DA48, TechnoClass_RadarTrackingAI_ShowAllOnViewerRadar, 0x8)
 {
 	if (!PlaybackWantsFullMapReveal())
@@ -513,20 +531,179 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 	return 0;
 }
 
-// The two ways to draw from a Random2Class. They do not share an implementation: the ranged one
-// walks the table itself rather than calling the other, and it draws repeatedly until the value
-// fits the range - so both have to be tapped, and one ranged call can move the table more than
-// once. Almost all gameplay randomness comes through the ranged form; Compute_Game_CRC uses the
-// plain one. See TraceRandomDraw in ReplaySystem.cpp.
-// TechnoClass::Target_Something_Nearby, which draws as its first act. The divergence trace
-// keeps catching this one, and knowing which object asked is the difference between a
-// techno whose schedule slipped and a different techno entirely running in its place.
-// MissionClass::Assign_Mission, the single point every mission change goes through. Recorded
-// per frame so a seek can be checked against what the same frame did the first time round.
-// FootClass::Basic_Path, the one entry point every route request goes through. Recorded per
-// frame so a seek can be checked against the questions the same frame asked the first time.
-// AircraftClass::New_LZ. Recorded on the way in, and the aircraft is named as the asker so the
-// randomiser report attributes the draw inside it rather than saying "object 0".
+// TEMPORARY - object creation trace, for chasing a census mismatch to the object behind it.
+//
+// The census check reports that one side created an object the other did not, and the unique-ID
+// counter says how many, but nothing says *which*. This names the creation site of every object, so
+// two runs can be diffed and the first differing line is the creation that only happened once.
+//
+// AbstractClass::Create_ID (0x410230) is the single point every object's identity comes from:
+//
+//     410230  mov ecx, Scen        ; six bytes, and position-independent
+//     410236  test ecx, ecx
+//     410238  jnz short loc_410246
+//     ...
+//     410246  call ScenarioClass::Increment_UniqueID
+//
+// The object itself is not described: Create_ID runs from inside the constructor chain, so the
+// vtable is still whichever base is currently under construction and WhatAmI() would lie. The
+// caller is what identifies the creation anyway.
+//
+// Remove this once the spectator divergence is understood.
+
+// Whether an address lands in this executable's code, which is the test for "could be a return
+// address into the engine" rather than a stack value that happens to look like one.
+static bool Is_Engine_Code_Address(uintptr_t value)
+{
+	HMODULE hSelf = nullptr;
+	if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, nullptr, &hSelf))
+		return false;
+
+	const auto* const dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(hSelf);
+	const auto* const nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+		reinterpret_cast<const unsigned char*>(hSelf) + dos->e_lfanew);
+
+	const auto base = reinterpret_cast<uintptr_t>(hSelf) + nt->OptionalHeader.BaseOfCode;
+	return value > base && value < base + nt->OptionalHeader.SizeOfCode;
+}
+
+// The exact caller of a constructor that keeps a frame pointer. AnimClass::AnimClass (0x421EA0)
+// opens with push ebp; mov ebp, esp and never touches ebp afterwards, so at its Create_ID call
+// [ebp+4] is its own return address - the code that asked for the object.
+//
+// This is worth having over the stack scan in Engine_Frame_Above, which fails here: the scan looks
+// for the first code-range value above the immediate caller, and on this path it finds 0x421EA0 -
+// the constructor's own entry address, sitting in its frame - rather than the return address. An
+// answer equal to the function the immediate caller is already inside is the tell.
+//
+// Validated rather than trusted: not every constructor reaching Create_ID keeps a frame pointer.
+static const void* Caller_Via_Frame_Pointer(REGISTERS* R)
+{
+	const auto framePointer = static_cast<uintptr_t>(R->EBP());
+	if (framePointer == 0 || (framePointer & 3) != 0)
+		return nullptr;
+
+	uintptr_t returnAddress = 0;
+	__try
+	{
+		returnAddress = *reinterpret_cast<const uintptr_t*>(framePointer + 4);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return nullptr;
+	}
+
+	return Is_Engine_Code_Address(returnAddress)
+		? reinterpret_cast<const void*>(returnAddress)
+		: nullptr;
+}
+
+DEFINE_HOOK(0x410230, AbstractClass_CreateID_TraceCreations, 0x6)
+{
+	// Runs for every object the game ever creates, so the gate comes first.
+	if (!ReplayTracesWanted())
+		return 0;
+
+	// A keyframe load rebuilds the whole object graph and would bury the frames of interest.
+	if (ReplaySystem::Seek::IsLoadInProgress())
+		return 0;
+
+	// Frame 0 is scenario setup and makes tens of thousands of objects on its own, which swamped
+	// the trace on the first attempt. It can be skipped: the census is checked on every frame and
+	// only reports its first mismatch, so a mismatch first seen on frame N means frames 0..N-1
+	// agreed and the creation being hunted happened during frame N. Widen this window, or drop the
+	// lower bound back to 0, if a run ever reports a mismatch on frame 0 itself.
+	constexpr int FirstTracedFrame = 1;
+	constexpr int LastTracedFrame = 60;
+	constexpr int MaxTracedCreations = 40000;
+
+	static int tracedCreations = 0;
+
+	const int frame = static_cast<int>(Unsorted::CurrentFrame);
+	if (frame < FirstTracedFrame || frame > LastTracedFrame
+		|| tracedCreations >= MaxTracedCreations)
+	{
+		return 0;
+	}
+
+	++tracedCreations;
+
+	// The immediate caller is always the constructor that owns the Create_ID call, which names the
+	// object's type and nothing else. The frame above it is the code that decided to make the
+	// object, which is the part worth having.
+	char origin[MAX_PATH + 32] = { 0 };
+	char above[MAX_PATH + 32] = { 0 };
+	const auto caller = reinterpret_cast<uint32_t>(R->Stack<const void*>(0x0));
+	const auto originator = reinterpret_cast<uint32_t>(Caller_Via_Frame_Pointer(R));
+
+	Debug::Log("[Replay] Object created on frame %d by %s, for %s.\n",
+		frame, DescribeCodeAddress(caller, origin, sizeof(origin)),
+		DescribeCodeAddress(originator, above, sizeof(above)));
+
+	// The frame-pointer walk stops at the first function that does not keep one, and
+	// BuildingClass::Create_Animation (0x451890) does not - its push ebp is a callee-save, not a
+	// prologue. So the raw stack is dumped as well: every value on it that lands in engine code is
+	// a candidate return address, and the real chain is a subsequence of them. Only one object is
+	// created in the traced window, so this costs a handful of lines.
+	int found = 0;
+	for (int at = 4; at < 0x200 && found < 16; at += 4)
+	{
+		const auto value = reinterpret_cast<uintptr_t>(R->Stack<const void*>(at));
+		if (!Is_Engine_Code_Address(value))
+			continue;
+
+		++found;
+
+		char entry[MAX_PATH + 32] = { 0 };
+		Debug::Log("[Replay]   stack +0x%03X: %s\n",
+			at, DescribeCodeAddress(static_cast<uint32_t>(value), entry, sizeof(entry)));
+	}
+
+	return 0;
+}
+
+// TEMPORARY - companion to the creation trace above. The stack walk put the missing anim in
+// BuildingClass::Animation_AI (0x4509D0) -> Create_Animation (0x451890), which has forty call sites
+// and a loop over the building's upgrade slots, so the useful question is no longer "who called it"
+// but "which building, and which anim".
+//
+// Logging on entry rather than at the AnimClass construction separates two very different answers:
+// if this line is absent in the spectator run, the call itself did not happen and the difference is
+// upstream in Animation_AI; if it is present in both and only the object differs, then
+// AnimTypeClass::From_Name(animname) returned -1 on one side and the animname is what differs.
+//
+//     451890  sub esp, 24h                  ; three bytes
+//     451893  push ebx                      ; one
+//     451894  mov ebx, [esp+28h+is_damaged] ; four, so eight lands on a boundary
+//
+// The hook runs before any of that, so ecx is still the building and the arguments are where the
+// caller pushed them.
+//
+// Remove this with the creation trace.
+DEFINE_HOOK(0x451890, BuildingClass_CreateAnimation_TraceForDivergence, 0x8)
+{
+	if (!ReplayTracesWanted())
+		return 0;
+
+	if (ReplaySystem::Seek::IsLoadInProgress())
+		return 0;
+
+	const int frame = static_cast<int>(Unsorted::CurrentFrame);
+	if (frame < 1 || frame > 60)
+		return 0;
+
+	GET(BuildingClass* const, pBuilding, ECX);
+	GET_STACK(const char* const, animName, 0x4);
+	GET_STACK(int const, anim, 0x8);
+	GET_STACK(int const, isDamaged, 0xC);
+
+	Debug::Log("[Replay] Building animation on frame %d: anim %d on %s, damaged %d, name %s.\n",
+		frame, anim, DescribeAbstract(pBuilding), isDamaged,
+		animName ? animName : "(none)");
+
+	return 0;
+}
+
 // The object update loop at the end of LogicClass::AI, one call per object per frame:
 //
 //     55B608  mov eax, [edi+4]           ; Logic.Objects.Vector
@@ -541,6 +718,9 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 // byte out of alignment. The object is read the way the split instruction would have.
 DEFINE_HOOK(0x55B60B, LogicClass_AI_TraceUpdateOrder, 0x5)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET(void** const, objects, EAX);
 	GET(int const, index, ESI);
 
@@ -560,6 +740,9 @@ DEFINE_HOOK(0x55B60B, LogicClass_AI_TraceUpdateOrder, 0x5)
 //     4CEFB6  lea esi, [ecx+0Ch]  ; ECX is the locomotor, +0x0C is LinkedTo
 DEFINE_HOOK(0x4CEFB0, FlyLocomotion_NearingTarget_TraceForDivergence, 0x5)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET(void** const, locomotor, ECX);
 	GET_STACK(int const, coordX, 0x8);
 	GET_STACK(int const, coordY, 0xC);
@@ -631,6 +814,11 @@ static const void* Engine_Frame_Above(REGISTERS* R)
 //     4DE5D3  mov ecx, [esi+2BCh]   ; six, so nine is the first clean boundary
 DEFINE_HOOK(0x4DE5D0, FootClass_RemoveThis_TraceForDivergence, 0x9)
 {
+	// Ahead of Engine_Frame_Above, which is a GetModuleHandleExA and a stack walk on what is
+	// otherwise every object removal in the game.
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET(TechnoClass* const, pFoot, ECX);
 
 	TraceLandingZoneCell(8, pFoot, -1, -1, nullptr, R->Stack<const void*>(0x0),
@@ -654,6 +842,9 @@ DEFINE_HOOK(0x4DE5D0, FootClass_RemoveThis_TraceForDivergence, 0x9)
 //     568304  mov edx, [ecx+0F4h]  ; six bytes, so ten lands on a boundary
 DEFINE_HOOK(0x568300, AircraftClass_AI_TraceOffMapPredicate, 0xA)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	const auto* const caller = R->Stack<const void*>(0x0);
 	if (caller != reinterpret_cast<const void*>(0x414FBB))
 		return 0;
@@ -688,6 +879,10 @@ DEFINE_HOOK(0x568300, AircraftClass_AI_TraceOffMapPredicate, 0xA)
 
 DEFINE_HOOK(0x5F65F0, ObjectClass_RemoveThis_TraceForDivergence, 0x6)
 {
+	// As above: ahead of the stack walk, on every object removal in the game.
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET(TechnoClass* const, pObject, ECX);
 
 	TraceLandingZoneCell(7, pObject, -1, -1, nullptr, R->Stack<const void*>(0x0),
@@ -709,6 +904,9 @@ DEFINE_HOOK(0x5F65F0, ObjectClass_RemoveThis_TraceForDivergence, 0x6)
 //     4DB264  mov edi, ecx    ; two, so six is the first clean boundary past five
 DEFINE_HOOK(0x4DB260, FootClass_Limbo_TraceForDivergence, 0x6)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET(TechnoClass* const, pFoot, ECX);
 
 	TraceLandingZoneCell(6, pFoot, -1, -1, nullptr, R->Stack<const void*>(0x0));
@@ -732,6 +930,9 @@ DEFINE_HOOK(0x4DB260, FootClass_Limbo_TraceForDivergence, 0x6)
 // the first clean boundary. All three are register-relative and safe to relocate.
 DEFINE_HOOK(0x4D55C0, FootClass_StopDriver_TraceForDivergence, 0x9)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET(TechnoClass* const, pFoot, ECX);
 
 	TraceLandingZoneCell(5, pFoot, -1, -1, nullptr, R->Stack<const void*>(0x0));
@@ -748,6 +949,9 @@ DEFINE_HOOK(0x4D55C0, FootClass_StopDriver_TraceForDivergence, 0x9)
 // is the stack argument, and LinkedTo sits at +0x0C inside it.
 DEFINE_HOOK(0x4CCFD3, FlyLocomotion_StopMoving_TraceForDivergence, 0x5)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET_STACK(void** const, locomotor, 0x1C);
 
 	if (locomotor)
@@ -776,6 +980,9 @@ DEFINE_HOOK(0x4CCFD3, FlyLocomotion_StopMoving_TraceForDivergence, 0x5)
 // destination cell. Reaching this says the two runs agree on where the aircraft is heading.
 DEFINE_HOOK(0x4CF0B3, FlyLocomotion_NearingTarget_TraceDestinationCell, 0x5)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET(CellClass* const, pCell, ECX);
 
 	if (pCell)
@@ -792,6 +999,11 @@ DEFINE_HOOK(0x4CF0B3, FlyLocomotion_NearingTarget_TraceDestinationCell, 0x5)
 //     65AD51  mov esi, [esp+8]         ; four, so five lands on a boundary
 DEFINE_HOOK(0x65AD50, RadioClass_HasContactIndex_TraceForDivergence, 0x5)
 {
+	// Ahead of the radio-link scan below, which is a repeat of the work the function itself is
+	// about to do and was being done on every dispatch in every game.
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET(TechnoClass* const, pAsker, ECX);
 	GET_STACK(AbstractClass* const, pOther, 0x4);
 
@@ -824,8 +1036,13 @@ DEFINE_HOOK(0x65AD50, RadioClass_HasContactIndex_TraceForDivergence, 0x5)
 	return 0;
 }
 
+// AircraftClass::New_LZ. Recorded on the way in, and the aircraft is named as the asker so the
+// randomiser report attributes the draw inside it rather than saying "object 0".
 DEFINE_HOOK(0x418E20, AircraftClass_NewLZ_TraceForDivergence, 0x6)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	GET(TechnoClass* const, pAircraft, ECX);
 	GET_STACK(CellClass* const, pZone, 0x4);
 
@@ -837,12 +1054,20 @@ DEFINE_HOOK(0x418E20, AircraftClass_NewLZ_TraceForDivergence, 0x6)
 	return 0;
 }
 
+// FootClass::Basic_Path, the one entry point every route request goes through. Recorded per
+// frame so a seek can be checked against the questions the same frame asked the first time.
 DEFINE_HOOK(0x4D3920, FootClass_BasicPath_TraceForDivergence, 0x5)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	TracePathRequest(R->ECX<void*>(), R->Stack<int>(0x4), R->Stack<int>(0x8), R->Stack<int>(0xC));
 	return 0;
 }
 
+// MissionClass::Assign_Mission, the single point every mission change goes through. Recorded
+// per frame so a seek can be checked against what the same frame did the first time round.
+//
 // AircraftClass::Assign_Mission (0x41BA90) is a thin override: it filters a few missions and then
 // tail-calls this. Every aircraft assignment in the game therefore reported the same caller,
 // 0041BADE, which says an aircraft was assigned something and nothing about who decided it.
@@ -854,6 +1079,9 @@ constexpr DWORD AircraftAssignMissionCallerSlot = 0x10;
 
 DEFINE_HOOK(0x5B35E0, MissionClass_AssignMission_TraceForDivergence, 0x5)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	const DWORD caller = R->Stack<DWORD>(0x0);
 
 	// 0x00 return address into the override, 0x04 mission, 0x08 commence, 0x0C the esi it pushed
@@ -867,16 +1095,31 @@ DEFINE_HOOK(0x5B35E0, MissionClass_AssignMission_TraceForDivergence, 0x5)
 	return 0;
 }
 
+// TechnoClass::Target_Something_Nearby, which draws as its first act. The divergence trace keeps
+// catching this one, and knowing which object asked is the difference between a techno whose
+// schedule slipped and a different techno entirely running in its place.
 DEFINE_HOOK(0x709820, TechnoClass_TargetSomethingNearby_NameTheAsker, 0x5)
 {
-	if (ReplayState.Playback)
-		SetRandomDrawContext(R->ECX<TechnoClass*>());
+	if (!ReplayTracesWanted() || !ReplayState.Playback)
+		return 0;
 
+	SetRandomDrawContext(R->ECX<TechnoClass*>());
 	return 0;
 }
 
+// The two ways to draw from a Random2Class. They do not share an implementation: the ranged one
+// walks the table itself rather than calling the other, and it draws repeatedly until the value
+// fits the range - so both have to be tapped, and one ranged call can move the table more than
+// once. Almost all gameplay randomness comes through the ranged form; Compute_Game_CRC uses the
+// plain one. See TraceRandomDraw in ReplaySystem.cpp.
+//
+// They are also the hottest sites the traces touch - every draw the simulation makes comes through
+// one of them - so the gate matters here more than anywhere else in the file.
 DEFINE_HOOK(0x65C780, Random2Class_Draw_TraceForDivergence, 0x5)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	// The caller is still on the stack: nothing has been pushed at the function's first byte.
 	TraceRandomDraw(R->ECX<const void*>(), R->Stack<const void*>(0x0));
 	return 0;
@@ -884,6 +1127,9 @@ DEFINE_HOOK(0x65C780, Random2Class_Draw_TraceForDivergence, 0x5)
 
 DEFINE_HOOK(0x65C7E0, Random2Class_DrawRanged_TraceForDivergence, 0x6)
 {
+	if (!ReplayTracesWanted())
+		return 0;
+
 	TraceRandomDraw(R->ECX<const void*>(), R->Stack<const void*>(0x0));
 	return 0;
 }

@@ -20,11 +20,38 @@
 #include <Utilities/Macro.h>
 #include <HouseClass.h>
 
+// TEMPORARY BISECT - round two of chasing the campaign spectator divergence.
+//
+// Round one established that setting HouseClass::Observer is what causes it: skipping MakeObserver
+// made a campaign spectator replay match on every frame. That flag has two sets of readers - the
+// engine's own (SidebarClass::Init_IO and ::AI, StripClass::AI and ::Draw_It, CreditClass::AI,
+// MPlayer_Defeated, Flag_To_Lose, the score and diplomacy screens) and the fifteen hooks in this
+// file. This switch makes all fifteen of ours inert while leaving the flag set, so one run says
+// which set is responsible.
+//
+//   diverges still -> the cause is an engine reader, and the sidebar is the place to look: the
+//                     missing object is a superweapon charge animation driven by Owner->Supers.
+//   converges      -> the cause is one of the hooks below.
+//
+// Round two answered this: with all fifteen inert the divergence remained, so the cause is an
+// engine reader of the flag and none of the hooks below. Restored to false.
+static bool BisectDisableObserverVisibility = false;
+
+static bool IsObserverForVisibility()
+{
+	return !BisectDisableObserverVisibility && IsObserverForVisibility();
+}
+
+static bool IsObserverForVisibility(HouseClass* pHouse)
+{
+	return !BisectDisableObserverVisibility && pHouse && pHouse->IsObserver();
+}
+
 DEFINE_HOOK(0x703A09, TechnoClass_VisualCharacter_CloakVisibility, 0x7)
 {
 	enum { UseShadowyVisual = 0x703A5A, CheckMutualAlliance = 0x703A16 };
 
-	return HouseClass::IsCurrentPlayerObserver()
+	return IsObserverForVisibility()
 		? UseShadowyVisual
 		: CheckMutualAlliance;
 }
@@ -33,7 +60,7 @@ DEFINE_HOOK(0x45455B, BuildingClass_VisualCharacter_CloakVisibility, 0x5)
 {
 	enum { UseShadowyVisual = 0x45452D, CheckMutualAlliance = 0x454564 };
 
-	return HouseClass::IsCurrentPlayerObserver()
+	return IsObserverForVisibility()
 		? UseShadowyVisual
 		: CheckMutualAlliance;
 }
@@ -43,7 +70,7 @@ DEFINE_HOOK(0x692540, ScrollClass_Coordthing_TechnoClass_Cloak, 0x5)
 {
 	enum { AllowCoordthing = 0x69256B, CheckSensedByHouses = 0 };
 
-	if (HouseClass::IsCurrentPlayerObserver())
+	if (IsObserverForVisibility())
 		return AllowCoordthing;
 
 	GET(TechnoClass*, pTechno, ESI);
@@ -60,7 +87,7 @@ DEFINE_HOOK(0x6925AA, ScrollClass_Coordthing_BuildingClass_Cloak, 0x6)
 {
 	enum { AllowCoordthing = 0x6925F0, CheckSensedByHouses = 0 };
 
-	if (HouseClass::IsCurrentPlayerObserver())
+	if (IsObserverForVisibility())
 		return AllowCoordthing;
 
 	GET(TechnoClass*, pTechno, ESI);
@@ -76,7 +103,7 @@ DEFINE_HOOK(0x6DA412, Tactical_SelectAt_Cloak, 0x6)
 {
 	enum { AllowSelect = 0x6DA43E, CheckSensedByHouses = 0 };
 
-	if (HouseClass::IsCurrentPlayerObserver())
+	if (IsObserverForVisibility())
 		return AllowSelect;
 
 	GET(TechnoClass*, pTechno, EAX);
@@ -93,7 +120,7 @@ DEFINE_HOOK(0x6F4F19, TechnoClass_6F4EB0_Cloak, 0x6)
 {
 	enum { DontUnselect = 0x6F4F3A, CheckSensedByHouses = 0x6F4F21 };
 
-	if (HouseClass::IsCurrentPlayerObserver())
+	if (IsObserverForVisibility())
 		return DontUnselect;
 
 	GET(TechnoClass*, pTechno, ESI);
@@ -110,7 +137,7 @@ DEFINE_HOOK(0x4ABE3C, DisplayClass_MouseLeftRelease_Cloak, 0xA)
 {
 	enum { AllowSelect = 0x4ABE4A, Unselect = 0x4ABE88 };
 
-	if (HouseClass::IsCurrentPlayerObserver())
+	if (IsObserverForVisibility())
 		return AllowSelect;
 
 	GET(TechnoClass*, pTechno, ESI);
@@ -130,7 +157,7 @@ DEFINE_HOOK(0x692686, DisplayClass_WhatAction_Cloak, 0x6)
 	GET(TechnoClass*, pTechno, EDI);
 	enum { ProceedCloakCheck = 0x692690, ShouldNotCheck = 0x6926DB };
 
-	if (pTechno->IsOwnedByCurrentPlayer || HouseClass::IsCurrentPlayerObserver())
+	if (pTechno->IsOwnedByCurrentPlayer || IsObserverForVisibility())
 		return ShouldNotCheck;
 
 	if (pTechno->Owner->IsMutualAlly(HouseClass::CurrentPlayer))
@@ -144,7 +171,7 @@ DEFINE_HOOK(0x70D386, TechnoClass_Radar_Cloak, 0xA)
 {
 	enum { Show = 0x70D3CD, DontShow = 0x70D407 };
 
-	if (HouseClass::IsCurrentPlayerObserver())
+	if (IsObserverForVisibility())
 		return Show;
 
 	GET(TechnoClass*, pTechno, ESI);
@@ -164,7 +191,7 @@ DEFINE_HOOK(0x4AE62B, DisplayClass_HelpText_Cloak, 0x5)
 {
 	enum { CheckIsInvisible = 0x4AE654, CheckSensedByHouses = 0 };
 
-	if (HouseClass::IsCurrentPlayerObserver())
+	if (IsObserverForVisibility())
 		return CheckIsInvisible;
 
 	GET(TechnoClass*, pTechno, ECX);
@@ -184,7 +211,7 @@ DEFINE_HOOK(0x4AE62B, DisplayClass_HelpText_Cloak, 0x5)
 // Show spy for observer
 DEFINE_HOOK(0x4DEDC3, FootClass_GetImageData_Disguise, 0x6)
 {
-	return HouseClass::IsCurrentPlayerObserver()
+	return IsObserverForVisibility()
 		? 0x4DEE15
 		: 0;
 }
@@ -192,7 +219,7 @@ DEFINE_HOOK(0x4DEDC3, FootClass_GetImageData_Disguise, 0x6)
 // Show real name of spy for observer
 DEFINE_HOOK(0x51F2F3, InfantryClass_FullName_Disguise, 0x6)
 {
-	return HouseClass::IsCurrentPlayerObserver()
+	return IsObserverForVisibility()
 		? 0x51F31A
 		: 0;
 }
@@ -200,7 +227,7 @@ DEFINE_HOOK(0x51F2F3, InfantryClass_FullName_Disguise, 0x6)
 // Flash disguise for Observer
 DEFINE_HOOK(0x70EE6A, TechnoClass_DisguiseBeenSeen, 0x6)
 {
-	return HouseClass::IsCurrentPlayerObserver()
+	return IsObserverForVisibility()
 		? 0x70EE79
 		: 0;
 }
@@ -209,7 +236,7 @@ DEFINE_HOOK(0x70EE6A, TechnoClass_DisguiseBeenSeen, 0x6)
 DEFINE_HOOK(0x7467CA, UnitClass_CantTargetDisguise, 0x5)
 {
 	GET(HouseClass*, pHouse, EDI);
-	return pHouse->IsObserver()
+	return IsObserverForVisibility(pHouse)
 		? 0x7467FE
 		: 0;
 }
@@ -219,14 +246,14 @@ DEFINE_HOOK(0x7467CA, UnitClass_CantTargetDisguise, 0x5)
 #pragma region
 DEFINE_HOOK(0x6F677D, TechnoClass_DrawSelection_Observer1, 0x5)
 {
-	return HouseClass::IsCurrentPlayerObserver()
+	return IsObserverForVisibility()
 		? 0x6F67B2
 		: 0;
 }
 
 DEFINE_HOOK(0x6F6A58, TechnoClass_DrawSelection_Observer2, 0x6)
 {
-	return HouseClass::IsCurrentPlayerObserver()
+	return IsObserverForVisibility()
 		? 0x6F6A8E
 		: 0;
 }

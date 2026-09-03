@@ -240,7 +240,7 @@ public:
 		, ReplayViewPlayer { -1 }
 		, ReplayControlBar { true }
 		, ReplayKeyframeInterval { 750 }
-		, ReplayDiagnostics { false }
+		, ReplayDiagnostics { true }
 		, ReplaySeekRenderEveryFrame { false }
 
 		// Scenario Options

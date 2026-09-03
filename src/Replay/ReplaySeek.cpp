@@ -5716,11 +5716,6 @@ namespace ReplaySystem
 			return State.Seeking;
 		}
 
-		int SeekTargetFrame()
-		{
-			return State.Seeking ? State.TargetFrame : -1;
-		}
-
 		bool ShouldSkipRenderThisFrame()
 		{
 			if (!State.Seeking)

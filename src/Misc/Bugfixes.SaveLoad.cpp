@@ -316,8 +316,11 @@ void RecomputeAllCellPassability();
 // identity is wrong to discard, so only the identity is put back.
 //
 // Hooked at the call rather than inside the constructor, which runs for every object the game
-// ever creates. Neither hook returns 0, so neither has to care that it is standing on a relative
-// call: the constructor is invoked from here and execution resumes past it.
+// ever creates. Both hooks stand on that relative call and neither returns 0 - the constructor is
+// invoked from here and execution resumes past it. Returning 0 would have been fine too, since
+// SyringeEx rebuilds relative branches into the saved bytes rather than copying them verbatim (see
+// ScenarioClass_Load_TakeRandomiserAndCounter below, which does exactly that); calling it here is
+// simply the clearer way to say "run the constructor, then put the identity back".
 AbstractClass* ConstructAbstractBase(AbstractClass* pAbstract)
 {
 	using Constructor = AbstractClass* (__thiscall*)(AbstractClass*);
@@ -371,9 +374,17 @@ bool HaveScenarioLoadState = false;
 Randomizer LoadedScenarioRandom {};
 int LoadedScenarioUniqueID = 0;
 
+// True from ScenarioClass::Load until Load_Game finishes. Kept separate from the flag above, which
+// is conditional on the scenario pointer and is cleared once the counter has been put back: this one
+// is set and cleared unconditionally so the window is always balanced. Read by the playfield fix
+// below, which must only change what a load does.
+bool SaveGameLoadInProgress = false;
+
 DEFINE_HOOK(0x6894C5, ScenarioClass_Load_TakeRandomiserAndCounter, 0x5)
 {
 	GET(ScenarioClass* const, pScen, ECX);
+
+	SaveGameLoadInProgress = true;
 
 	if (pScen)
 	{
@@ -420,6 +431,9 @@ DEFINE_HOOK(0x67E6BD, LoadGame_PutUniqueIDCounterBack, 0x5)
 	// their occupants are all known.
 	RecomputeAllCellPassability();
 
+	// Cleared before the early returns below, so the window closes whatever else this load did.
+	SaveGameLoadInProgress = false;
+
 	if (!HaveScenarioLoadState || !ScenarioClass::Instance)
 		return 0;
 
@@ -464,11 +478,25 @@ DEFINE_HOOK(0x67E6BD, LoadGame_PutUniqueIDCounterBack, 0x5)
 // plane that had flown in and was on its way out when the game was saved comes back from the load
 // looking like it had never arrived, so it is never removed and keeps flying.
 //
-// Making the assignment monotonic restores the historical meaning without needing to know whether
-// a load is in progress. It only changes the case the engine has no business changing - was
+// Making the assignment monotonic restores the historical meaning for the case that matters - was
 // inside, is now outside - and leaves the just-entered branch below reading the same bl and al it
-// always did. On a fresh scenario every techno starts with the flag clear, so monotonic and
-// assignment agree and map setup is untouched.
+// always did.
+//
+// It is scoped to a load rather than left on, because _clip_map is not load-only. The chain is
+//
+//     MapClass::_clip_map (0x567230)
+//       <- RadarClass::_clip_map (0x654490)
+//         <- RadarClass_reinit (0x655990)
+//           <- TActionClass::Resize_Player_View (0x6E21E0)
+//
+// and that last one is the "Resize Player View" trigger action, which fires mid-game on campaign
+// maps and on any custom map that uses it. Left unconditional, a techno that was inside the old
+// view and is outside the resized one keeps a flag the engine meant to clear - and by the same
+// Should_Delete_Off_Map reasoning above, that turns an aircraft from "has not arrived, keep" into
+// "arrived and off-map, delete". A view resize would start removing aircraft that vanilla keeps.
+//
+// During a load there is no such intent: the flag is being reassigned from a world that has only
+// just been rebuilt, and the historical value is the one the file carried.
 static_assert(offsetof(TechnoClass, IsInPlayfield) == 0x3D5,
 	"MapClass::_clip_map (0x567230) assigns the playfield flag at TechnoClass+0x3D5");
 
@@ -476,8 +504,12 @@ DEFINE_HOOK(0x56730E, MapClass_ClipMap_KeepIsInPlayfield, 0x6)
 {
 	GET(TechnoClass* const, pTechno, ESI);
 
-	if ((R->EAX() & 0xFF) != 0)
-		pTechno->IsInPlayfield = true;
+	// These six bytes are the assignment itself, so the ordinary path has to perform it: leaving it
+	// out would stop the flag being maintained at all outside a load.
+	const bool isInPlayfield = (R->EAX() & 0xFF) != 0;
+
+	if (isInPlayfield || !SaveGameLoadInProgress)
+		pTechno->IsInPlayfield = isInPlayfield;
 
 	// The comparison of the old flag against the new one is already in the flags register and the
 	// branch that reads it is the next instruction, so nothing here may disturb either.
