@@ -265,6 +265,63 @@ namespace ReplaySystem
 				virtual void Execute(WWKey) const override { ToggleControlBar(); }
 			};
 
+			class ReplayToggleViewportLockCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplayToggleViewportLock"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_VIEWPORT_LOCK", L"Replay: Lock/Unlock Viewport"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_VIEWPORT_LOCK_DESC",
+						L"Toggles following the viewport recorded in the replay.");
+				}
+
+				virtual void Execute(WWKey) const override { ToggleLockedViewport(); }
+			};
+
+			class ReplayToggleSelectionCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplayToggleSelection"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_SELECTION", L"Replay: Follow/Free Unit Selection"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_SELECTION_DESC",
+						L"Toggles reproducing the unit selection recorded in the replay.");
+				}
+
+				virtual void Execute(WWKey) const override { ToggleRecordedSelection(); }
+			};
+
+			class ReplayToggleDiagnosticsCommandClass : public CommandClass
+			{
+			public:
+				virtual const char* GetName() const override { return "ReplayToggleDiagnostics"; }
+
+				virtual const wchar_t* GetUIName() const override
+					{ return StringTable::TryFetchString("TXT_REPLAY_DIAGNOSTICS", L"Replay: Enable/Disable Diagnostics"); }
+
+				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+				virtual const wchar_t* GetUIDescription() const override
+				{
+					return StringTable::TryFetchString("TXT_REPLAY_DIAGNOSTICS_DESC",
+						L"Toggles expensive divergence diagnostics and starts a fresh capture window when enabled.");
+				}
+
+				virtual void Execute(WWKey) const override { ToggleDiagnostics(); }
+			};
+
 			template <typename T>
 			T* MakeCommand()
 			{
@@ -395,6 +452,56 @@ namespace ReplaySystem
 			ControlBarVisible = pConfig && pConfig->ReplayControlBar;
 		}
 
+		void ToggleLockedViewport()
+		{
+			if (!ReplayState.Playback)
+				return;
+
+			ReplayState.LockViewport = !ReplayState.LockViewport;
+			if (ReplayState.LockViewport)
+				ApplyLockedViewport();
+
+			PrintControlMessage(ReplayState.LockViewport
+				? L"Replay viewport locked."
+				: L"Replay viewport unlocked.");
+		}
+
+		void ToggleRecordedSelection()
+		{
+			if (!ReplayState.Playback)
+				return;
+
+			ReplayState.SelectUnits = !ReplayState.SelectUnits;
+			if (ReplayState.SelectUnits)
+				ApplyCurrentPlaybackSelection();
+
+			PrintControlMessage(ReplayState.SelectUnits
+				? L"Following recorded unit selection."
+				: L"Recorded unit selection disabled.");
+		}
+
+		void ToggleDiagnostics()
+		{
+			if (!ReplayState.Playback)
+				return;
+
+			ReplayState.DiagnosticsEnabled = !ReplayState.DiagnosticsEnabled;
+			if (ReplayState.DiagnosticsEnabled)
+			{
+				ResetRandomDrawTrace();
+				ResetMissionTrace();
+				ResetPathRequestTrace();
+				ResetLandingZoneTrace();
+				ResetUpdateOrderTrace();
+				Seek::ResetDiagnostics();
+				ResetDiagnosticMemory();
+			}
+
+			PrintControlMessage(ReplayState.DiagnosticsEnabled
+				? L"Replay diagnostics enabled; capture window reset."
+				: L"Replay diagnostics disabled.");
+		}
+
 		void StepPlaybackSpeed(int direction)
 		{
 			if (!ReplayState.Playback || direction == 0)
@@ -448,6 +555,9 @@ namespace ReplaySystem
 			MakeCommand<ReplaySeekBackCommandClass>();
 			MakeCommand<ReplaySeekForwardCommandClass>();
 			MakeCommand<ReplayToggleControlBarCommandClass>();
+			MakeCommand<ReplayToggleViewportLockCommandClass>();
+			MakeCommand<ReplayToggleSelectionCommandClass>();
+			MakeCommand<ReplayToggleDiagnosticsCommandClass>();
 		}
 	}
 }

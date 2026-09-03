@@ -879,6 +879,7 @@ namespace ReplaySystem
 			ReplayState.Recording = false;
 			ReplayState.Playback = false;
 			ReplayState.SpectatorView = false;
+			ReplayState.DiagnosticsEnabled = false;
 			ReplayState.PlaybackFPS = 0;
 			ReplayState.PlaybackNextFrameDue = 0.0;
 			ReplayState.PlaybackPaused = false;
@@ -915,6 +916,8 @@ namespace ReplaySystem
 			ReplayState.PendingPlaybackFrame = {};
 			ReplayState.LockedViewportPos = { 0, 0 };
 			ReplayState.HasLockedViewportPos = false;
+			ReplayState.LockedSelectionIDs.clear();
+			ReplayState.HasLockedSelection = false;
 			ReplayState.HasLastWrittenFrameState = false;
 			ReplayState.LastWrittenFrameNumber = 0;
 			ReplayState.LastRecordedTacticalPos = { 0, 0 };
@@ -1633,6 +1636,12 @@ namespace ReplaySystem
 					ReplayState.HasLockedViewportPos = true;
 				}
 
+				if ((record.Flags & FrameRecordFlag_Selection) != 0u)
+				{
+					ReplayState.LockedSelectionIDs = record.SelectedObjectIDs;
+					ReplayState.HasLockedSelection = true;
+				}
+
 				if ((record.Flags & FrameRecordFlag_GameSpeed) != 0u)
 				{
 					const int gameSpeed = std::clamp(static_cast<int>(record.GameSpeed), 0, MaxGameSpeedIndex);
@@ -1696,6 +1705,17 @@ namespace ReplaySystem
 				if (it != objectByUniqueID.end())
 					it->second->Select();
 			}
+		}
+
+		void ApplyCurrentPlaybackSelection()
+		{
+			if (!ReplayState.HasLockedSelection)
+				return;
+
+			PlaybackFrameRecord record {};
+			record.SelectedObjectIDs = ReplayState.LockedSelectionIDs;
+			record.SelectedObjectCount = static_cast<int32_t>(record.SelectedObjectIDs.size());
+			ApplyPlaybackSelection(record);
 		}
 
 		int GetChatMessageDurationFrames()
@@ -1934,8 +1954,7 @@ namespace ReplaySystem
 		// change, so they are asked on paths the simulation runs constantly.
 		bool DiagnosticsWanted()
 		{
-			const auto* const pConfig = GetConfig();
-			return pConfig && pConfig->ReplayDiagnostics;
+			return ReplayState.DiagnosticsEnabled;
 		}
 
 		#pragma region Randomiser draw trace
@@ -3365,6 +3384,8 @@ namespace ReplaySystem
 
 			if ((frameRecord.Flags & FrameRecordFlag_Selection) != 0u)
 			{
+				ReplayState.LockedSelectionIDs = frameRecord.SelectedObjectIDs;
+				ReplayState.HasLockedSelection = true;
 				ApplyPlaybackSelection(frameRecord);
 			}
 
@@ -3612,6 +3633,7 @@ namespace ReplaySystem
 			ReplayState.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
 			ReplayState.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
 			ReplayState.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
+			ReplayState.DiagnosticsEnabled = pConfig ? pConfig->ReplayDiagnostics : false;
 			ReplayState.SpectatorView = ReplaySystem::IsSpectatorPlayback();
 			ReplayState.ShowChatAndBeacons = pConfig ? pConfig->ReplayShowChatAndBeacons : true;
 

@@ -98,6 +98,8 @@ namespace ReplaySystem
 			bool ShroudEnabled = false;
 			bool LockViewport = true;
 			bool SelectUnits = true;
+			// Initialized from ReplayDiagnostics and live-toggleable during playback.
+			bool DiagnosticsEnabled = false;
 			bool SpectatorView = false;
 			// Playback only; recording keeps this data unconditionally.
 			bool ShowChatAndBeacons = true;
@@ -175,6 +177,8 @@ namespace ReplaySystem
 			// Last recorded viewport position, re-applied between sparse frame records.
 			Point2D LockedViewportPos = { 0, 0 };
 			bool HasLockedViewportPos = false;
+			std::vector<uint32_t> LockedSelectionIDs;
+			bool HasLockedSelection = false;
 			PlaybackFrameRecord PendingPlaybackFrame = {};
 
 			bool HasLastWrittenFrameState = false;
@@ -270,6 +274,9 @@ namespace ReplaySystem
 		// in ReplaySystem.cpp, and the watches' own share of it in ReplaySeek.cpp.
 		bool ChargeDiagnosticMemory(size_t bytes);
 		void ResetDiagnosticMemory();
+		// Applies the latest sticky viewer state immediately after its live toggle is enabled.
+		void ApplyLockedViewport();
+		void ApplyCurrentPlaybackSelection();
 		// Names the object behind the next draw, for call sites where knowing it matters.
 		void SetRandomDrawContext(const TechnoClass* pTechno);
 		FrameObjectCensus CurrentObjectCensus();

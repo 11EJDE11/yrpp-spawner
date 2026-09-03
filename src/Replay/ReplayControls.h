@@ -68,6 +68,12 @@ namespace ReplaySystem
 		void ToggleControlBar();
 		void InitControlBarVisibility();
 
+		// Live viewer-state toggles. Diagnostics starts a fresh capture window when enabled so an
+		// earlier investigation cannot consume its memory or compare against stale samples.
+		void ToggleLockedViewport();
+		void ToggleRecordedSelection();
+		void ToggleDiagnostics();
+
 		// Prints a short notice in the message list, in the style the playback hotkeys use.
 		void PrintControlMessage(const wchar_t* pMessage);
 

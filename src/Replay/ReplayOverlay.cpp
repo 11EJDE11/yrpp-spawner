@@ -253,6 +253,8 @@ namespace ReplaySystem
 				// and the seek actually runs.
 				int ScrubFrame = 0;
 				int HoveredButton = -1;
+				int HoveredTrackFrame = -1;
+				int HoveredTrackX = 0;
 			};
 
 			InteractionState Interaction;
@@ -442,6 +444,32 @@ namespace ReplaySystem
 				DrawRect(handle, ColorPanelEdge());
 			}
 
+			void DrawHoveredFrame(const PanelLayout& layout)
+			{
+				if (Interaction.HoveredTrackFrame < 0)
+					return;
+
+				wchar_t text[32] = { 0 };
+				swprintf_s(text, L"Frame %d", Interaction.HoveredTrackFrame);
+
+				constexpr int TooltipWidth = 108;
+				constexpr int TooltipHeight = 16;
+				const int minX = layout.Panel.X;
+				const int maxX = layout.Panel.X + layout.Panel.Width - TooltipWidth;
+				const int tooltipX = std::clamp(Interaction.HoveredTrackX - TooltipWidth / 2, minX, maxX);
+				const int tooltipY = std::max(DSurface::ViewBounds.Y,
+					layout.Panel.Y - TooltipHeight - 5);
+				const RectangleStruct tooltip = { tooltipX, tooltipY, TooltipWidth, TooltipHeight };
+
+				FillRectTranslucent(tooltip, PanelFill(), 90);
+				DrawRect(tooltip, ColorTrackEdge());
+
+				RectangleStruct bounds = DSurface::Composite->GetRect();
+				Point2D location = { tooltip.X + 4, tooltip.Y };
+				DSurface::Composite->DrawText(text, &bounds, &location, ColorScrub(), 0,
+					TextPrintType::Point6 | TextPrintType::FullShadow);
+			}
+
 #pragma endregion Panel drawing
 		}
 
@@ -456,6 +484,10 @@ namespace ReplaySystem
 				return false;
 			}
 
+			const bool overTrack = Contains(TrackHitArea(layout), mouseX, mouseY);
+			Interaction.HoveredTrackFrame = overTrack ? FrameAtTrackPosition(layout, mouseX) : -1;
+			Interaction.HoveredTrackX = mouseX;
+
 			// A press that landed on the panel keeps the mouse until it is let go, wherever the
 			// pointer has wandered to since: a drag off the end of the bar still belongs to the bar,
 			// and a press slid off a button still has to be cancelled rather than left half-done.
@@ -467,6 +499,7 @@ namespace ReplaySystem
 				// not mistaken for a press on it.
 				Interaction.LeftDownLastFrame = leftDown;
 				Interaction.HoveredButton = -1;
+				Interaction.HoveredTrackFrame = -1;
 				return false;
 			}
 
@@ -531,6 +564,7 @@ namespace ReplaySystem
 			Interaction.PressedButton = -1;
 			Interaction.DraggingHandle = false;
 			Interaction.HoveredButton = -1;
+			Interaction.HoveredTrackFrame = -1;
 			Interaction.LeftDownLastFrame = IsLeftButtonDown();
 		}
 
@@ -574,6 +608,7 @@ namespace ReplaySystem
 				Seek::IsSeeking() ? ColorScrub() : ColorTextDim());
 
 			DrawTrack(layout);
+			DrawHoveredFrame(layout);
 		}
 	}
 }

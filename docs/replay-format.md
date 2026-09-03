@@ -723,7 +723,7 @@ let it play through again. The log names the address.
 
 ## Playback controls
 
-Three `CommandClass` commands, registered from `Init_Commands` (0x533066) and implemented in
+Replay `CommandClass` commands, registered from `Init_Commands` (0x533066) and implemented in
 `Replay/ReplayControls.{h,cpp}`. They show up in the in-game keyboard options under a `Replay`
 category and are bound from there, or by hand in `KEYBOARDMD.INI`:
 
@@ -732,6 +732,10 @@ category and are bound from there, or by hand in `KEYBOARDMD.INI`:
 ReplayTogglePause=48    ; '0'
 ReplaySpeedUp=187       ; VK_OEM_PLUS, the '='/'+' key
 ReplaySpeedDown=189     ; VK_OEM_MINUS, the '-' key
+ReplayToggleControlBar=72       ; 'H'
+ReplayToggleViewportLock=86     ; 'V'
+ReplayToggleSelection=85        ; 'U'
+ReplayToggleDiagnostics=68      ; 'D'
 ```
 
 They ship unbound on purpose. `Init_Commands` runs once per process rather than once per session, so
@@ -754,6 +758,25 @@ and nothing breaks:
 | `TXT_REPLAY_SPEED_UP_DESC` | Plays the replay back faster, past the speed a live game allows. |
 | `TXT_REPLAY_SLOW_DOWN` | Replay: Slow Down |
 | `TXT_REPLAY_SLOW_DOWN_DESC` | Plays the replay back slower. |
+| `TXT_REPLAY_STEP_FRAME` | Replay: Advance One Frame |
+| `TXT_REPLAY_STEP_FRAME_DESC` | Runs a single frame and freezes again. Pauses playback first if it is running. |
+| `TXT_REPLAY_SEEK_BACK` | Replay: Jump Back |
+| `TXT_REPLAY_SEEK_BACK_DESC` | Jumps ten seconds back, restarting from the nearest keyframe. |
+| `TXT_REPLAY_SEEK_FORWARD` | Replay: Jump Forward |
+| `TXT_REPLAY_SEEK_FORWARD_DESC` | Jumps ten seconds forward, running the frames in between without drawing them. |
+| `TXT_REPLAY_CONTROL_BAR` | Replay: Show/Hide Controls |
+| `TXT_REPLAY_CONTROL_BAR_DESC` | Shows or hides the on-screen playback controls. |
+| `TXT_REPLAY_VIEWPORT_LOCK` | Replay: Lock/Unlock Viewport |
+| `TXT_REPLAY_VIEWPORT_LOCK_DESC` | Toggles following the viewport recorded in the replay. |
+| `TXT_REPLAY_SELECTION` | Replay: Follow/Free Unit Selection |
+| `TXT_REPLAY_SELECTION_DESC` | Toggles reproducing the unit selection recorded in the replay. |
+| `TXT_REPLAY_DIAGNOSTICS` | Replay: Enable/Disable Diagnostics |
+| `TXT_REPLAY_DIAGNOSTICS_DESC` | Toggles expensive divergence diagnostics and starts a fresh capture window when enabled. |
+
+The numeric assignments above are examples, not built-in defaults. Diagnostics can be enabled in
+the middle of playback. Enabling it clears the samples retained by an earlier diagnostic window,
+so a useful workflow is to leave it off while seeking near a known frame, turn it on, play past the
+suspect frame, then seek back through that newly captured window while leaving it on.
 
 ### Speed
 

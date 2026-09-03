@@ -1330,8 +1330,7 @@ namespace ReplaySystem
 			// unless ReplayDiagnostics asks for them.
 			bool DiagnosticsWanted()
 			{
-				const auto* const pConfig = GetConfig();
-				return pConfig && pConfig->ReplayDiagnostics;
+				return ReplayState.DiagnosticsEnabled;
 			}
 
 			// The watches used to fall silent after a single report, which cost a round of this: an inert
@@ -5586,11 +5585,7 @@ namespace ReplaySystem
 
 		void OnPlaybackStarted()
 		{
-			ResetObjectWatch();
-			ResetCellWatch();
-			ResetLayerWatch();
-			ResetBulletWatch();
-			ResetWatchMemory();
+			ResetDiagnostics();
 			ResetDiagnosticMemory();
 			State = SeekState {};
 
@@ -5617,13 +5612,18 @@ namespace ReplaySystem
 			if (State.Seeking)
 				VocAllowed() = State.VocAllowedBeforeSeek;
 
+			ResetDiagnostics();
+			ResetDiagnosticMemory();
+			State = SeekState {};
+		}
+
+		void ResetDiagnostics()
+		{
 			ResetObjectWatch();
 			ResetCellWatch();
 			ResetLayerWatch();
 			ResetBulletWatch();
 			ResetWatchMemory();
-			ResetDiagnosticMemory();
-			State = SeekState {};
 		}
 
 		void ServiceFrameStart()

@@ -50,6 +50,10 @@ namespace ReplaySystem
 		// Deletes every keyframe written for this playback.
 		void OnPlaybackStopped();
 
+		// Clears samples retained by the expensive divergence watches without touching keyframes
+		// or an in-progress seek. Used when starting a fresh mid-replay diagnostic window.
+		void ResetDiagnostics();
+
 		// Top of the frame, before anything has run: finishes a seek that asked for a load, and
 		// takes this frame's keyframe if one is due. Both need a whole, quiescent game state, so
 		// this is the only point either happens.
