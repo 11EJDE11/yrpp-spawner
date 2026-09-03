@@ -42,6 +42,7 @@
 #include <OverlayClass.h>
 #include <RulesClass.h>
 #include <SessionClass.h>
+#include <TagClass.h>
 #include <TechnoClass.h>
 #include <TacticalClass.h>
 #include <Timer.h>
@@ -1218,11 +1219,13 @@ namespace ReplaySystem
 			const bool hasSideChannelEvents = !sideChannelEvents.empty();
 			const bool hasGameCRC = capture.HasGameCRC;
 
+			const bool hasSelectionTriggers = !capture.SelectionTriggerObjectIDs.empty();
+
 			// HasGameSpeed is deliberately not part of this test. A speed change alone does not earn
 			// a frame record; LastRecordedGameSpeed is only updated once one is written, so the
 			// change rides along with the next frame that has something else to say.
 			if (eventsThisFrame == 0 && !tacticalPosChanged && !selectionChanged && !hasSideChannelEvents
-				&& !hasGameCRC && !capture.HasCensus)
+				&& !hasGameCRC && !capture.HasCensus && !hasSelectionTriggers)
 			{
 				return true;
 			}
@@ -1246,6 +1249,8 @@ namespace ReplaySystem
 				header.Flags |= FrameRecordFlag_RandomState;
 			if (capture.HasGameSpeed)
 				header.Flags |= FrameRecordFlag_GameSpeed;
+			if (hasSelectionTriggers)
+				header.Flags |= FrameRecordFlag_SelectionTriggers;
 
 			if (!WriteRaw(&header, sizeof(header)))
 				return false;
@@ -1303,6 +1308,17 @@ namespace ReplaySystem
 					return false;
 
 				ReplayState.LastRecordedGameSpeed = capture.GameSpeed;
+			}
+
+			if (hasSelectionTriggers)
+			{
+				const auto count = static_cast<int32_t>(capture.SelectionTriggerObjectIDs.size());
+				if (!WriteRaw(&count, sizeof(count))
+					|| !WriteRaw(capture.SelectionTriggerObjectIDs.data(),
+						capture.SelectionTriggerObjectIDs.size() * sizeof(uint32_t)))
+				{
+					return false;
+				}
 			}
 
 			ReplayState.HasLastWrittenFrameState = true;
@@ -1557,6 +1573,23 @@ namespace ReplaySystem
 				return false;
 			}
 
+			if ((record.Flags & FrameRecordFlag_SelectionTriggers) != 0u)
+			{
+				int32_t triggerCount = 0;
+				if (!ReadRaw(&triggerCount, sizeof(triggerCount)))
+					return false;
+
+				if (triggerCount <= 0 || triggerCount > MaxSelectionTriggersPerFrame)
+					return false;
+
+				record.SelectionTriggerObjectIDs.resize(static_cast<size_t>(triggerCount), 0u);
+				if (!ReadRaw(record.SelectionTriggerObjectIDs.data(),
+					record.SelectionTriggerObjectIDs.size() * sizeof(uint32_t)))
+				{
+					return false;
+				}
+			}
+
 			if ((record.Flags & FrameRecordFlag_Extensions) != 0u)
 			{
 				uint32_t extensionBytes = 0;
@@ -1705,6 +1738,83 @@ namespace ReplaySystem
 				if (it != objectByUniqueID.end())
 					it->second->Select();
 			}
+		}
+
+		// Selection is local input and playback is free to ignore it - the viewer can turn the
+		// recorded selection off, watch another player's screen, or click on things themselves -
+		// with one exception. TechnoClass::Select raises TriggerEvent::SelectedByPlayer on the
+		// object's tag, and a map is free to hang the simulation on that: RA2's own Boot Camp
+		// creates a team, plays the pointer animation and destroys three triggers the moment the
+		// player selects the first GI. Leaving that to fall out of the viewer's selection made it
+		// depend on a cosmetic toggle, and made the spring a frame late even when it was on,
+		// because the recorded selection is sampled before the input pass that produces it.
+		//
+		// So the spring is recorded in its own right and replayed here, from the same point in the
+		// frame the recording's own click reached: before this frame's LogicClass::AI. The hook on
+		// TechnoClass::Select suppresses the engine's spring for the whole of playback, so these
+		// are the only ones that happen and a viewer clicking around cannot add to them.
+		void SpringRecordedSelectionTriggers(const PlaybackFrameRecord& frameRecord)
+		{
+			for (const auto uniqueID : frameRecord.SelectionTriggerObjectIDs)
+			{
+				// A scan of the object array per spring, which is only ever a handful on the rare
+				// frame that carries any at all.
+				for (int i = 0; i < AbstractClass::Array.Count; ++i)
+				{
+					AbstractClass* pAbs = AbstractClass::Array.GetItem(i);
+					if (!pAbs || static_cast<uint32_t>(pAbs->UniqueID) != uniqueID)
+						continue;
+
+					auto* const pTechno = abstract_cast<TechnoClass*>(pAbs);
+					if (pTechno && pTechno->AttachedTag)
+					{
+						// Rare enough to log unconditionally - it takes a click on a tagged object,
+						// and it is the first thing to look at when a campaign replay diverges.
+						Debug::Log("[Replay] Frame %d: raising SelectedByPlayer on %s, recorded "
+							"unique ID %u.\n", static_cast<int>(Unsorted::CurrentFrame),
+							DescribeAbstract(pTechno), uniqueID);
+
+						// The arguments TechnoClass::Select uses, CELL_NONE included: an empty cell
+						// is what tells TagClass::Spring not to detach a cell tag as well.
+						pTechno->AttachedTag->RaiseEvent(TriggerEvent::SelectedByPlayer, pTechno,
+							CellStruct { 0, 0 }, false, nullptr);
+					}
+					else
+					{
+						Debug::Log("[Replay] Frame %d: the recording raised SelectedByPlayer on "
+							"unique ID %u, which playback has no tagged techno for.\n",
+							static_cast<int>(Unsorted::CurrentFrame), uniqueID);
+					}
+
+					break;
+				}
+			}
+		}
+
+		void RecordSelectionTriggerSpring(TechnoClass* pTechno)
+		{
+			if (!ReplayState.Recording || !pTechno)
+				return;
+
+			const int frameNumber = Unsorted::CurrentFrame;
+
+			// The main loop's capture for this frame has already been made by the time input runs,
+			// so this appends to it. It creates the entry if input somehow got in first.
+			if (ReplayState.PendingFrameStates.empty()
+				|| ReplayState.PendingFrameStates.back().FrameNumber != frameNumber)
+			{
+				ReplayState.PendingFrameStates.emplace_back();
+				ReplayState.PendingFrameStates.back().FrameNumber = frameNumber;
+			}
+
+			auto& ids = ReplayState.PendingFrameStates.back().SelectionTriggerObjectIDs;
+			if (ids.size() >= static_cast<size_t>(MaxSelectionTriggersPerFrame))
+				return;
+
+			Debug::Log("[Replay] Frame %d: recording SelectedByPlayer on %s, unique ID %u.\n",
+				frameNumber, DescribeAbstract(pTechno), static_cast<uint32_t>(pTechno->UniqueID));
+
+			ids.push_back(static_cast<uint32_t>(pTechno->UniqueID));
 		}
 
 		void ApplyCurrentPlaybackSelection()
@@ -1881,6 +1991,16 @@ namespace ReplaySystem
 		// for thousands of frames after a divergence has happened.
 		void CheckObjectCensusForCurrentFrame()
 		{
+			struct CensusObjectIdentity
+			{
+				uint32_t UniqueID;
+				AbstractType Kind;
+				char TypeID[64];
+			};
+
+			static int previousFrame = -1;
+			static std::vector<CensusObjectIdentity> previousObjects;
+
 			if (!ReplayState.Playback || !ReplayState.HasExpectedCensus)
 				return;
 
@@ -1888,9 +2008,57 @@ namespace ReplaySystem
 
 			const FrameObjectCensus census = CurrentObjectCensus();
 			const FrameObjectCensus& expected = ReplayState.ExpectedCensus;
+
+			std::vector<CensusObjectIdentity> currentObjects;
+			if (ReplayState.DiagnosticsEnabled)
+			{
+				currentObjects.reserve(static_cast<size_t>(std::max(AbstractClass::Array.Count, 0)));
+				for (int i = 0; i < AbstractClass::Array.Count; ++i)
+				{
+					const auto* const pAbstract = AbstractClass::Array.Items[i];
+					if (!pAbstract)
+						continue;
+
+					CensusObjectIdentity identity {};
+					identity.UniqueID = static_cast<uint32_t>(pAbstract->UniqueID);
+					identity.Kind = pAbstract->WhatAmI();
+
+					switch (identity.Kind)
+					{
+					case AbstractType::Aircraft:
+					case AbstractType::Unit:
+					case AbstractType::Infantry:
+					case AbstractType::Building:
+					case AbstractType::Anim:
+					case AbstractType::Bullet:
+					case AbstractType::Particle:
+					case AbstractType::ParticleSystem:
+					case AbstractType::VoxelAnim:
+					case AbstractType::Terrain:
+					case AbstractType::Smudge:
+					case AbstractType::Overlay:
+						if (const auto* const pType =
+							static_cast<const ObjectClass*>(pAbstract)->GetType())
+						{
+							strncpy_s(identity.TypeID, pType->ID, _TRUNCATE);
+						}
+						break;
+					default:
+						break;
+					}
+
+					currentObjects.push_back(identity);
+				}
+			}
+
 			if (census.AbstractCount == expected.AbstractCount
 				&& census.ScenarioUniqueID == expected.ScenarioUniqueID)
 			{
+				if (ReplayState.DiagnosticsEnabled)
+				{
+					previousFrame = static_cast<int>(Unsorted::CurrentFrame);
+					previousObjects = std::move(currentObjects);
+				}
 				return;
 			}
 
@@ -1919,6 +2087,55 @@ namespace ReplaySystem
 				Unsorted::CurrentFrame,
 				census.AbstractCount, expected.AbstractCount,
 				census.ScenarioUniqueID, expected.ScenarioUniqueID);
+
+			// The last frame the two runs agreed on, whichever that was. Requiring it to be the
+			// frame immediately before this one looked safer and reported nothing at all: a frame
+			// the recording wrote no census for leaves the comparison a frame or more behind.
+			if (ReplayState.DiagnosticsEnabled && previousFrame >= 0)
+			{
+				for (const auto& previous : previousObjects)
+				{
+					const bool stillPresent = std::any_of(currentObjects.begin(), currentObjects.end(),
+						[&previous](const CensusObjectIdentity& current)
+						{
+							return current.UniqueID == previous.UniqueID;
+						});
+					if (!stillPresent)
+					{
+						if (previous.TypeID[0])
+						{
+							Debug::Log("[Replay]   playback lost unique ID %u since frame %d: abstract "
+								"type %u, type [%s].\n", previous.UniqueID, previousFrame,
+								static_cast<unsigned int>(previous.Kind), previous.TypeID);
+						}
+						else
+						{
+							Debug::Log("[Replay]   playback lost unique ID %u since frame %d: abstract "
+								"type %u.\n", previous.UniqueID, previousFrame,
+								static_cast<unsigned int>(previous.Kind));
+						}
+					}
+				}
+
+				// And the other direction. Two runs can hold different sets at the same count, and
+				// an object playback has that the recording did not is as much of a lead as one it
+				// lost.
+				for (const auto& current : currentObjects)
+				{
+					const bool wasPresent = std::any_of(previousObjects.begin(), previousObjects.end(),
+						[&current](const CensusObjectIdentity& previous)
+						{
+							return previous.UniqueID == current.UniqueID;
+						});
+					if (!wasPresent)
+					{
+						Debug::Log("[Replay]   playback gained unique ID %u since frame %d: abstract "
+							"type %u, type [%s].\n", current.UniqueID, previousFrame,
+							static_cast<unsigned int>(current.Kind),
+							current.TypeID[0] ? current.TypeID : "-");
+					}
+				}
+			}
 
 			// Two counts say the runs are different games. They do not say what the difference is,
 			// and that is the entire question. The counter only ever goes up, so every object this
@@ -3388,6 +3605,11 @@ namespace ReplaySystem
 				ReplayState.HasLockedSelection = true;
 				ApplyPlaybackSelection(frameRecord);
 			}
+
+			// After the selection, whose own springs are suppressed, and before this frame's
+			// LogicClass::AI - which is where the recording's click sprang them too.
+			if ((frameRecord.Flags & FrameRecordFlag_SelectionTriggers) != 0u)
+				SpringRecordedSelectionTriggers(frameRecord);
 
 			if ((frameRecord.Flags & FrameRecordFlag_SideChannel) != 0u)
 			{

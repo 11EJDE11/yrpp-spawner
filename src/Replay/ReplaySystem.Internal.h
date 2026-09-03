@@ -57,6 +57,7 @@ namespace ReplaySystem
 			Point2D TacticalPos = { 0, 0 };
 			int32_t SelectedObjectCount = 0;
 			std::vector<uint32_t> SelectedObjectIDs;
+			std::vector<uint32_t> SelectionTriggerObjectIDs;
 			std::vector<SideChannelRecord> SideChannelEvents;
 			uint32_t GameCRC = 0;
 			FrameObjectCensus Census { 0, 0 };
@@ -72,6 +73,9 @@ namespace ReplaySystem
 			int FrameNumber = 0;
 			Point2D TacticalPos { 0, 0 };
 			std::vector<uint32_t> SelectedObjectIDs;
+			// Appended to during the frame rather than sampled once, because the spring happens in
+			// the input pass after this capture is made and before Queue_AI writes it out.
+			std::vector<uint32_t> SelectionTriggerObjectIDs;
 			// Filled in later than the rest of the capture: the engine has not computed the hash
 			// when this struct is created. See CaptureGameCRCForCurrentFrame.
 			uint32_t GameCRC = 0;
@@ -277,6 +281,13 @@ namespace ReplaySystem
 		// Applies the latest sticky viewer state immediately after its live toggle is enabled.
 		void ApplyLockedViewport();
 		void ApplyCurrentPlaybackSelection();
+		// Selecting a unit is local input, except that TechnoClass::Select raises
+		// TriggerEvent::SelectedByPlayer on the object's tag, and a map can hang the simulation on
+		// that - RA2's own Boot Camp does. So the spring is recorded and replayed in its own right
+		// rather than left to fall out of whatever the viewer's selection happens to be. See the
+		// hook on TechnoClass::Select in ReplaySystem.Hook.cpp.
+		void RecordSelectionTriggerSpring(TechnoClass* pTechno);
+		void SpringRecordedSelectionTriggers(const PlaybackFrameRecord& frameRecord);
 		// Names the object behind the next draw, for call sites where knowing it matters.
 		void SetRandomDrawContext(const TechnoClass* pTechno);
 		FrameObjectCensus CurrentObjectCensus();

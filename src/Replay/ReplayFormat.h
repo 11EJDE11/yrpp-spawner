@@ -67,7 +67,12 @@ namespace Replay
 		// draws from that randomiser, so a hash that differs while the objects match means the
 		// randomiser drifted rather than the simulation - two very different bugs. A FrameRandomState
 		// follows.
-		FrameRecordFlag_RandomState = 1u << 7
+		FrameRecordFlag_RandomState = 1u << 7,
+		// Which objects had TriggerEvent::SelectedByPlayer raised on their tag this frame, by
+		// unique ID. Selecting a unit is local input everywhere except here: TechnoClass::Select
+		// springs that event, and a campaign trigger can hang the simulation on it. An int32 count
+		// and that many uint32 unique IDs follow. See SpringRecordedSelectionTriggers.
+		FrameRecordFlag_SelectionTriggers = 1u << 8
 	};
 
 	constexpr uint32_t KnownFrameRecordFlags = FrameRecordFlag_TacticalPos
@@ -77,9 +82,15 @@ namespace Replay
 		| FrameRecordFlag_Extensions
 		| FrameRecordFlag_ObjectCensus
 		| FrameRecordFlag_GameSpeed
-		| FrameRecordFlag_RandomState;
+		| FrameRecordFlag_RandomState
+		| FrameRecordFlag_SelectionTriggers;
 
 	constexpr uint32_t MaxFrameExtensionBytes = 1u << 20;
+
+	// A frame's worth of selection springs. One click selects one group, and the engine's own
+	// selection cap is far below this; the bound is here so playback parsing cannot be handed an
+	// arbitrary allocation by a corrupt file.
+	constexpr int32_t MaxSelectionTriggersPerFrame = 4096;
 
 	// Non-deterministic network and UI events, recorded separately from EventClass::DoList.
 	enum class SideChannelEventType : uint8_t

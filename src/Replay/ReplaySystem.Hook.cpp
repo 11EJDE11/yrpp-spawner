@@ -73,6 +73,39 @@ static const EventClass* EventFromScaledDoListSlot(unsigned int scaledSlot)
 	return &EventClass::DoList.GetArray()[scaledSlot / ScaleFactor];
 }
 
+// TechnoClass::Select, at the branch that raises TriggerEvent::SelectedByPlayer on the object's
+// tag. It is reached only when the object has a tag and the selection itself succeeded, which is
+// exactly the condition the recording has to reproduce.
+//
+// Selecting a unit is local input everywhere but here. This one line is simulation: RA2's own Boot
+// Camp hangs a team, the pointer animation and three trigger deletions on the player selecting the
+// first GI, and Compute_Game_CRC sees the result within a few frames. Leaving playback to spring it
+// as a side effect of restoring the recorded selection made it depend on a viewer preference
+// (ReplaySelectUnits, and watching another player's screen turns it off outright), and left it a
+// frame late even when it was on, because the selection is sampled at the top of the main loop and
+// the click that changes it lands in the input pass just after.
+//
+// So the recording notes each spring, and RestoreFrameState raises exactly those at the top of the
+// frame that recorded them - still ahead of that frame's LogicClass::AI, which is where the
+// recording's own click sprang them. The engine's call is skipped for the whole of playback so
+// nothing else can spring one: not the recorded selection being re-applied, and not a viewer
+// clicking around while they watch.
+DEFINE_HOOK(0x6FBFD7, TechnoClass_Select_ReplaySelectionTrigger, 0x5)
+{
+	enum { SkipSpring = 0x6FBFE9 };
+
+	if (ReplayState.Playback)
+		return SkipSpring;
+
+	if (ReplayState.Recording)
+	{
+		GET(TechnoClass* const, pThis, ESI);
+		RecordSelectionTriggerSpring(pThis);
+	}
+
+	return 0;
+}
+
 // FootClass::Active_Click_With makes a move flash animation where the player clicked. There is no
 // click on playback, so skip it while recording too, or the two diverge. Multiplayer does the same.
 DEFINE_HOOK(0x4D7EB5, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x5)
@@ -1251,12 +1284,59 @@ DEFINE_HOOK(0x533066, Init_Commands_RegisterReplayCommands, 0x6)
 // Pause replay simulation without blocking input or menus. The related hooks stop event processing,
 // logic and the frame counter together so the current frame remains unchanged.
 
+namespace
+{
+	HouseClass* CampaignSpectatorObserver = nullptr;
+
+	void HideCampaignSpectatorObserverFromSimulation()
+	{
+		// A campaign has no separate observer house, so spectator playback makes the actual player
+		// HouseClass::Observer. That is harmless to the renderer, but simulation extensions also use
+		// HouseClass::IsObserver(): Ares' superweapon ownership update excludes observers and removes
+		// every super from this house. A campaign trigger which subsequently runs SetSuperWeaponCharge
+		// then does nothing because SuperClass::IsPresent is false. Allied mission 3 does exactly that
+		// at frame 15, leaving GAWEAT's charge animation different from the recording.
+		//
+		// Keep the observer identity for the sidebar and rendering, but present the same house state as
+		// the recording while LogicClass::AI performs the deterministic simulation tick.
+		if (ReplaySystem::IsSpectatorPlayback()
+			&& SessionClass::IsCampaign()
+			&& HouseClass::Observer
+			&& HouseClass::Observer == HouseClass::CurrentPlayer)
+		{
+			CampaignSpectatorObserver = HouseClass::Observer;
+			HouseClass::Observer = nullptr;
+		}
+	}
+
+	void RestoreCampaignSpectatorObserverAfterSimulation()
+	{
+		if (CampaignSpectatorObserver)
+		{
+			HouseClass::Observer = CampaignSpectatorObserver;
+			CampaignSpectatorObserver = nullptr;
+		}
+	}
+}
+
 // Holds the logic tick.
 DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
 {
 	enum { SkipLogicAI = 0x55DCA3 };
 
-	return ReplaySystem::Controls::IsPlaybackPaused() ? SkipLogicAI : 0;
+	if (ReplaySystem::Controls::IsPlaybackPaused())
+		return SkipLogicAI;
+
+	HideCampaignSpectatorObserverFromSimulation();
+	return 0;
+}
+
+// The instruction immediately after LogicClass::AI. Restore the observer before input, sidebar AI
+// and rendering run so spectator playback keeps the complete observer interface.
+DEFINE_HOOK(0x55DCA3, MainLoop_CampaignSpectator_RestoreObserverAfterLogicAI, 0x5)
+{
+	RestoreCampaignSpectatorObserverAfterSimulation();
+	return 0;
 }
 
 // Holds the event pump, and with it the recorded events for the frame.
