@@ -2199,6 +2199,12 @@ namespace ReplaySystem
 		{
 			uint32_t Caller;
 			int32_t Cursor;
+			// The range asked for, which the cursor alone cannot stand in for. Two draws at the same
+			// cursor from the same caller still differ if one asked for 0..99 and the other 0..3, and
+			// the ranged form loops until the value fits - so the range decides how far the table
+			// moves as well. -1/-1 for the plain form, which takes no range.
+			int32_t RangeMin;
+			int32_t RangeMax;
 			// Which object was asking, where the call site bothers to say. Tells a same-object-at-a
 			// -different-time difference from a different-object-entirely one, which need looking at in
 			// completely different places.
@@ -2243,6 +2249,15 @@ namespace ReplaySystem
 		const std::vector<RandomDrawSite>* TracedRandomReference = nullptr;
 		size_t TracedRandomCompareIndex = 0;
 		bool TracedRandomMismatchReported = false;
+		// The replayed frame's own draws. The reference list is the first pass's, and the mismatch
+		// fires on the draw that differs - at which point the frame has not finished, so the draws
+		// after it are not known yet. Keeping them and printing both sequences once the frame has
+		// closed is what turns "caller A, then caller B" into "this block ran and that one did not",
+		// which is the whole question when two extensions rewrite the same engine function.
+		std::vector<RandomDrawSite> ReplayedFrameDraws;
+		// The frame a mismatch was reported for, so only that frame's sequences are printed.
+		int TracedRandomMismatchFrame = -1;
+		constexpr size_t MaxPrintedFrameDraws = 48;
 
 		void ResetRandomDrawTrace()
 		{
@@ -2253,6 +2268,8 @@ namespace ReplaySystem
 			TracedRandomReference = nullptr;
 			TracedRandomCompareIndex = 0;
 			TracedRandomMismatchReported = false;
+			TracedRandomMismatchFrame = -1;
+			ReplayedFrameDraws.clear();
 			PendingRandomDrawContext = 0;
 			PendingRandomDrawAsker = RandomDrawAsker {};
 			CurrentRandomDrawAsker = RandomDrawAsker {};
@@ -2296,17 +2313,18 @@ namespace ReplaySystem
 				return;
 
 			TracedRandomMismatchReported = true;
+			TracedRandomMismatchFrame = frame;
 			char beforeCaller[MAX_PATH + 32] = { 0 };
 			char nowCaller[MAX_PATH + 32] = { 0 };
 
 			Debug::Log("[Replay] Frame %d used the randomiser differently the second time round: %s at "
-				"draw %u. First pass: caller %s, cursor %d, object %u. After the keyframe load: "
-				"caller %s, cursor %d, object %u.\n",
+				"draw %u. First pass: caller %s, cursor %d, range %d..%d, object %u. After the "
+				"keyframe load: caller %s, cursor %d, range %d..%d, object %u.\n",
 				frame, what, static_cast<unsigned int>(drawIndex + 1),
 				DescribeCodeAddress(before.Caller, beforeCaller, sizeof(beforeCaller)),
-				before.Cursor, before.Context,
+				before.Cursor, before.RangeMin, before.RangeMax, before.Context,
 				DescribeCodeAddress(now.Caller, nowCaller, sizeof(nowCaller)),
-				now.Cursor, now.Context);
+				now.Cursor, now.RangeMin, now.RangeMax, now.Context);
 
 			// The gate on this call is Frame - TargetingTimer.StartTime >= TimeLeft, so those two
 			// numbers say whether the object was scheduled to look for a target on this frame at all.
@@ -2316,6 +2334,46 @@ namespace ReplaySystem
 					"started frame %d with %d to run, on frame %d.\n",
 					asker.Object, asker.Mission, asker.Target, asker.TimerStart, asker.TimerLeft,
 					static_cast<int>(Unsorted::CurrentFrame));
+			}
+		}
+
+		// Both passes' draws for the frame that reported a mismatch, printed once that frame has
+		// closed and its second sequence is complete. The first differing draw names two callers and
+		// stops; what actually settles which code path ran is the run of draws either side of it.
+		void PrintMismatchedFrameDrawSequences()
+		{
+			if (TracedRandomMismatchFrame != TracedRandomFrame || !TracedRandomReference)
+				return;
+
+			const auto& before = *TracedRandomReference;
+			const size_t beforeCount = std::min(before.size(), MaxPrintedFrameDraws);
+			const size_t nowCount = std::min(ReplayedFrameDraws.size(), MaxPrintedFrameDraws);
+
+			Debug::Log("[Replay] Frame %d drew %u times on the first pass and %u after the load; "
+				"the sequences were:\n", TracedRandomFrame,
+				static_cast<unsigned int>(before.size()),
+				static_cast<unsigned int>(ReplayedFrameDraws.size()));
+
+			char caller[MAX_PATH + 32] = { 0 };
+			for (size_t i = 0; i < std::max(beforeCount, nowCount); ++i)
+			{
+				if (i < beforeCount)
+				{
+					const auto& site = before[i];
+					Debug::Log("[Replay]   first pass  draw %2u: %s, cursor %d, range %d..%d.\n",
+						static_cast<unsigned int>(i + 1),
+						DescribeCodeAddress(site.Caller, caller, sizeof(caller)),
+						site.Cursor, site.RangeMin, site.RangeMax);
+				}
+
+				if (i < nowCount)
+				{
+					const auto& site = ReplayedFrameDraws[i];
+					Debug::Log("[Replay]   after load  draw %2u: %s, cursor %d, range %d..%d.\n",
+						static_cast<unsigned int>(i + 1),
+						DescribeCodeAddress(site.Caller, caller, sizeof(caller)),
+						site.Cursor, site.RangeMin, site.RangeMax);
+				}
 			}
 		}
 
@@ -2329,13 +2387,16 @@ namespace ReplaySystem
 			{
 				ReportRandomDrawMismatch("it stopped drawing early", TracedRandomFrame,
 					TracedRandomCompareIndex, (*TracedRandomReference)[TracedRandomCompareIndex],
-					RandomDrawSite { 0u, 0 }, RandomDrawAsker {});
+					RandomDrawSite { 0u, 0, -1, -1 }, RandomDrawAsker {});
 			}
+
+			PrintMismatchedFrameDrawSequences();
 
 			TracedRandomFrame = frame;
 			TracedRandomTarget = nullptr;
 			TracedRandomReference = nullptr;
 			TracedRandomCompareIndex = 0;
+			ReplayedFrameDraws.clear();
 
 			const auto it = RandomDrawsByFrame.find(frame);
 			if (it != RandomDrawsByFrame.end())
@@ -2362,7 +2423,7 @@ namespace ReplaySystem
 				: RandomDrawAsker {};
 		}
 
-		void TraceRandomDraw(const void* randomiser, const void* caller)
+		void TraceRandomDraw(const void* randomiser, const void* caller, int rangeMin, int rangeMax)
 		{
 			if (!DiagnosticsWanted())
 				return;
@@ -2395,6 +2456,8 @@ namespace ReplaySystem
 			const RandomDrawSite site {
 				reinterpret_cast<uint32_t>(caller),
 				ScenarioClass::Instance->Random.Next1,
+				rangeMin,
+				rangeMax,
 				PendingRandomDrawContext
 			};
 
@@ -2404,10 +2467,13 @@ namespace ReplaySystem
 
 			if (TracedRandomReference)
 			{
+				if (ReplayedFrameDraws.size() < MaxPrintedFrameDraws)
+					ReplayedFrameDraws.push_back(site);
+
 				if (TracedRandomCompareIndex >= TracedRandomReference->size())
 				{
 					ReportRandomDrawMismatch("it drew more times than before", frame,
-						TracedRandomCompareIndex, RandomDrawSite { 0u, 0 }, site,
+						TracedRandomCompareIndex, RandomDrawSite { 0u, 0, -1, -1 }, site,
 						CurrentRandomDrawAsker);
 				}
 				else
@@ -2421,6 +2487,11 @@ namespace ReplaySystem
 					else if (before.Cursor != site.Cursor)
 					{
 						ReportRandomDrawMismatch("the same caller found the randomiser elsewhere", frame,
+							TracedRandomCompareIndex, before, site, CurrentRandomDrawAsker);
+					}
+					else if (before.RangeMin != site.RangeMin || before.RangeMax != site.RangeMax)
+					{
+						ReportRandomDrawMismatch("the same caller asked for a different range", frame,
 							TracedRandomCompareIndex, before, site, CurrentRandomDrawAsker);
 					}
 				}

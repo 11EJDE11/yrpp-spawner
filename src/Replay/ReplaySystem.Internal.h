@@ -236,7 +236,7 @@ namespace ReplaySystem
 		// and checks a frame replayed after a seek against what it drew the first time round. The
 		// first difference names the code whose state the keyframe load did not carry across. Always
 		// on during playback; see docs/replay-format.md.
-		void TraceRandomDraw(const void* randomiser, const void* caller);
+		void TraceRandomDraw(const void* randomiser, const void* caller, int rangeMin, int rangeMax);
 		void ResetRandomDrawTrace();
 		// The same trick for mission changes, which move an object's behaviour without touching
 		// the randomiser and so are invisible to the draw trace.

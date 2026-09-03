@@ -172,6 +172,82 @@ namespace ReplaySystem
 				int32_t RepairTimerLeft;
 			};
 
+			// The team state both production rewrites read before they decide anything. Their first
+			// loop walks TeamClass::Array and, for every team that is neither a satisfied reinforcement
+			// nor already active-and-been, counts its missing task force members and remembers the
+			// earliest CreationFrame per unit type. Those two arrays are what the FillEarliestTeamProbability
+			// roll then chooses between - and whether there is anything to choose between at all, which
+			// decides whether a second draw happens.
+			//
+			// The array's order is already restored with the other collections. Its contents are not
+			// checked at all, and these four flags plus the creation frame are the whole input.
+			struct TeamSnapshot
+			{
+				uint32_t Id;
+				uint32_t OwnerId;
+				uint32_t TypeIndex;
+				int32_t CreationFrame;
+				int32_t TotalObjects;
+				bool IsForcedActive;
+				bool IsHasBeen;
+				bool IsFullStrength;
+				bool IsUnderStrength;
+			};
+
+			// What the AI has already decided to build, and the factories that decision hangs off.
+			//
+			// Both Ares and Phobos replace the engine's production picker with the same rewrite -
+			// Ares in Ext/House/MacroHacks.h, Phobos in HouseExt::UpdateVehicleProduction, which
+			// says outright that it is "based on Ares' rewrite of 0x4FEA60". Each begins by asking
+			// whether the house already has a choice outstanding:
+			//
+			//     const bool skipGround = pThis->ProducingUnitTypeIndex != -1;
+			//
+			// and only rolls FillEarliestTeamProbability against the randomiser when it does not.
+			// So these four indices do not merely record a decision - they decide whether a draw
+			// happens at all. A keyframe that brings one of them back as -1 where it was set, or
+			// the other way round, moves the randomiser out of step on the first frame the house
+			// thinks about production, with nothing else visibly wrong.
+			//
+			// That is the shape the Boot Camp seek trace found: on the first pass Phobos drew at
+			// this point, and after the load Ares drew instead, at the same cursor.
+			struct HouseProductionSnapshot
+			{
+				uint32_t Id;
+				int32_t ProducingBuildingTypeIndex;
+				int32_t ProducingUnitTypeIndex;
+				int32_t ProducingInfantryTypeIndex;
+				int32_t ProducingAircraftTypeIndex;
+				// The primaries the indices are consumed by. A factory that comes back as a
+				// different object, or holding a different item, releases the index on a different
+				// frame even when the index itself survived.
+				uint32_t PrimaryForBuildings;
+				uint32_t PrimaryForVehicles;
+				uint32_t PrimaryForShips;
+				uint32_t PrimaryForInfantry;
+				uint32_t PrimaryForAircraft;
+				int32_t VehicleFactoryProgress;
+				uint32_t VehicleFactoryObject;
+				int32_t VehicleFactoryQueued;
+				// The whole gate on HouseExt::UpdateHarvesterProduction, which returns before any of
+				// the production rolls happen and quietly assigns ProducingUnitTypeIndex on its way
+				// out:
+				//
+				//     maxHarvesters = FindBuildable(BuildRefinery)
+				//         ? HarvestersPerRefinery[AIDifficulty] * pThis->CountResourceDestinations
+				//         : AISlaveMinerNumber[AIDifficulty];
+				//     if (IQLevel2 >= Rules->Harvester && !IsTiberiumShort && !IsControlledByHuman()
+				//         && CountResourceGatherers < maxHarvesters && TechLevel >= ...)
+				//
+				// Both counters are incrementally maintained tallies rather than anything derived on
+				// demand, which is the shape of state a load either carries or silently rebuilds.
+				int32_t CountResourceGatherers;
+				int32_t CountResourceDestinations;
+				int32_t TechLevel;
+				int32_t IQLevel2;
+				bool IsTiberiumShort;
+			};
+
 			constexpr uint32_t InvalidPlanningNode = UINT32_MAX;
 
 			struct PlanningMemberSnapshot
@@ -577,6 +653,8 @@ namespace ReplaySystem
 				std::array<unsigned char, sizeof(Randomizer)> Random {};
 				std::vector<TechnoSnapshot> Technos;
 				std::vector<HouseRepairSnapshot> HouseRepairs;
+				std::vector<HouseProductionSnapshot> HouseProduction;
+				std::vector<TeamSnapshot> Teams;
 				PlanningSnapshot Planning;
 				AresParticleSnapshot AresParticles;
 				TiberiumSnapshot Tiberium;
@@ -3394,6 +3472,196 @@ namespace ReplaySystem
 				}
 			}
 
+			void CaptureTeamSnapshots(std::vector<TeamSnapshot>& out)
+			{
+				out.clear();
+				out.reserve(static_cast<size_t>(std::max(TeamClass::Array.Count, 0)));
+				for (int i = 0; i < TeamClass::Array.Count; ++i)
+				{
+					const auto* const pTeam = TeamClass::Array.Items[i];
+					if (!pTeam)
+						continue;
+
+					out.push_back(TeamSnapshot {
+						UniqueIDOf(pTeam),
+						UniqueIDOf(pTeam->Owner),
+						pTeam->Type ? static_cast<uint32_t>(pTeam->Type->ArrayIndex) : UINT32_MAX,
+						pTeam->CreationFrame,
+						pTeam->TotalObjects,
+						pTeam->IsForcedActive,
+						pTeam->IsHasBeen,
+						pTeam->IsFullStrength,
+						pTeam->IsUnderStrength
+					});
+				}
+			}
+
+			void ReportTeamSnapshotDifferences(const Keyframe& keyframe)
+			{
+				std::vector<TeamSnapshot> current;
+				CaptureTeamSnapshots(current);
+
+				if (current.size() != keyframe.Teams.size())
+				{
+					Debug::Log("[Replay] Keyframe %d: %u teams came back from the load; it held %u.\n",
+						keyframe.Frame, static_cast<unsigned int>(current.size()),
+						static_cast<unsigned int>(keyframe.Teams.size()));
+				}
+
+				std::unordered_map<uint32_t, const TeamSnapshot*> byId;
+				byId.reserve(current.size());
+				for (const auto& now : current)
+					byId.emplace(now.Id, &now);
+
+				for (const auto& saved : keyframe.Teams)
+				{
+					const auto found = byId.find(saved.Id);
+					if (found == byId.end())
+					{
+						Debug::Log("[Replay] Keyframe %d: team %u (house %u) did not come back from "
+							"the load.\n", keyframe.Frame, saved.Id, saved.OwnerId);
+						continue;
+					}
+
+					const auto& now = *found->second;
+					if (now.OwnerId == saved.OwnerId
+						&& now.TypeIndex == saved.TypeIndex
+						&& now.CreationFrame == saved.CreationFrame
+						&& now.TotalObjects == saved.TotalObjects
+						&& now.IsForcedActive == saved.IsForcedActive
+						&& now.IsHasBeen == saved.IsHasBeen
+						&& now.IsFullStrength == saved.IsFullStrength
+						&& now.IsUnderStrength == saved.IsUnderStrength)
+					{
+						continue;
+					}
+
+					Debug::Log("[Replay] Keyframe %d: team %u (house %u, type %u) came back created "
+						"on frame %d with %d objects, forced %d has-been %d full %d under %d; it was "
+						"created on frame %d with %d objects, forced %d has-been %d full %d under %d.\n",
+						keyframe.Frame, saved.Id, now.OwnerId, now.TypeIndex,
+						now.CreationFrame, now.TotalObjects, now.IsForcedActive, now.IsHasBeen,
+						now.IsFullStrength, now.IsUnderStrength,
+						saved.CreationFrame, saved.TotalObjects, saved.IsForcedActive,
+						saved.IsHasBeen, saved.IsFullStrength, saved.IsUnderStrength);
+				}
+			}
+
+			void CaptureHouseProductionSnapshots(std::vector<HouseProductionSnapshot>& out)
+			{
+				out.clear();
+				out.reserve(static_cast<size_t>(std::max(HouseClass::Array.Count, 0)));
+				for (int i = 0; i < HouseClass::Array.Count; ++i)
+				{
+					const auto* const pHouse = HouseClass::Array.Items[i];
+					if (!pHouse)
+						continue;
+
+					const auto* const pVehicleFactory = pHouse->Primary_ForVehicles;
+
+					out.push_back(HouseProductionSnapshot {
+						UniqueIDOf(pHouse),
+						pHouse->ProducingBuildingTypeIndex,
+						pHouse->ProducingUnitTypeIndex,
+						pHouse->ProducingInfantryTypeIndex,
+						pHouse->ProducingAircraftTypeIndex,
+						UniqueIDOf(pHouse->Primary_ForBuildings),
+						UniqueIDOf(pHouse->Primary_ForVehicles),
+						UniqueIDOf(pHouse->Primary_ForShips),
+						UniqueIDOf(pHouse->Primary_ForInfantry),
+						UniqueIDOf(pHouse->Primary_ForAircraft),
+						pVehicleFactory ? pVehicleFactory->Production.Value : -1,
+						pVehicleFactory ? UniqueIDOf(pVehicleFactory->Object) : 0u,
+						pVehicleFactory ? pVehicleFactory->QueuedObjects.Count : -1,
+						pHouse->CountResourceGatherers,
+						pHouse->CountResourceDestinations,
+						pHouse->TechLevel,
+						pHouse->IQLevel2,
+						pHouse->IsTiberiumShort
+					});
+				}
+			}
+
+			void ReportHouseProductionSnapshotDifferences(const Keyframe& keyframe)
+			{
+				std::vector<HouseProductionSnapshot> current;
+				CaptureHouseProductionSnapshots(current);
+
+				std::unordered_map<uint32_t, const HouseProductionSnapshot*> byId;
+				byId.reserve(current.size());
+				for (const auto& now : current)
+					byId.emplace(now.Id, &now);
+
+				// Said outright, every time. A silent watch has been read as a passing one more than
+				// once in this file, and "no house differed" and "no house was looked at" are very
+				// different answers to the same question.
+				int differences = 0;
+				Debug::Log("[Replay] Keyframe %d compared the production state of %u houses against %u held.\n",
+					keyframe.Frame, static_cast<unsigned int>(current.size()),
+					static_cast<unsigned int>(keyframe.HouseProduction.size()));
+
+				for (const auto& saved : keyframe.HouseProduction)
+				{
+					const auto found = byId.find(saved.Id);
+					if (found == byId.end())
+						continue;
+
+					const auto& now = *found->second;
+					if (now.ProducingBuildingTypeIndex == saved.ProducingBuildingTypeIndex
+						&& now.ProducingUnitTypeIndex == saved.ProducingUnitTypeIndex
+						&& now.ProducingInfantryTypeIndex == saved.ProducingInfantryTypeIndex
+						&& now.ProducingAircraftTypeIndex == saved.ProducingAircraftTypeIndex
+						&& now.PrimaryForBuildings == saved.PrimaryForBuildings
+						&& now.PrimaryForVehicles == saved.PrimaryForVehicles
+						&& now.PrimaryForShips == saved.PrimaryForShips
+						&& now.PrimaryForInfantry == saved.PrimaryForInfantry
+						&& now.PrimaryForAircraft == saved.PrimaryForAircraft
+						&& now.VehicleFactoryProgress == saved.VehicleFactoryProgress
+						&& now.VehicleFactoryObject == saved.VehicleFactoryObject
+						&& now.VehicleFactoryQueued == saved.VehicleFactoryQueued
+						&& now.CountResourceGatherers == saved.CountResourceGatherers
+						&& now.CountResourceDestinations == saved.CountResourceDestinations
+						&& now.TechLevel == saved.TechLevel
+						&& now.IQLevel2 == saved.IQLevel2
+						&& now.IsTiberiumShort == saved.IsTiberiumShort)
+					{
+						continue;
+					}
+
+					Debug::Log("[Replay] Keyframe %d: house %u production choices are "
+						"building %d unit %d infantry %d aircraft %d after loading; they were "
+						"%d, %d, %d, %d.\n", keyframe.Frame, saved.Id,
+						now.ProducingBuildingTypeIndex, now.ProducingUnitTypeIndex,
+						now.ProducingInfantryTypeIndex, now.ProducingAircraftTypeIndex,
+						saved.ProducingBuildingTypeIndex, saved.ProducingUnitTypeIndex,
+						saved.ProducingInfantryTypeIndex, saved.ProducingAircraftTypeIndex);
+
+					Debug::Log("[Replay]   its primaries are %u/%u/%u/%u/%u "
+						"(buildings/vehicles/ships/infantry/aircraft), were %u/%u/%u/%u/%u; the "
+						"vehicle factory is at %d holding %u with %d queued, was %d holding %u "
+						"with %d queued.\n",
+						now.PrimaryForBuildings, now.PrimaryForVehicles, now.PrimaryForShips,
+						now.PrimaryForInfantry, now.PrimaryForAircraft,
+						saved.PrimaryForBuildings, saved.PrimaryForVehicles, saved.PrimaryForShips,
+						saved.PrimaryForInfantry, saved.PrimaryForAircraft,
+						now.VehicleFactoryProgress, now.VehicleFactoryObject, now.VehicleFactoryQueued,
+						saved.VehicleFactoryProgress, saved.VehicleFactoryObject,
+						saved.VehicleFactoryQueued);
+
+					Debug::Log("[Replay]   it has %d gatherers and %d resource destinations, tech %d, "
+						"IQ %d, tiberium short %d; it had %d, %d, tech %d, IQ %d, short %d.\n",
+						now.CountResourceGatherers, now.CountResourceDestinations, now.TechLevel,
+						now.IQLevel2, now.IsTiberiumShort,
+						saved.CountResourceGatherers, saved.CountResourceDestinations,
+						saved.TechLevel, saved.IQLevel2, saved.IsTiberiumShort);
+
+					++differences;
+				}
+
+				if (differences == 0)
+					Debug::Log("[Replay]   every house came back with the same production state.\n");
+			}
+
 			void ReportHouseRepairSnapshotDifferences(const Keyframe& keyframe)
 			{
 				std::unordered_map<uint32_t, const HouseClass*> byId;
@@ -4718,6 +4986,8 @@ namespace ReplaySystem
 
 				CaptureTechnoSnapshots(keyframe.Technos);
 				CaptureHouseRepairSnapshots(keyframe.HouseRepairs);
+				CaptureHouseProductionSnapshots(keyframe.HouseProduction);
+				CaptureTeamSnapshots(keyframe.Teams);
 				if (!CapturePlanningState(keyframe.Planning))
 					return false;
 				if (!CaptureAresParticleState(keyframe.AresParticles))
@@ -5430,6 +5700,8 @@ namespace ReplaySystem
 
 				ReportTechnoSnapshotDifferences(keyframe);
 				ReportHouseRepairSnapshotDifferences(keyframe);
+				ReportHouseProductionSnapshotDifferences(keyframe);
+				ReportTeamSnapshotDifferences(keyframe);
 
 				RepointTempSurfaceAfterLoad();
 				ResumeInGameSessionAfterLoad();
@@ -5576,6 +5848,103 @@ namespace ReplaySystem
 		int KeyframeInterval()
 		{
 			return State.Interval;
+		}
+
+		// HouseExt::UpdateHarvesterProduction, reproduced input by input. Phobos' copy is the one that
+		// runs; this one only reads, and exists so the answer and every term behind it are written
+		// down. The seek traces show its answer flipping across a keyframe load - the house's whole
+		// Phobos production block disappears from the draw sequence - while every field the keyframe
+		// snapshot compares comes back identical, so the term that moved has to be named rather than
+		// guessed at.
+		//
+		// Logged for a short window after each keyframe boundary, which both the first pass and the
+		// replayed pass run through, so the two can be diffed line for line.
+		void TraceHouseProductionGate(HouseClass* pHouse)
+		{
+			constexpr int GateTraceFrames = 12;
+
+			if (!DiagnosticsWanted() || !pHouse || State.Interval <= 0 || IsLoadInProgress())
+				return;
+
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+			if (frame % State.Interval >= GateTraceFrames)
+				return;
+
+			auto* const pRules = RulesClass::Instance;
+			if (!pRules || !pHouse->Type)
+				return;
+
+			const int difficulty = static_cast<int>(pHouse->GetAIDifficultyIndex());
+			const int idxParentCountry = pHouse->Type->FindParentCountryIndex();
+			const auto bitOwner = 1u << idxParentCountry;
+
+			// FindOwned: the first harvester type this country is allowed to own. Pure type data, so
+			// it cannot move across a load - it is logged to prove that rather than assume it.
+			const UnitTypeClass* pHarvester = nullptr;
+			for (int i = 0; i < pRules->HarvesterUnit.Count; ++i)
+			{
+				const auto* const pItem = pRules->HarvesterUnit.Items[i];
+				if (pItem && pItem->InOwners(bitOwner))
+				{
+					pHarvester = pItem;
+					break;
+				}
+			}
+
+			// FindBuildable: the first refinery this house can expect to build. CanExpectToBuild walks
+			// prerequisites, which read the house's building tallies - state a load rebuilds.
+			const BuildingTypeClass* pRefinery = nullptr;
+			for (int i = 0; i < pRules->BuildRefinery.Count; ++i)
+			{
+				const auto* const pItem = pRules->BuildRefinery.Items[i];
+				if (pItem && pHouse->CanExpectToBuild(pItem, idxParentCountry))
+				{
+					pRefinery = pItem;
+					break;
+				}
+			}
+
+			// Both of these are TypeLists read from the rules, and a ruleset that never mentions one
+			// leaves it empty with a null Items - which is not a hypothetical: AISlaveMinerNumber is
+			// empty in this one, and reading it at the difficulty index put a null dereference in the
+			// middle of the trace. Phobos indexes both the same way without a bounds check; it only
+			// gets away with it because a house has to reach UpdateHarvesterProduction to do so, and
+			// this trace runs for every house at the top of HouseClass::AI instead.
+			auto const ruleAt = [](const TypeList<int>& list, int index, int fallback)
+			{
+				return (list.Items && index >= 0 && index < list.Count) ? list.Items[index] : fallback;
+			};
+
+			const int perRefinery = ruleAt(pRules->HarvestersPerRefinery, difficulty, -1);
+			const int slaveMiners = ruleAt(pRules->AISlaveMinerNumber, difficulty, -1);
+
+			const int maxHarvesters = (pHarvester && pRefinery)
+				? perRefinery * pHouse->CountResourceDestinations
+				: slaveMiners;
+
+			const bool wouldReturnTrue = pHarvester
+				&& pHouse->IQLevel2 >= pRules->Harvester
+				&& !pHouse->IsTiberiumShort
+				&& !pHouse->IsControlledByHuman()
+				&& pHouse->CountResourceGatherers < maxHarvesters
+				&& pHouse->TechLevel >= pHarvester->TechLevel;
+
+			// The two rule values are printed raw as well as folded into the maximum, because -1 there
+			// means the ruleset does not define that list at all rather than defining it as zero.
+			Debug::Log("[Replay] Frame %d house %u harvester gate: producing %d, harvester [%s], "
+				"refinery buildable [%s], gatherers %d < max %d (per refinery %d of %d, slave miners "
+				"%d of %d, destinations %d, difficulty %d), IQ %d vs %d, short %d, human %d, "
+				"tech %d vs %d -> %s.\n",
+				frame, UniqueIDOf(pHouse), pHouse->ProducingUnitTypeIndex,
+				pHarvester ? pHarvester->ID : "-", pRefinery ? pRefinery->ID : "-",
+				pHouse->CountResourceGatherers, maxHarvesters,
+				perRefinery, pRules->HarvestersPerRefinery.Count,
+				slaveMiners, pRules->AISlaveMinerNumber.Count,
+				pHouse->CountResourceDestinations,
+				difficulty, pHouse->IQLevel2, pRules->Harvester, pHouse->IsTiberiumShort ? 1 : 0,
+				pHouse->IsControlledByHuman() ? 1 : 0, pHouse->TechLevel,
+				pHarvester ? pHarvester->TechLevel : -1,
+				wouldReturnTrue ? "builds a harvester and skips the rolls" : "falls through to the rolls");
 		}
 
 		bool IsLoadInProgress()

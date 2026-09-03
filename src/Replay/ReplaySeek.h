@@ -19,6 +19,8 @@
 
 #pragma once
 
+class HouseClass;
+
 // Seeking within a replay.
 //
 // Playback is a deterministic recurrence - state(N) comes from state(0) and the events up to N - so
@@ -98,5 +100,12 @@ namespace ReplaySystem
 		// True while a keyframe load is running, so the scenario-start hooks leave the in-flight
 		// playback alone instead of reopening the replay from the beginning.
 		bool IsLoadInProgress();
+
+		// Mirrors HouseExt::UpdateHarvesterProduction's gate and writes down every input to it, for a
+		// short window after each keyframe boundary. That function returns before any of the AI's
+		// production rolls happen, so a gate that answers differently after a load moves the
+		// randomiser with nothing else visibly wrong - which is what the Boot Camp seek traces kept
+		// finding. Both passes log the same frames, so the two runs can be diffed directly.
+		void TraceHouseProductionGate(HouseClass* pHouse);
 	}
 }

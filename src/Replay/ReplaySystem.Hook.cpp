@@ -763,6 +763,29 @@ DEFINE_HOOK(0x55B60B, LogicClass_AI_TraceUpdateOrder, 0x5)
 	return 0;
 }
 
+// HouseClass::AI, at its first instruction, where the house is still in ECX. Three bytes of stack
+// adjustment and two pushes come to exactly five.
+//
+// The update-order trace charges every draw to whichever object's update window is open, and only
+// LogicClass::AI's object loop opens one. House AI runs outside that loop, so its draws - which
+// includes the whole of Ares' and Phobos' production rewrites, and those roll against
+// FillEarliestTeamProbability - were being charged to whatever object the loop had left open. A
+// Boot Camp seek reported an anim as having drawn 14 numbers where it drew 12, and the draws were
+// not the anim's at all: they were a house choosing what to build.
+//
+// Opening a window on the house puts them where they belong, and names the house while doing it.
+DEFINE_HOOK(0x4F8440, HouseClass_AI_TraceUpdateOrder, 0x5)
+{
+	if (ReplayTracesWanted())
+	{
+		GET(HouseClass* const, pHouse, ECX);
+		TraceObjectUpdate(pHouse);
+		ReplaySystem::Seek::TraceHouseProductionGate(pHouse);
+	}
+
+	return 0;
+}
+
 // FlyLocomotionClass::Nearing_Target, the step above New_LZ. The landing zone trace showed the
 // scan entered on one pass and not the other; this says whether the locomotor step that asks
 // for it ran at all.
@@ -1154,7 +1177,8 @@ DEFINE_HOOK(0x65C780, Random2Class_Draw_TraceForDivergence, 0x5)
 		return 0;
 
 	// The caller is still on the stack: nothing has been pushed at the function's first byte.
-	TraceRandomDraw(R->ECX<const void*>(), R->Stack<const void*>(0x0));
+	// The plain form takes no range, so it reports none.
+	TraceRandomDraw(R->ECX<const void*>(), R->Stack<const void*>(0x0), -1, -1);
 	return 0;
 }
 
@@ -1163,7 +1187,10 @@ DEFINE_HOOK(0x65C7E0, Random2Class_DrawRanged_TraceForDivergence, 0x6)
 	if (!ReplayTracesWanted())
 		return 0;
 
-	TraceRandomDraw(R->ECX<const void*>(), R->Stack<const void*>(0x0));
+	// __thiscall, and nothing has been pushed yet: the return address is at the top of the stack
+	// and the two arguments sit above it.
+	TraceRandomDraw(R->ECX<const void*>(), R->Stack<const void*>(0x0),
+		R->Stack32(0x4), R->Stack32(0x8));
 	return 0;
 }
 
