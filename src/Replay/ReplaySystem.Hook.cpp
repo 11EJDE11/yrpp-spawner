@@ -81,7 +81,7 @@ static const EventClass* EventFromScaledDoListSlot(unsigned int scaledSlot)
 // Camp hangs a team, the pointer animation and three trigger deletions on the player selecting the
 // first GI, and Compute_Game_CRC sees the result within a few frames. Leaving playback to spring it
 // as a side effect of restoring the recorded selection made it depend on a viewer preference
-// (ReplaySelectUnits, and watching another player's screen turns it off outright), and left it a
+// (ReplayShowSelections, and watching another player's screen turns it off outright), and left it a
 // frame late even when it was on, because the selection is sampled at the top of the main loop and
 // the click that changes it lands in the input pass just after.
 //

@@ -110,9 +110,11 @@ public:
 	char ReplayFileOut[MAX_PATH];
 	// The replay to watch. Empty means no playback.
 	char ReplayFile[MAX_PATH];
+	// Keep the recording player's shroud instead of revealing the map.
 	bool ReplayShroudEnabled;
-	bool ReplayLockedViewport;
-	bool ReplaySelectUnits;
+	// Move the camera yourself instead of following the recorded view.
+	bool ReplayFreeCamera;
+	bool ReplayShowSelections;
 	// How fast to watch a replay, in frames per second - a rung of SpeedLadder in ReplayControls.h.
 	// Zero or less watches it at the speed it was recorded at.
 	int  ReplayPlaybackSpeed;
@@ -125,11 +127,12 @@ public:
 	// [OtherN]. Only human slots are accepted; anything else falls back to the recording player.
 	int  ReplayViewPlayer;
 	// Draw the on-screen playback controls - seek bar, transport buttons, clock - during playback.
+	// No client UI sets this; it is a keybind-only toggle that just starts out hidden.
 	bool ReplayControlBar;
-	// How many frames apart playback drops a savegame keyframe, so seeking backwards restarts from
-	// one instead of replaying from the beginning. Zero or less takes none, which leaves seeking
-	// forward-only. See ReplaySeek.h.
-	int  ReplayKeyframeInterval;
+	// How many frames apart playback drops a rewind checkpoint - a savegame keyframe, in
+	// ReplaySeek.h's terms - so seeking backwards restarts from one instead of replaying from the
+	// beginning. Zero or less takes none, which leaves seeking forward-only.
+	int  ReplayRewindCheckpointInterval;
 
 	// Per-frame state watchers that compare a seek against the frames playback already went
 	// through, and name the first object, cell or randomiser draw the two disagree about. They
@@ -232,14 +235,14 @@ public:
 		, ReplayFileOut { "replay.yrrp" }
 		, ReplayFile { "" }
 		, ReplayShroudEnabled { false }
-		, ReplayLockedViewport { true }
-		, ReplaySelectUnits { true }
+		, ReplayFreeCamera { false }
+		, ReplayShowSelections { true }
 		, ReplayPlaybackSpeed { 0 }
 		, ReplaySpectator { false }
 		, ReplayShowChatAndBeacons { true }
 		, ReplayViewPlayer { -1 }
-		, ReplayControlBar { true }
-		, ReplayKeyframeInterval { 750 }
+		, ReplayControlBar { false }
+		, ReplayRewindCheckpointInterval { 750 }
 		, ReplayDiagnostics { true }
 		, ReplaySeekRenderEveryFrame { false }
 

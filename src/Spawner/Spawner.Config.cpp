@@ -65,15 +65,15 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		EnableReplayRecording    = pINI->ReadBool(pSettingsSection, "EnableReplayRecording", EnableReplayRecording);
 		/* ReplayFileOut        */ pINI->ReadString(pSettingsSection, "ReplayFileOut", ReplayFileOut, ReplayFileOut, sizeof(ReplayFileOut));
 		/* ReplayFile           */ pINI->ReadString(pSettingsSection, "ReplayFile", ReplayFile, ReplayFile, sizeof(ReplayFile));
-		ReplayShroudEnabled      = pINI->ReadBool(pSettingsSection, "ReplayShroudEnabled", ReplayShroudEnabled);
-		ReplayLockedViewport     = pINI->ReadBool(pSettingsSection, "ReplayLockedViewport", ReplayLockedViewport);
-		ReplaySelectUnits        = pINI->ReadBool(pSettingsSection, "ReplaySelectUnits", ReplaySelectUnits);
-		ReplayPlaybackSpeed      = pINI->ReadInteger(pSettingsSection, "ReplayPlaybackSpeed", ReplayPlaybackSpeed);
-		ReplaySpectator          = pINI->ReadBool(pSettingsSection, "ReplaySpectator", ReplaySpectator);
-		ReplayShowChatAndBeacons = pINI->ReadBool(pSettingsSection, "ReplayShowChatAndBeacons", ReplayShowChatAndBeacons);
-		ReplayViewPlayer         = pINI->ReadInteger(pSettingsSection, "ReplayViewPlayer", ReplayViewPlayer);
-		ReplayControlBar         = pINI->ReadBool(pSettingsSection, "ReplayControlBar", ReplayControlBar);
-		ReplayKeyframeInterval   = pINI->ReadInteger(pSettingsSection, "ReplayKeyframeInterval", ReplayKeyframeInterval);
+		ReplayShroudEnabled          = pINI->ReadBool(pSettingsSection, "ReplayShroudEnabled", ReplayShroudEnabled);
+		ReplayFreeCamera             = pINI->ReadBool(pSettingsSection, "ReplayFreeCamera", ReplayFreeCamera);
+		ReplayShowSelections         = pINI->ReadBool(pSettingsSection, "ReplayShowSelections", ReplayShowSelections);
+		ReplayPlaybackSpeed          = pINI->ReadInteger(pSettingsSection, "ReplayPlaybackSpeed", ReplayPlaybackSpeed);
+		ReplaySpectator              = pINI->ReadBool(pSettingsSection, "ReplaySpectator", ReplaySpectator);
+		ReplayShowChatAndBeacons     = pINI->ReadBool(pSettingsSection, "ReplayShowChatAndBeacons", ReplayShowChatAndBeacons);
+		ReplayViewPlayer             = pINI->ReadInteger(pSettingsSection, "ReplayViewPlayer", ReplayViewPlayer);
+		ReplayControlBar             = pINI->ReadBool(pSettingsSection, "ReplayControlBar", ReplayControlBar);
+		ReplayRewindCheckpointInterval = pINI->ReadInteger(pSettingsSection, "ReplayRewindCheckpointInterval", ReplayRewindCheckpointInterval);
 		ReplayDiagnostics        = pINI->ReadBool(pSettingsSection, "ReplayDiagnostics", ReplayDiagnostics);
 		ReplaySeekRenderEveryFrame = pINI->ReadBool(pSettingsSection, "ReplaySeekRenderEveryFrame", ReplaySeekRenderEveryFrame);
 	}

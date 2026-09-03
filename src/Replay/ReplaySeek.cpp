@@ -5959,7 +5959,7 @@ namespace ReplaySystem
 			State = SeekState {};
 
 			const auto* pConfig = GetConfig();
-			State.Interval = pConfig ? std::max(0, pConfig->ReplayKeyframeInterval) : 0;
+			State.Interval = pConfig ? std::max(0, pConfig->ReplayRewindCheckpointInterval) : 0;
 
 			if (State.Interval <= 0)
 			{

@@ -415,14 +415,14 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayFileOut` | `replay.yrrp` | Where the recording is written. Relative to the game directory; missing directories are created. |
 | `ReplayFile` | *(empty)* | Non-empty switches the session to playback of that file. |
 | `ReplayShroudEnabled` | `false` | Keep the recording player's shroud instead of revealing the map. |
-| `ReplayLockedViewport` | `true` | Pin the camera to the recorded position. |
-| `ReplaySelectUnits` | `true` | Reproduce the recorded unit selection. |
+| `ReplayFreeCamera` | `false` | Let the viewer move the camera instead of pinning it to the recorded position. |
+| `ReplayShowSelections` | `true` | Reproduce the recorded unit selection. |
 | `ReplaySpectator` | `false` | Watch from an observer's seat rather than a player's. See below. |
 | `ReplayShowChatAndBeacons` | `true` | Playback only; recording of this data is unconditional. |
 | `ReplayPlaybackSpeed` | `-1` | Game speed index to pace playback at. `-1` falls back to `GameSpeed`. Does not affect the simulation, which stays pinned to `RecordedGameSpeed`. |
 | `ReplayViewPlayer` | `-1` | Which player's screen to watch the recording from. See below. |
-| `ReplayControlBar` | `true` | Draw the on-screen playback controls during playback. See below. |
-| `ReplayKeyframeInterval` | `750` | Frames between playback keyframes, which is what makes seeking backwards possible. `0` takes none. See below. |
+| `ReplayControlBar` | `false` | Draw the on-screen playback controls during playback. Toggled with a hotkey; no client UI sets this. See below. |
+| `ReplayRewindCheckpointInterval` | `750` | Frames between playback keyframes, which is what makes seeking backwards possible. `0` takes none. See below. |
 | `ReplayDiagnostics` | `false` | Turn on the per-frame state watchers that find a divergence. They walk every techno, every layer object and every cell on the map every frame and keep what they find for the whole replay, so playback slows to a crawl. For chasing a bug, not for watching a replay. See below. |
 
 Playback speed is deliberately kept out of `OptionsClass Options.GameSpeed` (0xA8EB60): simulation
@@ -441,7 +441,7 @@ in reverse.
 
 Those states are **not** in the replay file - they would dwarf the events many times over, and the
 file is meant to be small enough to hand around. Instead playback drops one every
-`ReplayKeyframeInterval` frames as it watches, using the engine's own savegame format
+`ReplayRewindCheckpointInterval` frames as it watches, using the engine's own savegame format
 (`ScenarioClass::SaveGame` 0x67CEF0). That only makes the part of the replay already watched cheap
 to rewind into, which is the part a viewer wants to rewind into. Nothing about the `.yrrp` layout
 changes, and a replay recorded by a build without any of this plays back identically.
@@ -1028,8 +1028,8 @@ cosmetics and are left alone.
 
 The shroud setting has nothing to act on while spectating: an observer sees the whole map by
 definition, and `PlaybackWantsFullMapReveal` reveals it whether or not `ReplayShroudEnabled` is set.
-The client greys the shroud box and the "Watch as" drop-down out when Spectator view is ticked, and
-launches with no perspective, rather than leaving controls that do nothing.
+The client greys the "Shroud enabled" box out when Spectator is chosen in the "Watch as" drop-down,
+and launches with no perspective, rather than leaving a control that does nothing.
 
 ## Watching from another player
 
@@ -1064,10 +1064,11 @@ sidebar's buildables, the initial camera position from `DisplayClass::Compute_St
 computed once, for the right house. It is also ahead of the observer handling in the same function,
 so `MakeObserver()` - which only acts on the current player - sees the house being watched from.
 
-`ReplayLockedViewport` and `ReplaySelectUnits` are forced off whenever the view player is not the
-recording player. Both reproduce the recording player's own screen, and neither means anything from
-someone else's seat: the camera would be pinned to a base you are not watching, and the selection
-would be units the house you are watching does not own and mostly cannot see.
+The viewport lock is forced off (`ReplayFreeCamera` forced to `true`) and `ReplayShowSelections` is
+forced off whenever the view player is not the recording player. Both reproduce the recording
+player's own screen, and neither means anything from someone else's seat: the camera would be
+pinned to a base you are not watching, and the selection would be units the house you are watching
+does not own and mostly cannot see.
 
 `Game::PlayerColor` and `Game::ObserverMode` follow the view slot rather than slot 0, so chat
 colouring and the observer loading screen match who is being watched.

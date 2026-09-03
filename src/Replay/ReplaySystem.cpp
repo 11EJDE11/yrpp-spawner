@@ -3862,8 +3862,9 @@ namespace ReplaySystem
 
 			const auto* pConfig = GetConfig();
 			ReplayState.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
-			ReplayState.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
-			ReplayState.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
+			// The config's free-camera setting is the inverse of the viewport lock kept internally.
+			ReplayState.LockViewport = pConfig ? !pConfig->ReplayFreeCamera : true;
+			ReplayState.SelectUnits = pConfig ? pConfig->ReplayShowSelections : true;
 
 			if (!ScenarioClass::Instance)
 			{
@@ -3924,8 +3925,9 @@ namespace ReplaySystem
 			GameModeOptionsClass::Instance.GameSpeed = recordedGameSpeed;
 
 			ReplayState.ShroudEnabled = pConfig ? pConfig->ReplayShroudEnabled : false;
-			ReplayState.LockViewport = pConfig ? pConfig->ReplayLockedViewport : true;
-			ReplayState.SelectUnits = pConfig ? pConfig->ReplaySelectUnits : true;
+			// The config's free-camera setting is the inverse of the viewport lock kept internally.
+			ReplayState.LockViewport = pConfig ? !pConfig->ReplayFreeCamera : true;
+			ReplayState.SelectUnits = pConfig ? pConfig->ReplayShowSelections : true;
 			ReplayState.DiagnosticsEnabled = pConfig ? pConfig->ReplayDiagnostics : false;
 			ReplayState.SpectatorView = ReplaySystem::IsSpectatorPlayback();
 			ReplayState.ShowChatAndBeacons = pConfig ? pConfig->ReplayShowChatAndBeacons : true;

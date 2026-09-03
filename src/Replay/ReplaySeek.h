@@ -26,7 +26,7 @@ class HouseClass;
 // Playback is a deterministic recurrence - state(N) comes from state(0) and the events up to N - so
 // seeking forward is just running the simulation without drawing it, and seeking backwards needs an
 // earlier state to restart from. Rather than put those states in the replay file, where they would
-// dwarf the events many times over, playback drops one every ReplayKeyframeInterval frames as it
+// dwarf the events many times over, playback drops one every ReplayRewindCheckpointInterval frames as it
 // watches, into the engine's own savegame format. That only makes the part of the replay already
 // watched cheap to rewind into, which is the part a viewer wants to rewind into.
 //
@@ -41,7 +41,7 @@ namespace ReplaySystem
 {
 	namespace Seek
 	{
-		// Frames between keyframes, from ReplayKeyframeInterval. Zero when keyframes are switched
+		// Frames between keyframes, from ReplayRewindCheckpointInterval. Zero when keyframes are switched
 		// off, which leaves seeking forward-only.
 		int KeyframeInterval();
 
