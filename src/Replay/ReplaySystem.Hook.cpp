@@ -374,6 +374,35 @@ DEFINE_HOOK(0x686060, DoLose_EndGameAfterPlayback, 0x5)
 	return ReplaySystem::IsPlaybackRequested() ? EndGameWithoutRestarting : 0;
 }
 
+// MPlayer_Defeated (0x4FC0B0) restores the tab thumb on its way to flagging the win:
+//
+//     4FC591  mov  al, tabbutton_824410
+//     4FC596  test al, al
+//     4FC598  jz   short 4FC5AA
+//     4FC59A  mov  ecx, offset Map
+//     4FC59F  call TabClass::Init_Thumb
+//     4FC5AA  mov  edx, PlayerPtr          ; -> Flag_To_Win / Flag_To_Lose
+//
+// tabbutton_824410 is statically initialised to 1 and is only ever written in the branch this
+// function takes when the local player is the one being defeated, so the call runs at the end of
+// every match. It is normally a no-op: TabClass::Init_Thumb (0x6D1610) returns immediately unless
+// ThumbActive is false, and in an ordinary game it is true.
+//
+// Spectator playback clears it - ApplyPlaybackSpectator does ThumbActive = false right after
+// MakeObserver - so the body runs instead, against a sidebar the observer seat never built. It
+// removes the thumb button, drops tooltip 241 and calls Show_Advanced_Commands, and does not come
+// back, so Flag_To_Win at 0x4FC6AC is never reached: no victory screen, and the match never ends.
+//
+// This is the only call site of Init_Thumb in the binary, and playback has no thumb to restore, so
+// the fix is to skip it. Five bytes, the load of the flag; the jump goes to the test's own target,
+// which leaves the rest of the function untouched.
+DEFINE_HOOK(0x4FC591, MPlayerDefeated_SkipThumbRestoreDuringSpectatorPlayback, 0x5)
+{
+	enum { SkipThumbRestore = 0x4FC5AA };
+
+	return ReplaySystem::IsSpectatorPlayback() ? SkipThumbRestore : 0;
+}
+
 #pragma endregion Ending playback when the mission ends
 
 DEFINE_HOOK(0x70DA48, TechnoClass_RadarTrackingAI_ShowAllOnViewerRadar, 0x8)
@@ -575,33 +604,52 @@ DEFINE_HOOK(0x533066, Init_Commands_RegisterReplayCommands, 0x6)
 // Pause replay simulation without blocking input or menus. The related hooks stop event processing,
 // logic and the frame counter together so the current frame remains unchanged.
 
+// Spectator playback promotes the recording player's own house to Observer
+// (ReplaySystem::ApplyPlaybackSpectator -> HouseClass::MakeObserver, which sets
+// HouseClass::Observer = CurrentPlayer). In a live game the Observer house owns nothing, so the
+// observer hooks in Observers.Visibility.cpp only ever reach display and input code. Here the
+// Observer is a house that owns units and fights, and at least one of those hooks is on a
+// simulation path:
+//
+//     UnitClass_CantTargetDisguise (0x7467CA) sits inside Is_Disguised_As(HouseClass*), where EDI
+//     is the house argument, and sends observers to 0x7467FE - the "not disguised as far as this
+//     house is concerned" tail. TechnoClass::Is_Allowed_To_Retaliate (0x7087C0) calls that with
+//     obj->House, so every unit of the spectated house sees through a spy or a Mirage and
+//     retaliates where the recording did not.
+//
+// The recording had no Observer at all, so the faithful thing is for the simulation to see none
+// either. Both windows below hide the pointer for the duration of a simulation step and put it
+// back immediately after, which neutralises every IsObserver() / IsCurrentPlayerObserver() hook
+// at once; rendering and input run outside these windows and still see the observer.
+//
+// Only reached during spectator playback, so live observer play is untouched.
 namespace
 {
-	HouseClass* CampaignSpectatorObserver = nullptr;
+	HouseClass* HiddenSpectatorObserver = nullptr;
 
-	void HideCampaignSpectatorObserverFromSimulation()
+	void HideSpectatorObserverFromSimulation()
 	{
 		if (ReplaySystem::IsSpectatorPlayback()
-			&& SessionClass::IsCampaign()
 			&& HouseClass::Observer
 			&& HouseClass::Observer == HouseClass::CurrentPlayer)
 		{
-			CampaignSpectatorObserver = HouseClass::Observer;
+			HiddenSpectatorObserver = HouseClass::Observer;
 			HouseClass::Observer = nullptr;
 		}
 	}
 
-	void RestoreCampaignSpectatorObserverAfterSimulation()
+	void RestoreSpectatorObserverAfterSimulation()
 	{
-		if (CampaignSpectatorObserver)
+		if (HiddenSpectatorObserver)
 		{
-			HouseClass::Observer = CampaignSpectatorObserver;
-			CampaignSpectatorObserver = nullptr;
+			HouseClass::Observer = HiddenSpectatorObserver;
+			HiddenSpectatorObserver = nullptr;
 		}
 	}
 }
 
-// Holds the logic tick.
+// Holds the logic tick. The five bytes are the load of Logic that sets up the call to
+// LogicClass::AI at 0x55DC9E.
 DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
 {
 	enum { SkipLogicAI = 0x55DCA3 };
@@ -609,23 +657,37 @@ DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
 	if (ReplaySystem::Controls::IsPlaybackPaused())
 		return SkipLogicAI;
 
-	HideCampaignSpectatorObserverFromSimulation();
+	HideSpectatorObserverFromSimulation();
 	return 0;
 }
 
-// Restore the observer after the simulation update.
-DEFINE_HOOK(0x55DCA3, MainLoop_CampaignSpectator_RestoreObserverAfterLogicAI, 0x5)
+// The instruction after that call, and the target the pause above skips to, so the observer is
+// restored on both paths.
+DEFINE_HOOK(0x55DCA3, MainLoop_Spectator_RestoreObserverAfterLogicAI, 0x5)
 {
-	RestoreCampaignSpectatorObserverAfterSimulation();
+	RestoreSpectatorObserverAfterSimulation();
 	return 0;
 }
 
-// Holds the event pump, and with it the recorded events for the frame.
+// Holds the event pump, and with it the recorded events for the frame. Execute_DoList assigns
+// missions and targets, so the observer is hidden across this window too.
 DEFINE_HOOK(0x55DE3A, MainLoop_ReplayPause_SkipQueueAI, 0x6)
 {
 	enum { SkipQueueAI = 0x55DE45 };
 
-	return ReplaySystem::Controls::IsPlaybackPaused() ? SkipQueueAI : 0;
+	if (ReplaySystem::Controls::IsPlaybackPaused())
+		return SkipQueueAI;
+
+	HideSpectatorObserverFromSimulation();
+	return 0;
+}
+
+// The call to PlanningManager_637550 that follows Queue_AI, and the pause skip target above.
+// Call_Back and the rest of the frame run after this, with the observer back in place.
+DEFINE_HOOK(0x55DE45, MainLoop_Spectator_RestoreObserverAfterQueueAI, 0x5)
+{
+	RestoreSpectatorObserverAfterSimulation();
+	return 0;
 }
 
 // Holds the frame counter, and is where a paused iteration gets its viewport committed and drawn.
