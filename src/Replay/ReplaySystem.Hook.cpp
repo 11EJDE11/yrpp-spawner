@@ -477,8 +477,16 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 {
 	if (ReplayState.Playback)
 	{
-		for (auto& progress : ProgressScreenClass::Instance.PlayerProgresses)
-			progress = 100.0;
+		// Scenario_Load_Wait (0x684370) holds the load until every slot reads complete, and a replay
+		// has no peers to report in, so the peers are declared finished here.
+		//
+		// Slot 0 is the local player and is deliberately left alone. Session_Callback advances and
+		// repaints the bar a few bytes above this hook, and only while Get_Player_Progress(0) is
+		// still behind the percentage it was handed - so writing slot 0 here satisfies that test
+		// forever and freezes the loading bar wherever it happened to be.
+		auto& progresses = ProgressScreenClass::Instance.PlayerProgresses;
+		for (size_t i = 1; i < std::size(progresses); ++i)
+			progresses[i] = 100.0;
 
 		return 0x69B14E;
 	}
