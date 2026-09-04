@@ -30,6 +30,9 @@ namespace ReplaySystem
 	int GetViewPlayerIndex();
 	void ApplyPlaybackViewPlayer();
 	void ApplyPlaybackSpectator();
+	// The observer seat again, after a keyframe load. HouseClass::Observer is a bare global that no
+	// savegame carries and the load rebuilds every house, so a seek leaves it on a dead one.
+	void ReapplyPlaybackSpectator();
 
 	// Recording taps for chat, beacons and taunts, which bypass EventClass::DoList. Safe to call
 	// when not recording.

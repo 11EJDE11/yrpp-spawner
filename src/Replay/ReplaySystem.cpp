@@ -2373,21 +2373,39 @@ bool ReplaySystem::IsSpectatorPlayback()
 	return pConfig && IsPlaybackRequested() && pConfig->ReplaySpectator;
 }
 
+namespace
+{
+	bool TakeSpectatorSeat()
+	{
+		if (!ReplaySystem::IsSpectatorPlayback())
+			return false;
+
+		HouseClass* const pPlayer = HouseClass::CurrentPlayer;
+		if (!pPlayer)
+			return false;
+
+		Game::ObserverMode = true;
+
+		if (pPlayer->MakeObserver())
+			TabClass::Instance.ThumbActive = false;
+
+		return true;
+	}
+}
+
 void ReplaySystem::ApplyPlaybackSpectator()
+{
+	if (TakeSpectatorSeat())
+		Debug::Log("[Replay] Watching the replay from an observer seat.\n");
+}
+
+void ReplaySystem::ReapplyPlaybackSpectator()
 {
 	if (!IsSpectatorPlayback())
 		return;
 
-	HouseClass* const pPlayer = HouseClass::CurrentPlayer;
-	if (!pPlayer)
-		return;
-
-	Game::ObserverMode = true;
-
-	if (pPlayer->MakeObserver())
-		TabClass::Instance.ThumbActive = false;
-
-	Debug::Log("[Replay] Watching the replay from an observer seat.\n");
+	if (!TakeSpectatorSeat())
+		Debug::Log("[Replay] The observer seat could not be taken again after the keyframe load.\n");
 }
 
 void ReplaySystem::OnGameStartReset()

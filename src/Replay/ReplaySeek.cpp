@@ -2799,6 +2799,7 @@ namespace ReplaySystem
 
 				RepointTempSurfaceAfterLoad();
 				ResumeInGameSessionAfterLoad();
+				ReplaySystem::ReapplyPlaybackSpectator();
 				RestoreHouseRepairState(keyframe);
 				RestoreLoadResetTimerState(keyframe);
 				RestoreSlaveManagerState(keyframe);
