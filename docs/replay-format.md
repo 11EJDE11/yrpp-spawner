@@ -419,11 +419,11 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayShowSelections` | `true` | Reproduce the recorded unit selection. |
 | `ReplaySpectator` | `false` | Watch from an observer's seat rather than a player's. See below. |
 | `ReplayShowChatAndBeacons` | `true` | Playback only; recording of this data is unconditional. |
-| `ReplayPlaybackSpeed` | `-1` | Game speed index to pace playback at. `-1` falls back to `GameSpeed`. Does not affect the simulation, which stays pinned to `RecordedGameSpeed`. |
+| `ReplayPlaybackSpeed` | `0` | Playback frame rate in FPS. `0` uses the recorded speed. |
 | `ReplayViewPlayer` | `-1` | Which player's screen to watch the recording from. See below. |
 | `ReplayControlBar` | `false` | Draw the on-screen playback controls during playback. Toggled with a hotkey; no client UI sets this. See below. |
-| `ReplayRewindCheckpointInterval` | `750` | Frames between playback keyframes, which is what makes seeking backwards possible. `0` takes none. See below. |
-| `ReplayDiagnostics` | `false` | Turn on the per-frame state watchers that find a divergence. They walk every techno, every layer object and every cell on the map every frame and keep what they find for the whole replay, so playback slows to a crawl. For chasing a bug, not for watching a replay. See below. |
+| `ReplayKeyframeInterval` | `750` | Frames between playback keyframes. `0` disables rewind keyframes. |
+| `ReplayKeyframeStorageLimitMB` | `512` | Maximum temporary keyframe storage in MB. `0` disables the limit. |
 
 Playback speed is deliberately kept out of `OptionsClass Options.GameSpeed` (0xA8EB60): simulation
 code reads that through `GetAnimSpeed`, so it stays pinned to `RecordedGameSpeed` for the whole of
@@ -441,7 +441,7 @@ in reverse.
 
 Those states are **not** in the replay file - they would dwarf the events many times over, and the
 file is meant to be small enough to hand around. Instead playback drops one every
-`ReplayRewindCheckpointInterval` frames as it watches, using the engine's own savegame format
+`ReplayKeyframeInterval` frames as it watches, using the engine's own savegame format
 (`ScenarioClass::SaveGame` 0x67CEF0). That only makes the part of the replay already watched cheap
 to rewind into, which is the part a viewer wants to rewind into. Nothing about the `.yrrp` layout
 changes, and a replay recorded by a build without any of this plays back identically.
@@ -648,78 +648,8 @@ because the two places that use it overwrite it before reading it, but Ares walk
 global and calls a virtual on each non-null one before opening an in-game dialog - so pressing
 Escape after a load faulted in `Ares.dll+0x6258A`. The seek re-points it after every load.
 
-One more thing worth knowing when reading a divergence report: `Compute_Game_CRC` (0x64DAB0) draws
-from the scenario randomiser as its last act, and hashes the object arrays in their current order.
-The frame hash is therefore part of the same random stream the simulation draws from, and it is
-order-sensitive - which is why a keyframe records the array orders as well, and why the divergence
-log prints where the randomiser is.
+Keyframes live in `<SavedGameDir>\Replay Keyframes`, are deleted after playback, and the oldest are removed when the configured storage limit is exceeded.
 
-A frame record can therefore carry a `FrameRandomState` (`FrameRecordFlag_RandomState`, an
-int32 pair holding the randomiser's two table cursors, written straight after the object census).
-When playback finds a hash mismatch it compares that against its own position and says which of
-the two happened:
-
-- **randomiser in step, so the objects differ** - some state the simulation reads was not carried
-  across the load, and the objects have genuinely moved apart.
-- **randomiser drifted** - a draw was made on one side and not the other. The objects may still be
-  identical; something simply consumed randomness that the other run did not.
-
-This is an additive flag, so it does not bump the version, but a replay recorded with it cannot be
-read by a build that predates it - the unknown-flag check rejects the file rather than misparsing
-it. Replays recorded before it play back fine and the report says `not recorded` instead.Keyframes live in `<SavedGameDir>\Replay Keyframes`, are written when playback starts and are
-deleted when it ends. They are savegames, so they cost a few MB each; a 30 minute recording at the
-default interval leaves a few dozen of them while it is being watched.
-
-### Finding the code behind a divergence
-
-Knowing the randomiser drifted still leaves the question of *what* drew from it. Playback answers
-that on its own, with nothing to diff by hand, when `ReplayDiagnostics` is set.
-
-Everything in this section is behind that key and off by default. The watchers walk every techno,
-every object in the five display layers and the logic queue, and every cell on the map, on every
-frame, and keep all of it for the length of the replay so a frame can be compared against itself.
-That is what makes them worth having and also what makes them far too slow to watch a replay
-through.
-
-Seeking backwards replays frames that have already been played once, and that first pass is a
-known-good reference - it is the run that matched the recording. So playback remembers which code
-asked for each scenario-randomiser draw, keyed by frame, and when a frame comes round a second
-time it checks the sequence against what it was the first time:
-
-```
-[Replay] Frame 3161 drew from the randomiser differently the second time round: it drew from
-somewhere else at draw 7 (first pass 004DAACB, after the keyframe load 0064DBA3). That address is
-the code whose state the load did not carry across.
-```
-
-It reports the first difference and then stays quiet, because after that the two runs are
-different games. Three kinds of difference are caught: drawing from a different place, drawing
-more times than before, and stopping early.
-
-There are two taps, because a `Random2Class` has two draw entry points that do not share an
-implementation: `operator()` (0x65C780), which `Compute_Game_CRC` uses, and the ranged
-`operator()(int, int)` (0x65C7E0), which walks the table itself rather than calling the other one
-and which almost all gameplay randomness goes through. Tapping only the first sees a handful of
-draws per frame and misses everything that matters.
-
-The ranged form also draws repeatedly until the value fits the range, so one call can advance the
-table any number of times. That is why each entry records where the randomiser stood as well as
-who asked: two runs can reach the same call site in the same order and still part company on how
-far they moved the table, and comparing the cursor catches that too.
-
-Draws from any randomiser other than the scenario's are ignored - the
-map generator and the shell menus have their own and neither is part of the simulation. Call sites
-are held in memory and capped at two million (about eight megabytes), which covers tens of
-thousands of frames of a normal skirmish.
-
-Draws made while a keyframe is loading are ignored. The load constructs every object the file
-holds and each constructor draws - `TechnoClass::TechnoClass` among them - and `ScenarioClass::Load`
-restores the frame counter before any of that runs, so those draws would otherwise land on the
-frame being loaded and be compared against its first pass. They are wiped a moment later when the
-keyframe restores the randomiser, so they are not part of the simulation.
-
-To use it: watch a replay past the point the divergence report named, seek back to before it, and
-let it play through again. The log names the address.
 
 ## Playback controls
 

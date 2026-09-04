@@ -19,13 +19,6 @@
 
 #pragma once
 
-// On-disk layout of a .yrrp replay file. No engine state and no hooks.
-//
-// The CnCNet client mirrors this by hand in DXMainClient/Domain/ReplayGame.cs, and
-// docs/replay-format.md writes it out. Nothing links the three at build time, so a change here has
-// to be made in all of them together; the static_asserts below turn a layout change into a build
-// error instead of a silent misparse. See "Changing the format" in that doc: additive changes keep
-// the version where it is, only a moved or repurposed field bumps it.
 
 #include <GeneralStructures.h>
 
@@ -59,19 +52,8 @@ namespace Replay
 		FrameRecordFlag_GameCRC = 1u << 3,
 		FrameRecordFlag_Extensions = 1u << 4,
 		FrameRecordFlag_ObjectCensus = 1u << 5,
-		// The game speed changed on this frame; an int32 index follows. A single player game
-		// changes it without queueing an event, so the stream is the only place playback can
-		// learn about it.
 		FrameRecordFlag_GameSpeed = 1u << 6,
-		// Where the scenario randomiser stood after this frame's hash was taken. Compute_Game_CRC
-		// draws from that randomiser, so a hash that differs while the objects match means the
-		// randomiser drifted rather than the simulation - two very different bugs. A FrameRandomState
-		// follows.
 		FrameRecordFlag_RandomState = 1u << 7,
-		// Which objects had TriggerEvent::SelectedByPlayer raised on their tag this frame, by
-		// unique ID. Selecting a unit is local input everywhere except here: TechnoClass::Select
-		// springs that event, and a campaign trigger can hang the simulation on it. An int32 count
-		// and that many uint32 unique IDs follow. See SpringRecordedSelectionTriggers.
 		FrameRecordFlag_SelectionTriggers = 1u << 8
 	};
 
@@ -86,10 +68,9 @@ namespace Replay
 		| FrameRecordFlag_SelectionTriggers;
 
 	constexpr uint32_t MaxFrameExtensionBytes = 1u << 20;
+	constexpr uint32_t MaxEmbeddedFileBytes = 32u * 1024u * 1024u;
+	constexpr int32_t MaxEventsPerFrame = 128 * 128;
 
-	// A frame's worth of selection springs. One click selects one group, and the engine's own
-	// selection cap is far below this; the bound is here so playback parsing cannot be handed an
-	// arbitrary allocation by a corrupt file.
 	constexpr int32_t MaxSelectionTriggersPerFrame = 4096;
 
 	// Non-deterministic network and UI events, recorded separately from EventClass::DoList.
@@ -177,9 +158,6 @@ namespace Replay
 
 #pragma pack(pop)
 
-	// Size alone does not pin a layout - swapping two fields of the same width leaves sizeof
-	// untouched and misparses everything after them - so the offsets the client hardcodes are
-	// pinned one by one as well.
 	static_assert(sizeof(ReplayHeader) == 1452, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameObjectCensus) == 8, "FrameObjectCensus layout changed; update docs/replay-format.md");
@@ -227,9 +205,6 @@ namespace Replay
 		return std::max(1, 60 / gameSpeed);
 	}
 
-	// Whether this build understands a file's layout generation. Nothing to do with whether the
-	// recorded game will reproduce - that is what the client's per-file hash check answers, and a
-	// replay can pass this and still diverge because the rules or the engine moved underneath it.
 	inline bool IsReplayVersionSupported(uint32_t version)
 	{
 		return version >= MinSupportedReplayVersion && version <= ReplayVersion;
@@ -240,6 +215,11 @@ namespace Replay
 		return header.Magic == ReplayMagic
 			&& IsReplayVersionSupported(header.Version)
 			&& header.HeaderSize >= sizeof(ReplayHeader)
+			&& header.UniqueIDCounter >= 0
+			&& header.RandomNext1 >= 0 && header.RandomNext1 < 250
+			&& header.RandomNext2 >= 0 && header.RandomNext2 < 250
+			&& header.SpawnIniSize <= MaxEmbeddedFileBytes
+			&& header.SpawnMapSize <= MaxEmbeddedFileBytes
 			&& IsReplayGameSpeedIndexValid(header.RecordedGameSpeed);
 	}
 }

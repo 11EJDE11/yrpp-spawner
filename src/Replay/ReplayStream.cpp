@@ -245,11 +245,6 @@ namespace Replay
 			// buffer.
 			size_t outputUsed = TINFL_LZ_DICT_SIZE - this->WindowWritePos;
 
-			// Drop TINFL_FLAG_HAS_MORE_INPUT once the file runs out, or tinfl keeps waiting for
-			// input that never arrives. Dropped, a stream that ends mid-symbol - the shape a
-			// crashed recording leaves behind - comes back as
-			// TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS instead of being zero-padded and decoded
-			// into garbage past the end.
 			const mz_uint32 flags = this->InputExhausted
 				? 0u
 				: static_cast<mz_uint32>(TINFL_FLAG_HAS_MORE_INPUT);

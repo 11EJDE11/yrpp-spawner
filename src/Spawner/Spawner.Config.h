@@ -115,45 +115,20 @@ public:
 	// Move the camera yourself instead of following the recorded view.
 	bool ReplayFreeCamera;
 	bool ReplayShowSelections;
-	// How fast to watch a replay, in frames per second - a rung of SpeedLadder in ReplayControls.h.
-	// Zero or less watches it at the speed it was recorded at.
+	// Playback frame rate. Zero uses the recorded speed.
 	int  ReplayPlaybackSpeed;
-	// Watch as an observer: reveals the whole map and makes cloaked and disguised units and radar
-	// blips visible.
+	// Watch as an observer with full map visibility.
 	bool ReplaySpectator;
 	// Playback only. Recording chat, beacons and taunts is unconditional.
 	bool ReplayShowChatAndBeacons;
-	// Which spawn.ini player slot playback is watched from: 0 or -1 is the recording player, N is
-	// [OtherN]. Only human slots are accepted; anything else falls back to the recording player.
+	// Player slot to watch. Zero or -1 uses the recorder.
 	int  ReplayViewPlayer;
-	// Draw the on-screen playback controls - seek bar, transport buttons, clock - during playback.
-	// No client UI sets this; it is a keybind-only toggle that just starts out hidden.
+	// Show the playback control bar initially.
 	bool ReplayControlBar;
-	// How many frames apart playback drops a rewind checkpoint - a savegame keyframe, in
-	// ReplaySeek.h's terms - so seeking backwards restarts from one instead of replaying from the
-	// beginning. Zero or less takes none, which leaves seeking forward-only.
-	int  ReplayRewindCheckpointInterval;
-
-	// Per-frame state watchers that compare a seek against the frames playback already went
-	// through, and name the first object, cell or randomiser draw the two disagree about. They
-	// walk every cell on the map every frame, so they are far too slow to leave on: this is for
-	// chasing a divergence, not for watching a replay.
-	// They also keep everything they record for the life of the replay, inside a 192MB budget
-	// they report reaching, so leaving them on costs memory as well as time.
-	bool ReplayDiagnostics;
-
-	// A seek draws one frame in sixty so a long one does not look like a hang. That makes the
-	// frames it replays differ from the frames playback drew the first time round, which matters
-	// only if anything on the draw path writes state the simulation reads - as AircraftClass::
-	// Draw_It once did, calling Set_Height(0) for its shadow and recalculating the cell under it.
-	// That one is patched out in Bugfixes.Desyncs.cpp; this exists to answer whether anything
-	// else does the same, by drawing every frame of a seek so the two passes match.
-	//
-	// That test came back negative - the divergence was identical either way - so this is off
-	// and a seek draws one frame in sixty again. Kept because it costs nothing and re-tests the
-	// whole question in one run.
-	bool ReplaySeekRenderEveryFrame;
-
+	// Frames between playback keyframes. Zero disables rewind keyframes.
+	int  ReplayKeyframeInterval;
+	// Maximum keyframe storage in MB. Zero disables the limit.
+	int  ReplayKeyframeStorageLimitMB;
 	// Scenario Options
 	int  Seed;
 	int  TechLevel;
@@ -242,9 +217,8 @@ public:
 		, ReplayShowChatAndBeacons { true }
 		, ReplayViewPlayer { -1 }
 		, ReplayControlBar { false }
-		, ReplayRewindCheckpointInterval { 750 }
-		, ReplayDiagnostics { true }
-		, ReplaySeekRenderEveryFrame { false }
+		, ReplayKeyframeInterval { 750 }
+		, ReplayKeyframeStorageLimitMB { 512 }
 
 		// Scenario Options
 		, Seed { 0 }

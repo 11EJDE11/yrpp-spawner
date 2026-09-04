@@ -282,9 +282,6 @@ namespace ReplaySystem
 					+ static_cast<int>((static_cast<long long>(clamped) * layout.Track.Width) / total);
 			}
 
-			// What the bar points at: the frame being dragged to while a drag is in progress, and
-			// otherwise where playback actually is - including during a seek, where watching the
-			// handle sweep towards the target is the only progress there is to show.
 			int DisplayFrame()
 			{
 				return Interaction.DraggingHandle ? Interaction.ScrubFrame : Seek::CurrentFrame();
@@ -488,9 +485,6 @@ namespace ReplaySystem
 			Interaction.HoveredTrackFrame = overTrack ? FrameAtTrackPosition(layout, mouseX) : -1;
 			Interaction.HoveredTrackX = mouseX;
 
-			// A press that landed on the panel keeps the mouse until it is let go, wherever the
-			// pointer has wandered to since: a drag off the end of the bar still belongs to the bar,
-			// and a press slid off a button still has to be cancelled rather than left half-done.
 			const bool holding = Interaction.DraggingHandle || Interaction.PressedButton >= 0;
 
 			if (!holding && !Contains(layout.Panel, mouseX, mouseY))

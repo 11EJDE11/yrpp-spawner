@@ -19,9 +19,6 @@
 
 #pragma once
 
-// Viewer-side controls for replay playback: pause, and a playback speed allowed to run past the
-// 60 FPS ceiling the in-game speed slider tops out at. Both are plain CommandClass commands, bound
-// from the in-game keyboard options like any other. Neither is part of the replay file format.
 
 #include <iterator>
 
@@ -29,11 +26,6 @@ namespace ReplaySystem
 {
 	namespace Controls
 	{
-		// Playback speed ladder, in frames per second. The first seven rungs are the rates the
-		// game-speed slider produces, so the options dialog and these hotkeys agree where they
-		// overlap; the rest exist only for playback, which is not pacing itself against other
-		// players. The engine paces a frame in whole milliseconds, so above 240 FPS only rungs
-		// that land on a different millisecond mean anything, and 2000 divides to no wait at all.
 		constexpr int SpeedLadder[] = { 10, 12, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 500, 1000, 2000 };
 		constexpr int SpeedLadderCount = static_cast<int>(std::size(SpeedLadder));
 
@@ -51,9 +43,6 @@ namespace ReplaySystem
 		// Runs exactly one more frame and freezes again. Pauses first if playback is running.
 		void RequestSingleStep();
 
-		// Top of the frame, before the frame state is restored: commits deferred resumes and releases
-		// playback until an explicit single-step target arrives, then takes the pause back. The target
-		// is cancelled by a manual pause/resume action.
 		void ServiceFrameStart();
 
 		// Playback speed as a multiple of the speed the game was recorded at.
@@ -68,11 +57,9 @@ namespace ReplaySystem
 		void ToggleControlBar();
 		void InitControlBarVisibility();
 
-		// Live viewer-state toggles. Diagnostics starts a fresh capture window when enabled so an
-		// earlier investigation cannot consume its memory or compare against stale samples.
+		// Live viewer-state toggles.
 		void ToggleLockedViewport();
 		void ToggleRecordedSelection();
-		void ToggleDiagnostics();
 
 		// Prints a short notice in the message list, in the style the playback hotkeys use.
 		void PrintControlMessage(const wchar_t* pMessage);
@@ -84,9 +71,6 @@ namespace ReplaySystem
 		// per-frame work that would normally do it.
 		void RenderPausedFrame();
 
-		// The game-speed index (0 fastest .. 6 slowest) the options dialog should show and compare
-		// against for the current playback speed. Speeds past 60 FPS have no slider position of
-		// their own and report as 0, the fastest one the slider has.
 		int GetPlaybackGameSpeedIndex();
 
 		// Applies a game-speed index chosen from the options dialog or replayed from a GameSpeed

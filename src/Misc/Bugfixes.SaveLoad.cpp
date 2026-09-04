@@ -23,7 +23,6 @@
 #include <BulletClass.h>
 #include <HouseClass.h>
 #include <HoverLocomotionClass.h>
-#include <Kamikaze.h>
 #include <RocketLocomotionClass.h>
 #include <ScenarioClass.h>
 #include <SlaveManagerClass.h>
@@ -38,58 +37,10 @@
 
 #include <algorithm>
 
-// State that savegame loading reads out of the file and then writes over.
-//
-// AbstractClass::Load (0x410380) registers the saved pointer for swizzling and reads Size_Of()
-// bytes straight into the object. Several derived Load overrides then run a constructor or a
-// block of stores across part of what was just read. Some of that is necessary - vtables and COM
-// interface pointers cannot survive serialisation and have to be repaired - but it also discards
-// gameplay state that the file carried perfectly well.
-//
-// Most of this file is that pattern, and those fixes are all the same shape: leave the loaded
-// value alone. None of them changes the save format and all of them work on existing saves.
-//
-// The exception is the kamikaze tracker at the end, where there is no loaded value to leave alone
-// because the field was never written. That one extends the save format, and a savegame written by
-// this build will not load in a build without it. See docs/save-load-correctness.md.
-
-// Frame timers thrown away by savegame loading.
-//
-// A CDTimerClass is three words - the frame it was started on, an unused slot, and how long it has
-// left to run - and every consumer in the engine reads it the same way:
-//
-//     if (StartTime != -1 && Frame - StartTime >= TimeLeft) fire;
-//     if (TimeLeft == 0)                                    fire;
-//
-// Both branches are open on a timer holding { current frame, 0 }, so a timer left in that state
-// fires on the next frame it is asked and keeps on firing. That is exactly what a load writes over
-// seven timers it has just read out of the savegame: AbstractClass::Load (0x410380) reads Size_Of()
-// bytes straight into the object, and the fixup code that runs afterwards resets them.
-//
-// The worst of the seven is the slave manager. SlaveManagerClass::AI (0x6AF5F0) does nothing at all
-// unless its gate has expired, and re-arms it for ten frames when it fires, so every slave on the
-// map scans for ore, harvests and respawns on one frame in ten. Resetting that gate both fires it
-// immediately and re-phases it against the load rather than against the timeline being continued.
-// The slaves then scan at different moments, pick different ore cells, take different paths and
-// finish standing somewhere else - on the first frame after the load, every time, in any game with
-// a slave miner in it.
-//
-// None of these timers needs anything added to the save format. The value is already in the file
-// and already in the object by the time the reset happens, so the whole fix is to not write over
-// it. See docs/save-load-correctness.md section 4.
+// Preserve serialized gameplay state that vanilla load initialization overwrites.
 
 #pragma region Timers reset through CDTimerClass::operator=
 
-// CDTimerClass::operator=(int) at 0x46B640 is { StartTime = Frame; TimeLeft = argument; } and six
-// load-time call sites invoke it with an argument of zero. They are intercepted here, in the one
-// place they all pass through, rather than at six separate call sites: the argument was pushed by
-// the caller and is cleaned up by this function's own retn 4, so declining to write is simply a
-// matter of jumping to that instruction. Suppressing the call at the call site instead would leave
-// the argument on the stack.
-//
-// Matching on the return address keeps it exact. This helper is also used by the drive and ship
-// locomotors, by TActionClass, by SuperClass::Enable and by the veinhole monster, and none of those
-// is a load and none of them is affected.
 constexpr DWORD TimerResetsToSuppress[] =
 {
 	// BulletClass::Load (0x46AE70): the two flight timers of a projectile in the air.
@@ -103,9 +54,6 @@ constexpr DWORD TimerResetsToSuppress[] =
 	// gate beside it is written inline rather than through this helper; see below.
 	0x6B7F5F,
 
-	// TiberiumClass::Load (0x721E80): whether ore is due to spread and grow. Tiberium_Spread_Logic
-	// (0x7221B0) and Tiberium_Growth_Logic (0x722C40) read these before either queue is touched, so
-	// a reset makes the ore field tick on the frame after every load whether it was due or not.
 	0x721FBB, // SpreadLogic.Timer
 	0x721FC7, // GrowthLogic.Timer
 };
@@ -127,8 +75,6 @@ static_assert(offsetof(TiberiumClass, GrowthLogic) + offsetof(TiberiumLogic, Tim
 // anything leaves the timer as the load found it and still balances the caller's argument.
 constexpr DWORD CDTimerClass_operator_assign_Return = 0x46B651;
 
-// Six bytes: mov edx, [esp+4] is four and mov eax, ecx is two, so the hook lands on an instruction
-// boundary and a suppressed call falls through to the untouched remainder.
 DEFINE_HOOK(0x46B640, CDTimerClass_Assign_KeepValueAcrossLoad, 0x6)
 {
 	const DWORD caller = R->Stack<DWORD>(0x0);
@@ -146,18 +92,6 @@ DEFINE_HOOK(0x46B640, CDTimerClass_Assign_KeepValueAcrossLoad, 0x6)
 
 #pragma region Timers reset inline
 
-// SpawnManagerClass::Load (0x6B7F10) sets up the call above with
-//
-//     mov  ecx, Frame
-//     push edi                  ; the argument, zero
-//     mov  [ebx+50h], ecx       ; UpdateTimer.StartTime = Frame
-//     lea  ecx, [ebx+5Ch]       ; the argument of the call that follows
-//     mov  [ebx+58h], edi       ; UpdateTimer.TimeLeft  = 0
-//     call CDTimerClass::operator=
-//
-// so the update gate is reset in passing, without going through the helper. The three instructions
-// from 0x6B7F51 are replaced wholesale: the two stores are dropped and the lea they straddle is
-// done here instead, leaving the call that follows with the ecx it expects.
 static_assert(offsetof(SpawnManagerClass, UpdateTimer) == 0x50,
 	"SpawnManagerClass::Load (0x6B7F10) resets the update timer inline at SpawnManagerClass+0x50");
 
@@ -169,29 +103,15 @@ DEFINE_HOOK(0x6B7F51, SpawnManagerClass_Load_KeepUpdateTimer, 0x9)
 	return 0x6B7F5A;
 }
 
-// HouseClass::Load (0x503040) reads the house whole and then runs the no-init constructor
-// (0x4F5190) over it, whose only caller it is. Two of that constructor's stores are
-//
-//     mov ecx, Frame
-//     mov [esi+280h], ecx       ; RepairTimer.StartTime = Frame
-//     lea ecx, [esi+5500h]
-//     mov [esi+288h], ebx       ; RepairTimer.TimeLeft  = 0
-//
-// which leave the timer describing something other than the Repairing gate it belongs to. The gate
-// then clears on a different frame, a building repairs on a different tick, and an AI house can
-// consume a different synchronised draw in BuildingClass::Repair_AI.
 static_assert(offsetof(HouseClass, RepairTimer) == 0x280,
 	"HouseClass::HouseClass(NoInitClass) (0x4F5190) resets the repair timer at HouseClass+0x280");
 
-// Twelve bytes: mov ecx, Frame and mov [esi+280h], ecx, both six. The lea that follows is left
-// alone because the constructor needs it.
 DEFINE_HOOK(0x4F5327, HouseClass_NoInit_KeepRepairTimerStart, 0xC)
 {
 	return 0x4F5333;
 }
 
-// Six bytes, the store of TimeLeft on its own. ecx is already loaded for the call that follows and
-// is carried through untouched.
+// Preserve the loaded repair timer's remaining time.
 DEFINE_HOOK(0x4F5339, HouseClass_NoInit_KeepRepairTimerLeft, 0x6)
 {
 	return 0x4F533F;
@@ -201,18 +121,7 @@ DEFINE_HOOK(0x4F5339, HouseClass_NoInit_KeepRepairTimerLeft, 0x6)
 
 #pragma region Locomotor members reconstructed after load
 
-// LocomotionClass::Load (0x55AAC0) reads the whole locomotor, and four derived overrides then
-// rebuild a member on top of it. The vtable repairs around them are needed; these are not.
-//
-// A locomotor is the part of a unit that owns where it is going and how far through getting
-// there it is, so what these discard is a movement already in progress: a hovering unit part-way
-// through a turn, a subterranean unit part-way through a dig, a chrono unit part-way through a
-// warp, a rocket part-way through its climb. The unit restarts that step after a load, which
-// takes a different number of frames and leaves it in a different place.
-
-// FacingClass has no virtual functions - it is a desired facing, a start facing, a rotation timer
-// and a rate - so the default constructor here repairs nothing at all. It only throws away a turn
-// in progress.
+// Keep serialized movement state instead of reconstructing it after load.
 static_assert(offsetof(HoverLocomotionClass, LocomotionFacing) == 0x30,
 	"HoverLocomotionClass::Load (0x5170B0) reconstructs the facing at HoverLocomotionClass+0x30");
 
@@ -221,8 +130,6 @@ DEFINE_HOOK(0x5170DB, HoverLocomotionClass_Load_KeepFacing, 0x5)
 	return 0x5170E0;
 }
 
-// Fifteen bytes: the frame fetch and the three stores that make up DigTimer - TimeLeft, StartTime
-// and the rate. Nothing after them reads the registers they used.
 static_assert(offsetof(TunnelLocomotionClass, DigTimer) == 0x28,
 	"TunnelLocomotionClass::Load (0x72A150) resets the dig timer at TunnelLocomotionClass+0x28");
 
@@ -231,10 +138,6 @@ DEFINE_HOOK(0x72A177, TunnelLocomotionClass_Load_KeepDigTimer, 0xF)
 	return 0x72A186;
 }
 
-// Fifteen bytes again, and deliberately fifteen rather than the twenty-two that reach the next
-// vtable store. The store immediately after this range clears Piggybackee, which is a live
-// ILocomotion pointer rather than gameplay state and genuinely cannot survive serialisation, so
-// it is left to run.
 static_assert(offsetof(TeleportLocomotionClass, Timer) == 0x3C,
 	"TeleportLocomotionClass::Load (0x719CA0) resets the timer at TeleportLocomotionClass+0x3C");
 static_assert(offsetof(TeleportLocomotionClass, Piggybackee) == 0x48,
@@ -245,7 +148,6 @@ DEFINE_HOOK(0x719CC9, TeleportLocomotionClass_Load_KeepTimer, 0xF)
 	return 0x719CD8;
 }
 
-// Sixteen bytes: the frame fetch and the two stores that make up TrailerTimer.
 static_assert(offsetof(RocketLocomotionClass, TrailerTimer) == 0x34,
 	"RocketLocomotionClass::Load (0x663410) resets the trailer timer at RocketLocomotionClass+0x34");
 
@@ -254,29 +156,6 @@ DEFINE_HOOK(0x663435, RocketLocomotionClass_Load_KeepTrailerTimer, 0x10)
 	return 0x663445;
 }
 
-// ParasiteClass::Load (0x6295B0) reads the parasite whole and then writes both of its timers back
-// to { Frame, 0 } inline:
-//
-//     mov edx, Frame
-//     mov dword ptr [esi+34h], 0    ; SuppressionTimer.TimeLeft  = 0
-//     mov [esi+2Ch], edx            ; SuppressionTimer.StartTime = Frame
-//     mov eax, Frame
-//     mov [esi+38h], eax            ; DamageDeliveryTimer.StartTime = Frame
-//     mov dword ptr [esi+40h], 0    ; DamageDeliveryTimer.TimeLeft  = 0
-//
-// which is the state that fires on the next frame it is asked. ParasiteClass::AI (0x629FD0) opens
-// with the usual gate - nothing happens until Frame - StartTime >= TimeLeft - and re-arms it for
-// the weapon's ROF when it fires, so a terror drone delivers its damage tick on one frame in ROF.
-// Resetting the gate makes it deliver on the first frame after every load instead.
-//
-// That tick is not quiet. For a vehicle victim it spawns Rules' DefaultSparkSystem and the
-// weapon's impact anim, draws from the synchronised randomiser at 0x62A189 to pick which way to
-// rock the victim, and calls Take_Damage. Seeking onto a keyframe with a drone attached to
-// anything therefore made three objects the recording never made and consumed a draw it never
-// consumed - which is the whole of the divergence the replay keyframes were failing on.
-//
-// Six bytes, the frame fetch, and the four stores after it are dropped with it. Nothing between
-// here and the vtable repairs reads edx or eax.
 static_assert(offsetof(ParasiteClass, SuppressionTimer) == 0x2C,
 	"ParasiteClass::Load (0x6295B0) resets the suppression timer at ParasiteClass+0x2C");
 static_assert(offsetof(ParasiteClass, DamageDeliveryTimer) == 0x38,
@@ -294,33 +173,7 @@ void RecomputeAllCellPassability();
 
 #pragma region Unique IDs thrown away by the AbstractClass constructor
 
-// AbstractClass::AbstractClass (0x410170) ends with
-//
-//     mov dword ptr [eax+10h], 0FFFFFFFFh   ; UniqueID = -1
-//
-// because a bare abstract has no identity until Create_ID gives it one. Two Load overrides run
-// that constructor over an object AbstractClass::Load has just filled in from the savegame, and
-// the file's own UniqueID goes with it:
-//
-//     SuperClass::Load (0x6CDEF0) at 0x6CDF0E
-//     TubeClass::Load  (0x7281A0) at 0x7281BA
-//
-// Every superweapon in the game therefore comes back from a load identified as -1. The keyframe
-// diagnostics found it by name - "SuperClass is missing object unique ID 1035599 ... the load left
-// unique ID 4294967295 at position 0" is eight supers all reading -1 - and it means the replay
-// seek can never put SuperClass::Array back into the order the recording had it in, because there
-// is nothing left to match the objects by.
-//
-// The rest of what the constructor does is repair: four vtables that cannot be serialised, a COM
-// reference count that has to restart at zero, and the transient flags beside it. Only the
-// identity is wrong to discard, so only the identity is put back.
-//
-// Hooked at the call rather than inside the constructor, which runs for every object the game
-// ever creates. Both hooks stand on that relative call and neither returns 0 - the constructor is
-// invoked from here and execution resumes past it. Returning 0 would have been fine too, since
-// SyringeEx rebuilds relative branches into the saved bytes rather than copying them verbatim (see
-// ScenarioClass_Load_TakeRandomiserAndCounter below, which does exactly that); calling it here is
-// simply the clearer way to say "run the constructor, then put the identity back".
+// Restore saved object IDs after load constructors clear them.
 AbstractClass* ConstructAbstractBase(AbstractClass* pAbstract)
 {
 	using Constructor = AbstractClass* (__thiscall*)(AbstractClass*);
@@ -360,24 +213,11 @@ DEFINE_HOOK(0x7281BA, TubeClass_Load_KeepUniqueID, 0x5)
 
 #pragma region Scenario randomiser and unique-ID counter
 
-// ScenarioClass::Load (0x689470) reads 0x3740 bytes of scenario at 0x6894B7 and then runs
-// ScenarioClass::ScenarioClass (0x683560) over the result at 0x6894C5. That constructor's first
-// act is Random2Class::Random2Class(&RandomNumber, 0), which re-seeds the synchronised randomiser
-// to a fixed seed and throws away the state the file just supplied.
-//
-// Restoring the two visible indices is not enough. The randomiser owns a shuffle table as well as
-// its cursor, and all of it decides the future sequence, so the whole object is carried across.
-//
-// The unique-ID counter is taken here as well, because this is the only moment it holds the value
-// the file recorded. It is put back at the end of the load; see below.
+// Preserve the saved randomizer and ID counter across scenario reconstruction.
 bool HaveScenarioLoadState = false;
 Randomizer LoadedScenarioRandom {};
 int LoadedScenarioUniqueID = 0;
 
-// True from ScenarioClass::Load until Load_Game finishes. Kept separate from the flag above, which
-// is conditional on the scenario pointer and is cleared once the counter has been put back: this one
-// is set and cleared unconditionally so the window is always balanced. Read by the playfield fix
-// below, which must only change what a load does.
 bool SaveGameLoadInProgress = false;
 
 DEFINE_HOOK(0x6894C5, ScenarioClass_Load_TakeRandomiserAndCounter, 0x5)
@@ -396,9 +236,6 @@ DEFINE_HOOK(0x6894C5, ScenarioClass_Load_TakeRandomiserAndCounter, 0x5)
 	return 0;
 }
 
-// The instruction the constructor returns to. It is also the target of the branch that skips the
-// constructor entirely when the scenario pointer is null, which is why the flag above exists
-// rather than a bare copy back.
 DEFINE_HOOK(0x6894CA, ScenarioClass_Load_PutRandomiserBack, 0x6)
 {
 	GET(ScenarioClass* const, pScen, EBP);
@@ -409,26 +246,8 @@ DEFINE_HOOK(0x6894CA, ScenarioClass_Load_PutRandomiserBack, 0x6)
 	return 0;
 }
 
-// AbstractClass::Create_ID (0x410230) consumes ScenarioClass::UniqueID through
-// Increment_UniqueID (0x68BCB0), and the class factory that rebuilds the saved object graph goes
-// through the ordinary constructors, so every object the load creates takes an ID. Each one's own
-// Load then replaces that temporary ID with the saved one, but nothing gives the counter back:
-// tens of thousands of IDs are consumed by a load, cells included, and the drift is a function of
-// how much was in the save rather than any fixed amount.
-//
-// The counter is put back once the whole load has finished - after Init_Scenario_stuff and the
-// tiberium initialisation, which construct objects of their own - so nothing that runs during the
-// load can push it forward again.
-//
-// It is validated rather than trusted. Increment_UniqueID hands out the incremented value, so the
-// counter is the last ID issued and must not be below any ID now in the world; a post-load routine
-// that legitimately created something new has to keep its ID. Taking the higher of the two is
-// correct in both directions and can never hand out an ID twice.
 DEFINE_HOOK(0x67E6BD, LoadGame_PutUniqueIDCounterBack, 0x5)
 {
-	// Everything the load builds is in place by here - the object graph, the map, the tiberium
-	// initialisation - so this is the last chance to correct the cells and the first point at which
-	// their occupants are all known.
 	RecomputeAllCellPassability();
 
 	// Cleared before the early returns below, so the window closes whatever else this load did.
@@ -462,41 +281,7 @@ DEFINE_HOOK(0x67E6BD, LoadGame_PutUniqueIDCounterBack, 0x5)
 
 #pragma region TechnoClass::IsInPlayfield
 
-// The flag is serialised with the techno, but MapClass::_clip_map (0x567230) - reached from
-// Init_Scenario_stuff while loading - assigns it from whether the techno is inside the playable
-// map right now:
-//
-//     bl = techno->IsInPlayfield;
-//     al = Map.In_Radar(techno->Get_Cell());
-//     techno->IsInPlayfield = al;
-//     if (!bl && al) { ... it has just entered ... }
-//
-// Ordinary play never clears it. Per-cell processing sets it once a techno enters the map and
-// leaves it set when the object later leaves again, so it means "has been in play", not "is
-// inside the map". AircraftClass::Should_Delete_Off_Map (0x41B890) relies on that: an off-map
-// aircraft whose flag is false is one that has not arrived yet and must not be removed. A spy
-// plane that had flown in and was on its way out when the game was saved comes back from the load
-// looking like it had never arrived, so it is never removed and keeps flying.
-//
-// Making the assignment monotonic restores the historical meaning for the case that matters - was
-// inside, is now outside - and leaves the just-entered branch below reading the same bl and al it
-// always did.
-//
-// It is scoped to a load rather than left on, because _clip_map is not load-only. The chain is
-//
-//     MapClass::_clip_map (0x567230)
-//       <- RadarClass::_clip_map (0x654490)
-//         <- RadarClass_reinit (0x655990)
-//           <- TActionClass::Resize_Player_View (0x6E21E0)
-//
-// and that last one is the "Resize Player View" trigger action, which fires mid-game on campaign
-// maps and on any custom map that uses it. Left unconditional, a techno that was inside the old
-// view and is outside the resized one keeps a flag the engine meant to clear - and by the same
-// Should_Delete_Off_Map reasoning above, that turns an aircraft from "has not arrived, keep" into
-// "arrived and off-map, delete". A view resize would start removing aircraft that vanilla keeps.
-//
-// During a load there is no such intent: the flag is being reassigned from a world that has only
-// just been rebuilt, and the historical value is the one the file carried.
+// Keep the historical in-playfield flag when loading an object outside the map.
 static_assert(offsetof(TechnoClass, IsInPlayfield) == 0x3D5,
 	"MapClass::_clip_map (0x567230) assigns the playfield flag at TechnoClass+0x3D5");
 
@@ -504,15 +289,11 @@ DEFINE_HOOK(0x56730E, MapClass_ClipMap_KeepIsInPlayfield, 0x6)
 {
 	GET(TechnoClass* const, pTechno, ESI);
 
-	// These six bytes are the assignment itself, so the ordinary path has to perform it: leaving it
-	// out would stop the flag being maintained at all outside a load.
 	const bool isInPlayfield = (R->EAX() & 0xFF) != 0;
 
 	if (isInPlayfield || !SaveGameLoadInProgress)
 		pTechno->IsInPlayfield = isInPlayfield;
 
-	// The comparison of the old flag against the new one is already in the flags register and the
-	// branch that reads it is the next instruction, so nothing here may disturb either.
 	return 0x567314;
 }
 
@@ -520,40 +301,7 @@ DEFINE_HOOK(0x56730E, MapClass_ClipMap_KeepIsInPlayfield, 0x6)
 
 #pragma region Cell passability
 
-// The vanilla cell stream does not carry passability - the matching Tiberian Sun source calls it
-// derived state - and CellClass::Load (0x4839F0) leaves every cell reading PASSABLE_OK.
-//
-// The map's own copy is rebuilt correctly: MapClass::Update_PassabilityType (0x56C510) runs
-// during MapClass_LevelAndPassability_567110 and fills MapClass::LevelAndPassability from the
-// world. What nothing puts back is the field on the cell itself, and that is the one the
-// cell-level pathfinder reads. It is wrong everywhere, and immediately and visibly wrong on the
-// isometric border, where CellClass::Check_Passability (0x483C80) opens with
-//
-//     if (!Map.In_Radar(Position, true)) { Passability = PASSABLE_OUTSIDE; return; }
-//
-// so thousands of cells outside the playable area come back walkable. Routes can be planned
-// through them.
-//
-// Check_Passability is the engine's own answer for one cell, derived from overlay, land type and
-// whatever is standing there, so the fix is to ask it for every cell once the world is whole.
-//
-// It is asked twice, in two places, because neither alone covers both cases:
-//
-//  - At the entry to MapClass_LevelAndPassability_567110 (0x567110), which rebuilds the map's own
-//    passability copy and all three levels of the subzone graph from these cells. Recomputing there
-//    means that rebuild is fed correct input rather than repaired afterwards. That function is
-//    reached only from MapClass::Set_Map_Dimensions (0x565C10) and never per frame.
-//
-//  - At the end of Load_Game (0x67E440). The first attempt at this fix used only the hook above, on
-//    the strength of the call chain in the notes - and it never fired once, because
-//    Init_Scenario_stuff (0x685120) does not call Set_Map_Dimensions at all. It initialises the
-//    type heaps, resets A*, re-clips the radar and returns. A load therefore never reaches
-//    0x567110, the cells stayed as CellClass::Load left them, and the divergence came straight
-//    back. This second call site is on the load path by construction.
-//
-// Both run for ordinary map setup as well as for a load. That is deliberate and harmless: the
-// answer for a cell is a function of the cell, so asking more often than the engine does either
-// agrees with what is already there or corrects it.
+// Recompute cell passability after the map has been reconstructed.
 void CheckCellPassability(CellClass* pCell)
 {
 	using CheckPassability = void(__thiscall*)(CellClass*);
@@ -574,7 +322,6 @@ void RecomputeAllCellPassability()
 	}
 }
 
-// Five bytes: three pushes and the two-byte move that follows them.
 DEFINE_HOOK(0x567110, MapClass_LevelAndPassability_RecomputeCellPassability, 0x5)
 {
 	RecomputeAllCellPassability();
@@ -582,79 +329,3 @@ DEFINE_HOOK(0x567110, MapClass_LevelAndPassability_RecomputeCellPassability, 0x5
 }
 
 #pragma endregion Cell passability
-
-#pragma region Kamikaze tracker gate
-
-// The only fix in this file that adds to the save format, because it is the only one where the
-// value was never written in the first place.
-//
-// Kamikaze::Save (0x54E750) writes the node count and then the eight bytes of each node, and
-// stops. UpdateTimer is not in the stream at all - no YR savegame has ever carried it - so a load
-// leaves the tracker holding whatever phase the world it was loaded over happened to be in.
-//
-// Kamikaze::Update (0x54E4D0) is gated on that timer, re-arms it for thirty frames when it fires,
-// and gives every tracked aircraft MISSION_ATTACK:
-//
-//     if (Frame - StartTime >= TimeLeft) {
-//         StartTime = Frame; TimeLeft = 30;
-//         for (each node) { Ammo = 1; Assign_Target(...); Assign_Mission(MISSION_ATTACK); }
-//     }
-//
-// A V3 rocket is a missile spawn and is tracked, so every missile in the air takes its attack
-// mission on one frame in thirty - and after a load that is a different frame. Five rockets were
-// assigned a frame late at one keyframe, and one of them then ran a mission step behind for the
-// rest of its life: still on AIR_ATT_VALIDATE_AZ where the first pass had reached
-// AIR_ATT_PICK_ATTACK_LOCATION, which is the branch of AircraftClass::Mission_Attack that draws
-// its delay from the synchronised randomiser. One frame of phase, one draw, and the two runs are
-// different games. It is not a replay-only fault: save an ordinary game with a V3 in the air,
-// reload it, and every missile fires on the wrong tick.
-//
-// The two words go in ahead of the node count, on both sides, so the reader is in step with the
-// writer. Both hooks sit on the function entry, where the stream is still at [esp+4].
-//
-// The tail of a CDTimerClass is an unused word, so StartTime and TimeLeft are written by hand
-// rather than the struct: no point putting an uninitialised four bytes in a savegame.
-struct KamikazeGate
-{
-	int StartTime;
-	int TimeLeft;
-};
-
-static_assert(offsetof(Kamikaze, UpdateTimer) == 0,
-	"Kamikaze::Save (0x54E750) and ::Load (0x54E7B0) carry the gate at Kamikaze+0");
-
-// Seven bytes: the three pushes and the four-byte load of the stream argument after them.
-DEFINE_HOOK(0x54E750, Kamikaze_Save_WriteUpdateTimer, 0x7)
-{
-	GET(Kamikaze* const, pTracker, ECX);
-	GET_STACK(IStream* const, pStream, 0x4);
-
-	if (pTracker && pStream)
-	{
-		const KamikazeGate gate { pTracker->UpdateTimer.StartTime, pTracker->UpdateTimer.TimeLeft };
-		pStream->Write(&gate, sizeof(gate), nullptr);
-	}
-
-	return 0;
-}
-
-// Five bytes: sub esp, 8 and the two pushes after it.
-DEFINE_HOOK(0x54E7B0, Kamikaze_Load_ReadUpdateTimer, 0x5)
-{
-	GET(Kamikaze* const, pTracker, ECX);
-	GET_STACK(IStream* const, pStream, 0x4);
-
-	if (pTracker && pStream)
-	{
-		KamikazeGate gate { -1, 0 };
-		if (SUCCEEDED(pStream->Read(&gate, sizeof(gate), nullptr)))
-		{
-			pTracker->UpdateTimer.StartTime = gate.StartTime;
-			pTracker->UpdateTimer.TimeLeft = gate.TimeLeft;
-		}
-	}
-
-	return 0;
-}
-
-#pragma endregion Kamikaze tracker gate

@@ -79,9 +79,6 @@ namespace ReplaySystem
 				return GetReplayFPSFromGameSpeed(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed));
 			}
 
-			// The rung the current speed sits on. A speed that is not exactly on the ladder - a
-			// hand written ReplayPlaybackSpeed, or a GameSpeed event out of the recording - snaps
-			// to the nearest rung so the next step still moves somewhere sensible.
 			int FindNearestLadderIndex(int fps)
 			{
 				int bestIndex = 0;
@@ -303,25 +300,6 @@ namespace ReplaySystem
 				virtual void Execute(WWKey) const override { ToggleRecordedSelection(); }
 			};
 
-			class ReplayToggleDiagnosticsCommandClass : public CommandClass
-			{
-			public:
-				virtual const char* GetName() const override { return "ReplayToggleDiagnostics"; }
-
-				virtual const wchar_t* GetUIName() const override
-					{ return StringTable::TryFetchString("TXT_REPLAY_DIAGNOSTICS", L"Replay: Enable/Disable Diagnostics"); }
-
-				virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
-
-				virtual const wchar_t* GetUIDescription() const override
-				{
-					return StringTable::TryFetchString("TXT_REPLAY_DIAGNOSTICS_DESC",
-						L"Toggles expensive divergence diagnostics and starts a fresh capture window when enabled.");
-				}
-
-				virtual void Execute(WWKey) const override { ToggleDiagnostics(); }
-			};
-
 			template <typename T>
 			T* MakeCommand()
 			{
@@ -480,28 +458,6 @@ namespace ReplaySystem
 				: L"Recorded unit selection disabled.");
 		}
 
-		void ToggleDiagnostics()
-		{
-			if (!ReplayState.Playback)
-				return;
-
-			ReplayState.DiagnosticsEnabled = !ReplayState.DiagnosticsEnabled;
-			if (ReplayState.DiagnosticsEnabled)
-			{
-				ResetRandomDrawTrace();
-				ResetMissionTrace();
-				ResetPathRequestTrace();
-				ResetLandingZoneTrace();
-				ResetUpdateOrderTrace();
-				Seek::ResetDiagnostics();
-				ResetDiagnosticMemory();
-			}
-
-			PrintControlMessage(ReplayState.DiagnosticsEnabled
-				? L"Replay diagnostics enabled; capture window reset."
-				: L"Replay diagnostics disabled.");
-		}
-
 		void StepPlaybackSpeed(int direction)
 		{
 			if (!ReplayState.Playback || direction == 0)
@@ -528,9 +484,6 @@ namespace ReplaySystem
 
 		int GetPlaybackGameSpeedIndex()
 		{
-			// The slider counts the other way round from the ladder and stops at 60 FPS. Anything
-			// faster reports as its fastest position, so opening the dialog and leaving it alone
-			// cannot slow playback back down.
 			for (int gameSpeedIndex = 0; gameSpeedIndex <= MaxGameSpeedIndex; ++gameSpeedIndex)
 			{
 				if (GetReplayFPSFromGameSpeed(gameSpeedIndex) <= ReplayState.PlaybackFPS)
@@ -557,7 +510,6 @@ namespace ReplaySystem
 			MakeCommand<ReplayToggleControlBarCommandClass>();
 			MakeCommand<ReplayToggleViewportLockCommandClass>();
 			MakeCommand<ReplayToggleSelectionCommandClass>();
-			MakeCommand<ReplayToggleDiagnosticsCommandClass>();
 		}
 	}
 }
