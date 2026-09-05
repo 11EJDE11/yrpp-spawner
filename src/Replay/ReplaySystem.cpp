@@ -17,6 +17,7 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "ReplayControls.h"
 #include "ReplayFile.h"
 #include "ReplayFrameCodec.h"
 #include "ReplaySystem.h"
@@ -89,6 +90,7 @@ namespace ReplaySystem
 			ReplayState.Recording = false;
 			ReplayState.Playback = false;
 			ReplayState.SpectatorView = false;
+			Controls::OnPlaybackStopped();
 			ReplayState.ExpectedEventsThisFrame = 0;
 			ReplayState.LastSyncFlushFrame = 0;
 			ReplayState.ExpectedGameCRC = 0;
@@ -319,6 +321,18 @@ namespace ReplaySystem
 		{
 			if (!ReplayState.Playback)
 				return;
+
+			const auto currentFrame = static_cast<unsigned int>(Unsorted::CurrentFrame);
+
+			// Treat local GameSpeed events as replay playback-speed changes.
+			for (int i = 0; i < EventClass::DoList.Count; ++i)
+			{
+				const auto& event = EventClass::DoList[i];
+				if (event.Frame == currentFrame && event.Type == EventType::GameSpeed)
+				{
+					Controls::SetPlaybackGameSpeedIndex(event.GameSpeed.GameSpeed);
+				}
+			}
 
 			RemoveDoListEvents([](const EventClass& event)
 			{
@@ -989,6 +1003,7 @@ namespace ReplaySystem
 
 			// ReplayPlaybackSpeed is a frame rate, one of the rungs of the viewer's speed ladder,
 			// not a game speed index. Zero or less watches at the speed it was recorded at.
+			const int requestedFPS = pConfig ? pConfig->ReplayPlaybackSpeed : 0;
 
 			int recordedGameSpeed = std::clamp(GameOptionsClass::Instance.GameSpeed, 0, MaxGameSpeedIndex);
 			if (!ReplayState.HasPlaybackHeader)
@@ -1003,6 +1018,11 @@ namespace ReplaySystem
 
 			if (ReplayState.HasPlaybackHeader)
 				recordedGameSpeed = std::clamp(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed), 0, MaxGameSpeedIndex);
+
+			Controls::OnPlaybackStarted(requestedFPS > 0
+				? requestedFPS
+				: GetReplayFPSFromGameSpeed(recordedGameSpeed),
+				pConfig && pConfig->ReplayControlBar);
 
 			// The speed the recording started at, applied once and never re-pinned: a change the
 			// player made during the game is in the event stream and is replayed like any other.

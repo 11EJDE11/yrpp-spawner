@@ -20,6 +20,7 @@
 // The lifecycle, simulation, and viewer hooks. Side-channel recording taps live in ReplaySideChannels.Hook.cpp,
 // and docs/replay-format.md has the detail behind the trickier hooks.
 
+#include "ReplayControls.h"
 #include "ReplayFile.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
@@ -162,7 +163,9 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 	if (ReplayState.Recording)
 		RecordFrameState();
 
-	if (ReplayState.Playback)
+	ReplaySystem::Controls::ServiceFrameStart();
+
+	if (ReplayState.Playback && !ReplaySystem::Controls::IsPlaybackPaused())
 		RestoreFrameState();
 
 	return 0;
@@ -272,6 +275,11 @@ DEFINE_HOOK(0x647586, Queue_AI_Singleplayer_RecordPlaybackEvents, 0x7)
 	return SkipQueueRecord;
 }
 
+DEFINE_HOOK(0x55E160, SyncDelay_PaceReplayPlayback, 0x6)
+{
+	ReplaySystem::Controls::ApplyFramePacing();
+	return 0;
+}
 
 // Main_Loop's network pump. Playback has no live session to service.
 DEFINE_HOOK(0x55D8E3, MainLoop_SkipIPXPumpDuringReplayPlayback, 0x5)
@@ -480,7 +488,53 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 	return 0;
 }
 
-#pragma region Spectator observer
+#pragma region In-game options dialog game speed
+
+
+// Opens the slider at the speed playback is running.
+DEFINE_HOOK(0x4E209E, GameControlsDialog_ShowPlaybackSpeed, 0x6)
+{
+	if (ReplayState.Playback && ReplaySystem::Controls::HasPlaybackSpeed())
+	{
+		R->EDX(ReplaySystem::Controls::GetPlaybackGameSpeedIndex());
+		return 0x4E20A4;
+	}
+
+	return 0;
+}
+
+// The apply handler does nothing when the slider matches the current speed, so compare against the
+// playback speed - picking the recorded speed back would otherwise be a no-op.
+DEFINE_HOOK(0x4E1E1B, GameControlsApply_ComparePlaybackSpeed, 0x5)
+{
+	if (ReplayState.Playback && ReplaySystem::Controls::HasPlaybackSpeed())
+	{
+		R->EAX(ReplaySystem::Controls::GetPlaybackGameSpeedIndex());
+		return 0x4E1E20;
+	}
+
+	return 0;
+}
+
+// The branch campaign and skirmish take, which applies the new speed directly. Take the value for
+// playback and skip the write, so the pinned value survives.
+DEFINE_HOOK(0x4E1EBA, GameControlsApply_ApplyPlaybackSpeedDirectly, 0x6)
+{
+	if (ReplayState.Playback)
+	{
+		ReplaySystem::Controls::SetPlaybackGameSpeedIndex(R->ECX<int>());
+		return 0x4E1EC0;
+	}
+
+	return 0;
+}
+
+#pragma endregion In-game options dialog game speed
+
+#pragma region Playback pause
+
+// Pause replay simulation without blocking input or menus. The related hooks stop event processing,
+// logic and the frame counter together so the current frame remains unchanged.
 
 // Hide the observer from the simulation while a step runs, so a spectated house is not treated as
 // an observer by gameplay code the way it is by the display. Spectator playback only.
@@ -509,9 +563,14 @@ namespace
 	}
 }
 
-// Ahead of the logic tick.
-DEFINE_HOOK(0x55DC99, MainLoop_Spectator_HideObserverBeforeLogicAI, 0x5)
+// Holds the logic tick.
+DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
 {
+	enum { SkipLogicAI = 0x55DCA3 };
+
+	if (ReplaySystem::Controls::IsPlaybackPaused())
+		return SkipLogicAI;
+
 	HideSpectatorObserverFromSimulation();
 	return 0;
 }
@@ -523,9 +582,14 @@ DEFINE_HOOK(0x55DCA3, MainLoop_Spectator_RestoreObserverAfterLogicAI, 0x5)
 	return 0;
 }
 
-// Ahead of the event pump.
-DEFINE_HOOK(0x55DE3A, MainLoop_Spectator_HideObserverBeforeQueueAI, 0x6)
+// Holds the event pump, and with it the recorded events for the frame.
+DEFINE_HOOK(0x55DE3A, MainLoop_ReplayPause_SkipQueueAI, 0x6)
 {
+	enum { SkipQueueAI = 0x55DE45 };
+
+	if (ReplaySystem::Controls::IsPlaybackPaused())
+		return SkipQueueAI;
+
 	HideSpectatorObserverFromSimulation();
 	return 0;
 }
@@ -537,7 +601,19 @@ DEFINE_HOOK(0x55DE45, MainLoop_Spectator_RestoreObserverAfterQueueAI, 0x5)
 	return 0;
 }
 
-#pragma endregion Spectator observer
+// Holds the frame counter, and is where a paused iteration gets its viewport committed and drawn.
+DEFINE_HOOK(0x55DE73, MainLoop_ReplayPause_SkipFrameAdvance, 0x6)
+{
+	enum { SyncDelay = 0x55DE9A };
+
+	if (!ReplaySystem::Controls::IsPlaybackPaused())
+		return 0;
+
+	ReplaySystem::Controls::RenderPausedFrame();
+	return SyncDelay;
+}
+
+#pragma endregion Playback pause
 
 DEFINE_HOOK(0x752480, Speak_SilenceDuringSpectatorPlayback, 0x5)
 {
