@@ -359,6 +359,7 @@
     "NTSTATUS",
     "NTWEAP",
     "Occupiables",
+    "offsetof",
     "oogly",
     "OREGATH",
     "Overpowerable",

@@ -33,6 +33,7 @@
     <ClCompile Include="$(ThisDir)\src\CnCNetYR\Ra2Mode.cpp" />
     <!-- Misc -->
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.AIDifficultyRules.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.Blowfish.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.Desyncs.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.ClampTacticalPos.cpp" />
@@ -41,6 +42,7 @@
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.ExceptionCatch.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.IsoMapPack5Limit.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.Perf.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.SaveLoad.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\CopyProtection.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\DisableEdgeScrolling.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\InGameChat.cpp" />
