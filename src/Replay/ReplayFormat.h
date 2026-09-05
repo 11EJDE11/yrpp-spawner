@@ -30,7 +30,6 @@ namespace Replay
 {
 	constexpr uint32_t ReplayMagic = 0x50525259u; // 'YRRP'
 	constexpr uint32_t ReplayVersion = 1;
-	constexpr uint32_t MinSupportedReplayVersion = 1;
 	constexpr int MaxGameSpeedIndex = 6;
 
 	enum ReplayHeaderFlags : uint32_t
@@ -110,10 +109,6 @@ namespace Replay
 		uint32_t Magic;
 		uint32_t Version;
 		uint32_t HeaderSize;
-		uint8_t SpawnerVersionMajor;
-		uint8_t SpawnerVersionMinor;
-		uint8_t SpawnerVersionRevision;
-		uint8_t SpawnerVersionPatch;
 		uint32_t GameMode;
 
 		int UniqueIDCounter;
@@ -155,7 +150,7 @@ namespace Replay
 
 #pragma pack(pop)
 
-	static_assert(sizeof(ReplayHeader) == 1128, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(sizeof(ReplayHeader) == 1124, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameObjectCensus) == 8, "FrameObjectCensus layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameRandomState) == 8, "FrameRandomState layout changed; update docs/replay-format.md");
@@ -164,18 +159,13 @@ namespace Replay
 	static_assert(offsetof(ReplayHeader, Magic) == 0, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(offsetof(ReplayHeader, Version) == 4, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(offsetof(ReplayHeader, HeaderSize) == 8, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, SpawnerVersionMajor) == 12, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, SpawnIniSize) == 1036, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, SpawnMapSize) == 1040, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, RecordedGameSpeed) == 1044, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, RecordedUnixTime) == 1048, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, TotalFrames) == 1056, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, Flags) == 1060, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, Reserved) == 1064, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-
-	// Anything reporting which spawner recorded a file reads the four version bytes as one group.
-	static_assert(offsetof(ReplayHeader, SpawnerVersionPatch) == offsetof(ReplayHeader, SpawnerVersionMajor) + 3,
-		"Spawner version bytes have to stay adjacent and in order");
+	static_assert(offsetof(ReplayHeader, SpawnIniSize) == 1032, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, SpawnMapSize) == 1036, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, RecordedGameSpeed) == 1040, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, RecordedUnixTime) == 1044, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, TotalFrames) == 1052, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, Flags) == 1056, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, Reserved) == 1060, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 
 	static_assert(offsetof(FrameRecordHeader, FrameNumber) == 0, "FrameRecordHeader layout changed; update docs/replay-format.md");
 	static_assert(offsetof(FrameRecordHeader, EventCountThisFrame) == 4, "FrameRecordHeader layout changed; update docs/replay-format.md");
@@ -200,15 +190,9 @@ namespace Replay
 		return std::max(1, 60 / gameSpeed);
 	}
 
-	inline bool IsReplayVersionSupported(uint32_t version)
-	{
-		return version >= MinSupportedReplayVersion && version <= ReplayVersion;
-	}
-
 	inline bool IsReplayHeaderValid(const ReplayHeader& header)
 	{
 		return header.Magic == ReplayMagic
-			&& IsReplayVersionSupported(header.Version)
 			&& header.HeaderSize >= sizeof(ReplayHeader)
 			&& header.UniqueIDCounter >= 0
 			&& header.RandomNext1 >= 0 && header.RandomNext1 < 250

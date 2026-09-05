@@ -1,7 +1,7 @@
 # Replay file format (`.yrrp`)
 
 Defined in `src/Replay/ReplayFormat.h`. `ReplayFile.cpp` owns file I/O and compression-stream lifetime;
-`ReplayFile.Metadata.cpp` captures the header and sanitized launch INIs. `ReplaySystem.cpp` writes
+`ReplayFile.Metadata.cpp` captures the header and embeds the launch INIs verbatim. `ReplaySystem.cpp` writes
 and reads frame records through that file API. The hooks
 that drive it live in `src/Replay/ReplaySystem.Hook.cpp`. The CnCNet client mirrors the header by hand in
 `DXMainClient/Domain/ReplayGame.cs` — there is no compile-time link between the two, so **any
@@ -19,8 +19,8 @@ without the magic number - would look to the player like the update had deleted 
 ## Layout
 
 ```
-[ReplayHeader]        HeaderSize bytes (1128 today), #pragma pack(1)
-[spawn.ini]           SpawnIniSize bytes, verbatim text (sanitized, see below)
+[ReplayHeader]        HeaderSize bytes (1124 today), #pragma pack(1)
+[spawn.ini]           SpawnIniSize bytes, verbatim text
 [spawnmap.ini]        SpawnMapSize bytes, verbatim text
 --- everything past this point is one raw deflate stream ---
 [frame records]       repeated, one per simulated frame, monotonic
@@ -36,7 +36,11 @@ build appends a header field, which is the whole point of the field.
 
 ## Changing the format
 
-Three things exist so that a change does not invalidate every replay already recorded, and all
+During private development, update the spawner and client together without bumping the format
+version or maintaining compatibility with older recordings. The current header omits the DLL
+version metadata; recordings made with that earlier layout do not need to remain readable.
+
+For a future public release, three mechanisms can preserve existing recordings. All
 three only work because the *reading* side of them shipped before anything used them. They cost
 nothing until then.
 
@@ -50,14 +54,11 @@ An **additive** change keeps `Version` at 1. Older readers skip what they do not
 `Reserved` words they do not know, header bytes past their own `sizeof`, and the length-prefixed
 extension block. They keep playing the file.
 
-An **incompatible** change bumps `ReplayVersion`. Old readers then refuse the file, which is the
-point of doing it. Leave `MinSupportedReplayVersion` where it is: a reader accepts the range
-`MinSupportedReplayVersion`..`ReplayVersion`, and that is what keeps every replay recorded
-before the break readable afterwards.
+After a public release, an **incompatible** change would bump `ReplayVersion`. The client rejects unsupported versions
+before launching playback; the spawner does not check version compatibility.
 
-The first twelve bytes - `Magic`, `Version`, `HeaderSize` - are the only part of the file whose
-meaning is fixed for all time. Nothing may be inserted ahead of them, and no reader may touch
-anything after them until it has checked the version.
+The first twelve bytes - `Magic`, `Version`, `HeaderSize` - are fixed. Nothing may be inserted
+ahead of them. The client uses `Version` to decide whether it can read the remaining layout.
 
 None of this has anything to do with whether a replay will play back *correctly*. A version 1 file
 that this build parses perfectly will still diverge if the rules, the engine, Ares, Phobos or the
@@ -71,20 +72,19 @@ the two questions are answered separately and independently.
 | 0 | 4 | `Magic` | `0x50525259` (`YRRP` in file order) |
 | 4 | 4 | `Version` | `1` |
 | 8 | 4 | `HeaderSize` | bytes from the start of the file to the embedded spawn.ini; what readers seek by |
-| 12 | 4 | `SpawnerVersion{Major,Minor,Revision,Patch}` | four `uint8`; from spawn.ini `SpawnerVersion` if present, else the compiled-in `VERSION_*` |
-| 16 | 4 | `GameMode` | `SessionClass::GameMode` — Campaign 0, LAN 3, Internet 4, Skirmish 5. Written for future use; nothing reads it back yet |
-| 20 | 4 | `UniqueIDCounter` | `ScenarioClass::UniqueID` at recording start |
-| 24 | 4 | `Seed` | `Game::Seed` |
-| 28 | 4 | `RandomNext1` | |
-| 32 | 4 | `RandomNext2` | |
-| 36 | 1000 | `RandomizerTable[250]` | full RNG table snapshot |
-| 1036 | 4 | `SpawnIniSize` | bytes of embedded spawn.ini |
-| 1040 | 4 | `SpawnMapSize` | bytes of embedded spawnmap.ini |
-| 1044 | 4 | `RecordedGameSpeed` | 0–6; validated on load |
-| 1048 | 8 | `RecordedUnixTime` | `time()` at recording start |
-| 1056 | 4 | `TotalFrames` | last frame that carried a record |
-| 1060 | 4 | `Flags` | bit 0 = `CleanShutdown`; see below |
-| 1064 | 64 | `Reserved[16]` | zeroed on write; space for header fields added without moving anything. A reader that meets a value it does not understand here ignores it — that is what makes claiming one additive |
+| 12 | 4 | `GameMode` | `SessionClass::GameMode` — Campaign 0, LAN 3, Internet 4, Skirmish 5. Written for future use; nothing reads it back yet |
+| 16 | 4 | `UniqueIDCounter` | `ScenarioClass::UniqueID` at recording start |
+| 20 | 4 | `Seed` | `Game::Seed` |
+| 24 | 4 | `RandomNext1` | |
+| 28 | 4 | `RandomNext2` | |
+| 32 | 1000 | `RandomizerTable[250]` | full RNG table snapshot |
+| 1032 | 4 | `SpawnIniSize` | bytes of embedded spawn.ini |
+| 1036 | 4 | `SpawnMapSize` | bytes of embedded spawnmap.ini |
+| 1040 | 4 | `RecordedGameSpeed` | 0–6; validated on load |
+| 1044 | 8 | `RecordedUnixTime` | `time()` at recording start |
+| 1052 | 4 | `TotalFrames` | last frame that carried a record |
+| 1056 | 4 | `Flags` | bit 0 = `CleanShutdown`; see below |
+| 1060 | 64 | `Reserved[16]` | zeroed on write; space for header fields added without moving anything. A reader that meets a value it does not understand here ignores it — that is what makes claiming one additive |
 
 The map name and the game client version are deliberately not header fields: the client already
 writes both into the embedded spawn.ini (`UIMapName`, `GameClientVersion`) and reads them back from
@@ -92,13 +92,6 @@ there for display, the same way it already does for `UIGameMode` (which was neve
 either). Duplicating them into the fixed, hand-mirrored header would just be more fields the two
 repos have to keep in step for no benefit — the embedded spawn.ini is already read on every listing,
 uncompressed, with a plain seek.
-
-`SpawnerVersion` is the one version field that does live in the header, because it is not
-recoverable from spawn.ini the same way: it identifies the DLL that produced the file, and no client
-writes the spawn.ini `SpawnerVersion` key, so in practice the spawner's own compiled-in version is
-always what lands here — which is the value you want anyway. The client shows it in the replay's
-details; nothing gates on it, and it is the first thing worth having when someone reports a replay
-that will not play.
 
 `TotalFrames` counts the last frame a record was *written* for. Every simulated frame carries a
 record now that each one records a hash (see [Frame records](#frame-records)), so the two are the
@@ -108,18 +101,15 @@ same in practice. It is only ever used to show a duration.
 with the process leaves both fields zero. That flag - not `TotalFrames > 0` - is what tells a
 truncated recording apart from one that was quit on frame 0.
 
-`IsReplayHeaderValid` checks `Magic`, that `Version` is inside the supported range, that
-`HeaderSize` is at least this build's own header, and `RecordedGameSpeed <= 6`. A *larger*
-`HeaderSize` is accepted on purpose: everything this build reads is still at the offsets above, and
-the surplus is skipped. Playback also checks that `HeaderSize + SpawnIniSize + SpawnMapSize` fits
-the file before seeking past them. There is no checksum.
+`IsReplayHeaderValid` checks the magic, minimum header size, RNG cursors, object ID counter,
+embedded file size limits, and game speed. A larger `HeaderSize` is accepted and the surplus is
+skipped. Playback also checks that `HeaderSize + SpawnIniSize + SpawnMapSize` fits the file
+before seeking. Version compatibility belongs to the client; there is no checksum.
 
-`ClassifyReplayHeader` splits those checks apart so the reason survives into the message the player
-sees. Playback failure is fatal — `StartScenario` has already skipped `CreateConnections`, so there
-is nothing to fall back on — which makes that message the last thing anyone gets, and an unsupported
-version says so rather than being folded into a generic read error.
+`ClassifyReplayHeader` retains distinct errors for unreadable input, a non-replay file, and malformed
+headers. Playback failure is fatal because `StartScenario` has already skipped `CreateConnections`.
 
-`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1128`, `sizeof(FrameRecordHeader) == 12`
+`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1124`, `sizeof(FrameRecordHeader) == 12`
 and `sizeof(SideChannelRecord) == 329`, **and** the individual `offsetof` of every header field the
 client hardcodes. Size alone does not pin a layout: swapping two fields of the same width, or
 shortening one array while lengthening another, leaves `sizeof` untouched and mis-parses everything
@@ -155,16 +145,8 @@ complete.
 
 ## Embedded spawn.ini
 
-`SanitizeSpawnIniForReplay` rewrites the value of every `Ip`, `IPv6` and `LanIP` key to `0.0.0.0`,
-preserving line endings, and touches nothing else. It matches on key name alone and is deliberately
-section-unaware, so a new section carrying an address is covered without anyone remembering to
-update it. Ports are not blanked.
-
-Player names, sides, colours, teams, game options and the client's `[ReplayFileHashes]` section are
-all present verbatim, so a reader can reconstruct the full lobby state from this block alone.
-
-Sanitization runs *before* `SpawnIniSize` is computed, so the size always describes what was
-actually written.
+The spawner embeds spawn.ini byte for byte and sets `SpawnIniSize` to the byte count written.
+It does not rewrite addresses or other values. Sanitization is the client's responsibility.
 
 ## Campaigns: one mission per recording
 

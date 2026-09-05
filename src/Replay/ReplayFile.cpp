@@ -51,14 +51,10 @@ namespace Replay
 				&& bytesRead == static_cast<DWORD>(size);
 		}
 
-		// Split out from IsReplayHeaderValid so the reason survives as far as the message the player sees.
 		ReplayOpenFailure ClassifyReplayHeader(const ReplayHeader& header)
 		{
 			if (header.Magic != ReplayMagic)
 				return ReplayOpenFailure::NotAReplay;
-
-			if (!IsReplayVersionSupported(header.Version))
-				return ReplayOpenFailure::UnsupportedVersion;
 
 			// A shorter header than this build's is missing fields it reads; a longer one is fine, and is
 			// the whole point of HeaderSize.
@@ -106,8 +102,6 @@ namespace Replay
 		{
 		case ReplayOpenFailure::NotAReplay:
 			return "the file is not a replay";
-		case ReplayOpenFailure::UnsupportedVersion:
-			return "the replay was recorded in a newer format than this version of the game can read";
 		case ReplayOpenFailure::Malformed:
 			return "the replay header is damaged";
 		case ReplayOpenFailure::Unreadable:

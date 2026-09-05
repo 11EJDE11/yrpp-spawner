@@ -34,9 +34,7 @@ namespace Replay
 		Unreadable,
 		// No magic number: not a replay at all.
 		NotAReplay,
-		// A replay, from a layout generation this build does not know.
-		UnsupportedVersion,
-		// Right generation, but the header does not describe a file this shape.
+		// The header does not describe a valid file structure.
 		Malformed
 	};
 
