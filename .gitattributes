@@ -23,3 +23,6 @@
 *.jpg        -text
 *.png        -text
 *.exe        -text
+
+# Vendored third-party sources are kept exactly as upstream ships them
+src/Vendor/** text eol=lf
