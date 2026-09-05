@@ -1,6 +1,8 @@
 # Replay file format (`.yrrp`)
 
-Defined in `src/Replay/ReplayFormat.h` and written by `src/Replay/ReplaySystem.cpp`; the hooks
+Defined in `src/Replay/ReplayFormat.h`. `ReplayFile.cpp` owns file I/O and compression-stream lifetime;
+`ReplayFile.Metadata.cpp` captures the header and sanitized launch INIs. `ReplaySystem.cpp` writes
+and reads frame records through that file API. The hooks
 that drive it live in `src/Replay/ReplaySystem.Hook.cpp`. The CnCNet client mirrors the header by hand in
 `DXMainClient/Domain/ReplayGame.cs` — there is no compile-time link between the two, so **any
 change here must be made in both repos in the same change**. A size mismatch does not error; it

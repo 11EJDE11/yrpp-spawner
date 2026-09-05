@@ -23,7 +23,7 @@
 // public surface is ReplaySystem.h.
 
 #include "ReplayFormat.h"
-#include "ReplayStream.h"
+#include "ReplayFile.h"
 
 #include <Spawner/Spawner.Config.h>
 
@@ -44,10 +44,6 @@ namespace ReplaySystem
 		// How often the compressed stream is given a decodable point. A recording cut short by a
 		// crash loses at most this many frames.
 		constexpr int SyncFlushFrameInterval = 60;
-		// Forced disk commits stall the game thread, so they run on a byte count rather than the
-		// frame cadence above.
-		constexpr uint64_t DiskFlushIntervalBytes = 50ull * 1024 * 1024;
-		constexpr const char* DefaultRecordingPath = "replay.yrrp";
 
 		struct PlaybackFrameRecord
 		{
@@ -105,7 +101,6 @@ namespace ReplaySystem
 			bool PlaybackPaused = false;
 
 			int ExpectedEventsThisFrame = 0;
-			uint64_t BytesAtLastDiskFlush = 0;
 			int LastSyncFlushFrame = 0;
 
 			uint32_t ExpectedGameCRC = 0;
@@ -122,10 +117,7 @@ namespace ReplaySystem
 			int FirstMismatchFrame = -1;
 			int LastMismatchFrame = -1;
 
-			HANDLE ReplayFile = INVALID_HANDLE_VALUE;
-			// Only one of these is ever active: recording deflates, playback inflates.
-			Replay::DeflateWriter Writer;
-			Replay::InflateReader Reader;
+			Replay::File File;
 
 			char PlaybackPath[MAX_PATH] = { 0 };
 			std::deque<PendingRecordedFrameCapture> PendingFrameStates;
@@ -141,7 +133,6 @@ namespace ReplaySystem
 			int PreparedPlaybackFrame = -1;
 			int LastReadPlaybackFrame = -1;
 
-			uint64_t PlaybackStreamOffset = 0;
 			// The furthest frame playback has reached, which stands in for the replay's length
 			// when the recording died before it could stamp one into the header.
 			int HighestPlayedFrame = 0;
@@ -167,30 +158,12 @@ namespace ReplaySystem
 
 		const SpawnerConfig* GetConfig();
 
-		// Why a replay could not be opened for playback. Failure is fatal and the message is the
-		// last thing the player sees, so a version mismatch says so on its own.
-		enum class ReplayOpenFailure
-		{
-			None,
-			// The file could not be opened, or ended inside the header.
-			Unreadable,
-			// No magic number: not a replay at all.
-			NotAReplay,
-			// A replay, from a layout generation this build does not know.
-			UnsupportedVersion,
-			// Right generation, but the header does not describe a file this shape.
-			Malformed
-		};
-
-		const char* DescribeReplayOpenFailure(ReplayOpenFailure failure);
-
 		// Lifecycle.
 		void StartReplayRecording();
 		void StartReplayPlayback(const char* replayPath);
 		void StopReplaySystem();
 		void FinishRecordingAtMissionEnd();
 		void ApplyPlaybackInitialState();
-		bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader);
 
 		// Per-frame work, driven from the main loop and from the queue event hooks.
 		void RecordFrameState();

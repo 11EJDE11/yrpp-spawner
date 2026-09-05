@@ -18,6 +18,7 @@
 */
 
 #include "ReplayControls.h"
+#include "ReplayFile.h"
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplaySystem.h"
@@ -26,7 +27,6 @@
 #include <Spawner/Spawner.h>
 #include <Utilities/Debug.h>
 #include <Ext/Event/Body.h>
-#include <Ext/INIClass/Body.h>
 
 #include <AbstractClass.h>
 #include <BeaconManagerClass.h>
@@ -50,11 +50,8 @@
 #include <VoxClass.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cstddef>
 #include <cstdio>
-#include <cstdlib>
-#include <ctime>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -66,8 +63,6 @@ namespace ReplaySystem
 {
 	namespace Internal
 	{
-		constexpr const char* SpawnMapFileName = "spawnmap.ini";
-
 		ReplayRuntimeState ReplayState;
 
 		void StopReplaySystem();
@@ -77,36 +72,6 @@ namespace ReplaySystem
 		const SpawnerConfig* GetConfig()
 		{
 			return Spawner::GetConfig();
-		}
-
-		const char* GetRecordingOutputPath()
-		{
-			const auto* pConfig = GetConfig();
-			if (pConfig && pConfig->ReplayFileOut[0] != '\0')
-				return pConfig->ReplayFileOut;
-
-			return DefaultRecordingPath;
-		}
-
-		void EnsureParentDirectoryExists(const char* path)
-		{
-			char buffer[MAX_PATH];
-			strncpy_s(buffer, sizeof(buffer), path, _TRUNCATE);
-
-			for (char* cursor = buffer; *cursor != '\0'; ++cursor)
-			{
-				if (*cursor != '\\' && *cursor != '/')
-					continue;
-
-				// Skip a leading separator, a drive root and the second slash of a UNC prefix.
-				if (cursor == buffer || *(cursor - 1) == ':' || *(cursor - 1) == '\\' || *(cursor - 1) == '/')
-					continue;
-
-				const char separator = *cursor;
-				*cursor = '\0';
-				CreateDirectoryA(buffer, nullptr);
-				*cursor = separator;
-			}
 		}
 
 		// The playback frame rate, in frames per second: whatever the viewer's speed controls last
@@ -184,40 +149,14 @@ namespace ReplaySystem
 			Unsorted::NetworkFrameTimer.TimeLeft = 0;
 		}
 
-		bool WriteRawToHandle(HANDLE file, const void* data, size_t size)
-		{
-			if (file == INVALID_HANDLE_VALUE)
-				return false;
-
-			DWORD bytesWritten = 0;
-			return WriteFile(file, data, static_cast<DWORD>(size), &bytesWritten, nullptr)
-				&& bytesWritten == static_cast<DWORD>(size);
-		}
-
-		bool ReadRawFromHandle(HANDLE file, void* buffer, size_t size)
-		{
-			if (file == INVALID_HANDLE_VALUE)
-				return false;
-
-			DWORD bytesRead = 0;
-			return ReadFile(file, buffer, static_cast<DWORD>(size), &bytesRead, nullptr)
-				&& bytesRead == static_cast<DWORD>(size);
-		}
-
 		bool WriteRaw(const void* data, size_t size)
 		{
-			if (ReplayState.Writer.IsActive())
-				return ReplayState.Writer.Write(data, size);
-
-			return WriteRawToHandle(ReplayState.ReplayFile, data, size);
+			return ReplayState.File.Write(data, size);
 		}
 
 		bool ReadRaw(void* buffer, size_t size)
 		{
-			if (ReplayState.Reader.IsActive())
-				return ReplayState.Reader.Read(buffer, size);
-
-			return ReadRawFromHandle(ReplayState.ReplayFile, buffer, size);
+			return ReplayState.File.Read(buffer, size);
 		}
 
 		bool SkipRaw(size_t size)
@@ -238,540 +177,11 @@ namespace ReplaySystem
 
 		void SyncFlushRecordingStream()
 		{
-			if (!ReplayState.Writer.IsActive())
-				return;
-
-			if (!ReplayState.Writer.SyncFlush())
+			if (!ReplayState.File.SyncFlush())
 			{
 				Debug::Log("[Replay] Failed to flush the replay stream; stopping the recording.\n");
 				AbortReplaySystem();
-				return;
 			}
-
-			// Committing to the disk is far more expensive, so it stays on a rare byte-count schedule.
-			const uint64_t written = ReplayState.Writer.CompressedBytesWritten();
-			if (written - ReplayState.BytesAtLastDiskFlush >= DiskFlushIntervalBytes)
-			{
-				FlushFileBuffers(ReplayState.ReplayFile);
-				ReplayState.BytesAtLastDiskFlush = written;
-			}
-		}
-
-		bool ReadRequiredFile(const char* fileName, std::vector<char>& content)
-		{
-			content.clear();
-
-			HANDLE hFile = CreateFileA(
-				fileName,
-				GENERIC_READ,
-				FILE_SHARE_READ,
-				nullptr,
-				OPEN_EXISTING,
-				FILE_ATTRIBUTE_NORMAL,
-				nullptr
-			);
-
-			if (hFile == INVALID_HANDLE_VALUE)
-				return false;
-
-			const DWORD fileSize = GetFileSize(hFile, nullptr);
-			if (fileSize == INVALID_FILE_SIZE && GetLastError() != NO_ERROR)
-			{
-				CloseHandle(hFile);
-				return false;
-			}
-
-			if (fileSize > 0)
-			{
-				content.resize(fileSize);
-				DWORD bytesRead = 0;
-				if (!ReadFile(hFile, content.data(), fileSize, &bytesRead, nullptr) || bytesRead != fileSize)
-				{
-					content.clear();
-					CloseHandle(hFile);
-					return false;
-				}
-			}
-
-			CloseHandle(hFile);
-			return true;
-		}
-
-		bool EqualsIgnoreCase(const char* a, size_t aLength, const char* b)
-		{
-			const size_t bLength = strlen(b);
-			if (aLength != bLength)
-				return false;
-
-			for (size_t i = 0; i < aLength; ++i)
-			{
-				if (tolower(static_cast<unsigned char>(a[i])) != tolower(static_cast<unsigned char>(b[i])))
-					return false;
-			}
-
-			return true;
-		}
-
-		void SanitizeSpawnIniForReplay(std::vector<char>& spawnIni)
-		{
-			static constexpr const char* AddressKeys[] = { "Ip", "IPv6", "LanIP" };
-			static constexpr const char* BlankedAddress = "0.0.0.0";
-
-			const size_t size = spawnIni.size();
-			const char* const base = spawnIni.data();
-
-			std::vector<char> sanitized;
-			sanitized.reserve(size);
-
-			size_t lineStart = 0;
-			while (true)
-			{
-				size_t lineEnd = lineStart;
-				while (lineEnd < size && base[lineEnd] != '\n')
-					++lineEnd;
-
-				// A trailing '\r' belongs to the line ending, so exclude it from the content we inspect
-				// and copy it back verbatim afterwards.
-				size_t contentEnd = lineEnd;
-				if (contentEnd > lineStart && base[contentEnd - 1] == '\r')
-					--contentEnd;
-
-				// Find 'key=value' and trim whitespace around the key.
-				size_t separator = lineStart;
-				while (separator < contentEnd && base[separator] != '=')
-					++separator;
-
-				bool blanked = false;
-				if (separator < contentEnd)
-				{
-					size_t keyStart = lineStart;
-					size_t keyEnd = separator;
-					while (keyStart < keyEnd && isspace(static_cast<unsigned char>(base[keyStart])))
-						++keyStart;
-					while (keyEnd > keyStart && isspace(static_cast<unsigned char>(base[keyEnd - 1])))
-						--keyEnd;
-
-					for (const char* addressKey : AddressKeys)
-					{
-						if (EqualsIgnoreCase(base + keyStart, keyEnd - keyStart, addressKey))
-						{
-							sanitized.insert(sanitized.end(), base + lineStart, base + separator + 1);
-							sanitized.insert(sanitized.end(), BlankedAddress, BlankedAddress + strlen(BlankedAddress));
-							sanitized.insert(sanitized.end(), base + contentEnd, base + lineEnd);
-							blanked = true;
-							break;
-						}
-					}
-				}
-
-				if (!blanked)
-					sanitized.insert(sanitized.end(), base + lineStart, base + lineEnd);
-
-				if (lineEnd >= size)
-					break;
-
-				sanitized.push_back('\n');
-				lineStart = lineEnd + 1;
-			}
-
-			spawnIni.swap(sanitized);
-		}
-
-		// CCINIClass needs an explicit unload, so keep the pairing in one place.
-		class ScopedINIFile
-		{
-		public:
-			explicit ScopedINIFile(const char* fileName)
-				: pINI { CCINIClass::LoadINIFile(fileName) }
-			{ }
-
-			~ScopedINIFile()
-			{
-				if (pINI)
-					CCINIClass::UnloadINIFile(pINI);
-			}
-
-			ScopedINIFile(const ScopedINIFile&) = delete;
-			ScopedINIFile& operator=(const ScopedINIFile&) = delete;
-
-			CCINIClass* Get() const { return pINI; }
-
-		private:
-			CCINIClass* pINI;
-		};
-
-		bool TryReadString(CCINIClass* pINI, const char* section, const char* key, char* outBuffer, size_t outBufferSize)
-		{
-			if (!outBuffer || outBufferSize == 0)
-				return false;
-
-			outBuffer[0] = '\0';
-
-			if (!pINI)
-				return false;
-
-			const int charsRead = INIClassExt::ReadString_WithoutAresHook(
-				pINI,
-				section,
-				key,
-				"",
-				outBuffer,
-				outBufferSize
-			);
-
-			return charsRead > 0 && outBuffer[0] != '\0';
-		}
-
-		bool TryParseVersionString(const char* versionText, uint8_t& outMajor, uint8_t& outMinor, uint8_t& outRevision, uint8_t& outPatch)
-		{
-			if (!versionText || versionText[0] == '\0')
-				return false;
-
-			unsigned int parsed[4] = { 0, 0, 0, 0 };
-			int count = 0;
-			const char* cursor = versionText;
-
-			while (*cursor != '\0')
-			{
-				if (count >= 4 || !isdigit(static_cast<unsigned char>(*cursor)))
-					return false;
-
-				char* end = nullptr;
-				const unsigned long value = strtoul(cursor, &end, 10);
-				if (end == cursor || value > std::numeric_limits<uint8_t>::max())
-					return false;
-
-				parsed[count++] = static_cast<unsigned int>(value);
-				cursor = end;
-
-				if (*cursor == '\0')
-					break;
-
-				if (*cursor != '.')
-					return false;
-
-				++cursor;
-				if (*cursor == '\0')
-					return false;
-			}
-
-			if (count == 0)
-				return false;
-
-			outMajor = static_cast<uint8_t>(parsed[0]);
-			outMinor = static_cast<uint8_t>(parsed[1]);
-			outRevision = static_cast<uint8_t>(parsed[2]);
-			outPatch = static_cast<uint8_t>(parsed[3]);
-			return true;
-		}
-
-		ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
-		{
-			ReplayHeader header {};
-			header.Magic = ReplayMagic;
-			header.Version = ReplayVersion;
-			header.HeaderSize = sizeof(ReplayHeader);
-
-			const ScopedINIFile spawnIni { "spawn.ini" };
-
-			header.SpawnerVersionMajor = VERSION_MAJOR;
-			header.SpawnerVersionMinor = VERSION_MINOR;
-			header.SpawnerVersionRevision = VERSION_REVISION;
-			header.SpawnerVersionPatch = VERSION_PATCH;
-
-			char versionBuffer[64] = { 0 };
-			if (TryReadString(spawnIni.Get(), "Settings", "SpawnerVersion", versionBuffer, sizeof(versionBuffer)))
-			{
-				TryParseVersionString(
-					versionBuffer,
-					header.SpawnerVersionMajor,
-					header.SpawnerVersionMinor,
-					header.SpawnerVersionRevision,
-					header.SpawnerVersionPatch
-				);
-			}
-
-			header.GameMode = static_cast<uint32_t>(SessionClass::Instance.GameMode);
-
-			header.UniqueIDCounter = ScenarioClass::Instance ? ScenarioClass::Instance->UniqueID : 0;
-			header.Seed = Game::Seed;
-			header.RandomNext1 = ScenarioClass::Instance ? ScenarioClass::Instance->Random.Next1 : -1;
-			header.RandomNext2 = ScenarioClass::Instance ? ScenarioClass::Instance->Random.Next2 : -1;
-			if (ScenarioClass::Instance)
-			{
-				memcpy(header.RandomizerTable, ScenarioClass::Instance->Random.Table, sizeof(header.RandomizerTable));
-			}
-
-			header.SpawnIniSize = spawnIniSize;
-			header.SpawnMapSize = spawnMapSize;
-			header.RecordedGameSpeed = static_cast<uint32_t>(std::clamp(GameOptionsClass::Instance.GameSpeed, 0, MaxGameSpeedIndex));
-			header.RecordedUnixTime = static_cast<uint64_t>(time(nullptr));
-			// Both stamped by StopReplaySystem; a recording that dies with the process keeps these zeroed,
-			// which is how a reader recognizes it as incomplete.
-			header.TotalFrames = 0;
-			header.Flags = ReplayHeaderFlag_None;
-			return header;
-		}
-
-		bool WriteInitialReplayFile()
-		{
-			std::vector<char> spawnIni;
-			std::vector<char> spawnMap;
-
-			if (!ReadRequiredFile("spawn.ini", spawnIni))
-			{
-				Debug::Log("[Replay] Required file spawn.ini was not found or could not be read.\n");
-				return false;
-			}
-
-			SanitizeSpawnIniForReplay(spawnIni);
-
-			const auto* const pRecordingConfig = GetConfig();
-			const bool scenarioIsSpawnMap = pRecordingConfig
-				&& _stricmp(pRecordingConfig->ScenarioName, SpawnMapFileName) == 0;
-
-			if (scenarioIsSpawnMap && !ReadRequiredFile(SpawnMapFileName, spawnMap))
-			{
-				Debug::Log("[Replay] Required file spawnmap.ini was not found or could not be read.\n");
-				return false;
-			}
-
-			if (!scenarioIsSpawnMap)
-				spawnMap.clear();
-
-			const ReplayHeader header = BuildReplayHeader(
-				static_cast<uint32_t>(spawnIni.size()),
-				static_cast<uint32_t>(spawnMap.size())
-			);
-
-			const char* const outputPath = GetRecordingOutputPath();
-			EnsureParentDirectoryExists(outputPath);
-
-			HANDLE file = CreateFileA(
-				outputPath,
-				GENERIC_WRITE,
-				FILE_SHARE_READ,
-				nullptr,
-				CREATE_ALWAYS,
-				FILE_ATTRIBUTE_NORMAL,
-				nullptr
-			);
-
-			if (file == INVALID_HANDLE_VALUE)
-			{
-				Debug::Log("[Replay] Failed to create replay file for recording: %s\n", outputPath);
-				return false;
-			}
-
-			bool ok = WriteRawToHandle(file, &header, sizeof(header));
-			if (ok && !spawnIni.empty())
-				ok = WriteRawToHandle(file, spawnIni.data(), spawnIni.size());
-			if (ok && !spawnMap.empty())
-				ok = WriteRawToHandle(file, spawnMap.data(), spawnMap.size());
-
-			CloseHandle(file);
-			return ok;
-		}
-
-		const char* DescribeReplayOpenFailure(ReplayOpenFailure failure)
-		{
-			switch (failure)
-			{
-			case ReplayOpenFailure::NotAReplay:
-				return "the file is not a replay";
-			case ReplayOpenFailure::UnsupportedVersion:
-				return "the replay was recorded in a newer format than this version of the game can read";
-			case ReplayOpenFailure::Malformed:
-				return "the replay header is damaged";
-			case ReplayOpenFailure::Unreadable:
-			default:
-				return "the replay could not be read";
-			}
-		}
-
-		// Split out from IsReplayHeaderValid so the reason survives as far as the message the player sees.
-		ReplayOpenFailure ClassifyReplayHeader(const ReplayHeader& header)
-		{
-			if (header.Magic != ReplayMagic)
-				return ReplayOpenFailure::NotAReplay;
-
-			if (!IsReplayVersionSupported(header.Version))
-				return ReplayOpenFailure::UnsupportedVersion;
-
-			// A shorter header than this build's is missing fields it reads; a longer one is fine, and is
-			// the whole point of HeaderSize.
-			if (header.HeaderSize < sizeof(ReplayHeader))
-				return ReplayOpenFailure::Malformed;
-
-			if (header.UniqueIDCounter < 0
-				|| header.RandomNext1 < 0 || header.RandomNext1 >= 250
-				|| header.RandomNext2 < 0 || header.RandomNext2 >= 250
-				|| header.SpawnIniSize > MaxEmbeddedFileBytes
-				|| header.SpawnMapSize > MaxEmbeddedFileBytes
-				|| !IsReplayGameSpeedIndexValid(header.RecordedGameSpeed))
-			{
-				return ReplayOpenFailure::Malformed;
-			}
-
-			return ReplayOpenFailure::None;
-		}
-
-		bool ReadReplayHeaderFromHandle(HANDLE file, ReplayHeader& outHeader, ReplayOpenFailure& outFailure)
-		{
-			outHeader = {};
-
-			if (!ReadRawFromHandle(file, &outHeader, sizeof(outHeader)))
-			{
-				outFailure = ReplayOpenFailure::Unreadable;
-				return false;
-			}
-
-			outFailure = ClassifyReplayHeader(outHeader);
-			return outFailure == ReplayOpenFailure::None;
-		}
-
-		bool ReadReplayHeaderFromHandle(HANDLE file, ReplayHeader& outHeader)
-		{
-			ReplayOpenFailure failure = ReplayOpenFailure::None;
-			return ReadReplayHeaderFromHandle(file, outHeader, failure);
-		}
-
-		bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader)
-		{
-			HANDLE file = CreateFileA(
-				replayPath,
-				GENERIC_READ,
-				FILE_SHARE_READ,
-				nullptr,
-				OPEN_EXISTING,
-				FILE_ATTRIBUTE_NORMAL,
-				nullptr
-			);
-
-			if (file == INVALID_HANDLE_VALUE)
-				return false;
-
-			const bool ok = ReadReplayHeaderFromHandle(file, outHeader);
-			CloseHandle(file);
-			return ok;
-		}
-
-		void CloseReplayFile()
-		{
-			ReplayState.Writer.Reset();
-			ReplayState.Reader.Reset();
-
-			if (ReplayState.ReplayFile != INVALID_HANDLE_VALUE)
-			{
-				FlushFileBuffers(ReplayState.ReplayFile);
-				CloseHandle(ReplayState.ReplayFile);
-				ReplayState.ReplayFile = INVALID_HANDLE_VALUE;
-			}
-		}
-
-		bool OpenRecordingReplayStream()
-		{
-			CloseReplayFile();
-
-			const char* const outputPath = GetRecordingOutputPath();
-
-			ReplayState.ReplayFile = CreateFileA(
-				outputPath,
-				GENERIC_WRITE,
-				FILE_SHARE_READ,
-				nullptr,
-				OPEN_EXISTING,
-				FILE_ATTRIBUTE_NORMAL,
-				nullptr
-			);
-
-			if (ReplayState.ReplayFile == INVALID_HANDLE_VALUE)
-			{
-				// WriteInitialReplayFile has just written this file. Recreating it would start the deflate
-				// stream at offset 0 and produce a headerless file no reader can parse.
-				Debug::Log("[Replay] Could not reopen the replay file for recording: %s\n", outputPath);
-				return false;
-			}
-
-			SetFilePointer(ReplayState.ReplayFile, 0, nullptr, FILE_END);
-
-			// Everything from here on - and nothing before it - is deflated.
-			if (!ReplayState.Writer.Start(ReplayState.ReplayFile))
-			{
-				Debug::Log("[Replay] Failed to start the compressed replay stream.\n");
-				CloseReplayFile();
-				return false;
-			}
-
-			ReplayState.BytesAtLastDiskFlush = 0;
-			ReplayState.LastSyncFlushFrame = 0;
-			return true;
-		}
-
-		bool OpenPlaybackReplayStream(const char* replayPath, ReplayOpenFailure& outFailure)
-		{
-			CloseReplayFile();
-			outFailure = ReplayOpenFailure::None;
-
-			ReplayState.ReplayFile = CreateFileA(
-				replayPath,
-				GENERIC_READ,
-				FILE_SHARE_READ,
-				nullptr,
-				OPEN_EXISTING,
-				FILE_ATTRIBUTE_NORMAL,
-				nullptr
-			);
-
-			if (ReplayState.ReplayFile == INVALID_HANDLE_VALUE)
-			{
-				outFailure = ReplayOpenFailure::Unreadable;
-				return false;
-			}
-
-			ReplayHeader header {};
-			if (!ReadReplayHeaderFromHandle(ReplayState.ReplayFile, header, outFailure))
-			{
-				CloseReplayFile();
-				return false;
-			}
-
-			// The sizes come straight off disk, so check them against the file before seeking.
-			const uint64_t payloadSize = static_cast<uint64_t>(header.SpawnIniSize) + header.SpawnMapSize;
-			const uint64_t streamOffset = static_cast<uint64_t>(header.HeaderSize) + payloadSize;
-
-			LARGE_INTEGER fileSize {};
-			if (!GetFileSizeEx(ReplayState.ReplayFile, &fileSize)
-				|| streamOffset > static_cast<uint64_t>(fileSize.QuadPart))
-			{
-				Debug::Log("[Replay] Replay declares embedded file sizes that do not fit the file.\n");
-				outFailure = ReplayOpenFailure::Malformed;
-				CloseReplayFile();
-				return false;
-			}
-
-			LARGE_INTEGER streamStart {};
-			streamStart.QuadPart = static_cast<LONGLONG>(streamOffset);
-
-			if (!SetFilePointerEx(ReplayState.ReplayFile, streamStart, nullptr, FILE_BEGIN))
-			{
-				outFailure = ReplayOpenFailure::Unreadable;
-				CloseReplayFile();
-				return false;
-			}
-
-			// The frame stream is always deflated; the header and the two INIs above it never are.
-			if (!ReplayState.Reader.Start(ReplayState.ReplayFile))
-			{
-				Debug::Log("[Replay] Failed to start reading the compressed replay stream.\n");
-				outFailure = ReplayOpenFailure::Unreadable;
-				CloseReplayFile();
-				return false;
-			}
-
-			// Kept so a seek can restart the decompressor here. See ReplaySeek.h.
-			ReplayState.PlaybackStreamOffset = streamOffset;
-			return true;
 		}
 
 		void ResetRuntimeFlagsForScenario()
@@ -783,7 +193,6 @@ namespace ReplaySystem
 			ReplayState.PlaybackNextFrameDue = 0.0;
 			ReplayState.PlaybackPaused = false;
 			ReplayState.ExpectedEventsThisFrame = 0;
-			ReplayState.BytesAtLastDiskFlush = 0;
 			ReplayState.LastSyncFlushFrame = 0;
 			ReplayState.ExpectedGameCRC = 0;
 			ReplayState.HasExpectedGameCRC = false;
@@ -804,7 +213,6 @@ namespace ReplaySystem
 			ReplayState.PlaybackStreamEnded = false;
 			ReplayState.PreparedPlaybackFrame = -1;
 			ReplayState.LastReadPlaybackFrame = -1;
-			ReplayState.PlaybackStreamOffset = 0;
 			ReplayState.HighestPlayedFrame = 0;
 			ReplayState.PendingPlaybackFrame = {};
 			ReplayState.LockedViewportPos = { 0, 0 };
@@ -821,7 +229,7 @@ namespace ReplaySystem
 		{
 			ReplaySystem::Seek::OnPlaybackStopped();
 			ResetRuntimeFlagsForScenario();
-			CloseReplayFile();
+			ReplayState.File.Close();
 		}
 
 		void ApplyPlaybackInitialState()
@@ -1261,31 +669,6 @@ namespace ReplaySystem
 			return WriteRaw(&marker, sizeof(marker));
 		}
 
-		bool StampCleanShutdownIntoHeader()
-		{
-			if (ReplayState.ReplayFile == INVALID_HANDLE_VALUE)
-				return false;
-
-			static_assert(offsetof(ReplayHeader, Flags) == offsetof(ReplayHeader, TotalFrames) + sizeof(uint32_t),
-				"TotalFrames and Flags are stamped in one write and have to stay adjacent");
-
-			const LONG headerOffset = static_cast<LONG>(offsetof(ReplayHeader, TotalFrames));
-			if (SetFilePointer(ReplayState.ReplayFile, headerOffset, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
-				return false;
-
-			const uint32_t tail[2] = {
-				static_cast<uint32_t>(std::max(0, ReplayState.LastWrittenFrameNumber)),
-				ReplayHeaderFlag_CleanShutdown
-			};
-
-			DWORD bytesWritten = 0;
-			const bool ok = WriteFile(ReplayState.ReplayFile, tail, sizeof(tail), &bytesWritten, nullptr) != FALSE
-				&& bytesWritten == sizeof(tail);
-
-			SetFilePointer(ReplayState.ReplayFile, 0, nullptr, FILE_END);
-			return ok;
-		}
-
 		bool SanitizeSideChannelRecord(SideChannelRecord& record)
 		{
 			record.SenderName[SideChannelNameLength - 1] = L'\0';
@@ -1477,14 +860,10 @@ namespace ReplaySystem
 
 		bool RepositionPlaybackStreamToFrame(int targetFrame)
 		{
-			if (ReplayState.ReplayFile == INVALID_HANDLE_VALUE)
+			if (!ReplayState.File.IsOpen())
 				return false;
 
-			LARGE_INTEGER streamStart {};
-			streamStart.QuadPart = static_cast<LONGLONG>(ReplayState.PlaybackStreamOffset);
-
-			if (!SetFilePointerEx(ReplayState.ReplayFile, streamStart, nullptr, FILE_BEGIN)
-				|| !ReplayState.Reader.Start(ReplayState.ReplayFile))
+			if (!ReplayState.File.RestartPlaybackStream())
 			{
 				Debug::Log("[Replay] Failed to rewind the replay stream while seeking.\n");
 				return false;
@@ -1809,18 +1188,17 @@ namespace ReplaySystem
 			if (ReplayState.Recording)
 			{
 				FlushPendingRecordedFramesThrough(std::numeric_limits<int>::max(), 0);
-				if (ReplayState.ReplayFile != INVALID_HANDLE_VALUE)
+				if (ReplayState.File.IsOpen())
 				{
 					const bool wroteEnd = WriteReplayEndOfStreamMarker();
 					if (!wroteEnd)
 						Debug::Log("[Replay] Failed to write replay end-of-stream marker.\n");
 
-					const bool finishedStream = !ReplayState.Writer.IsActive()
-						|| ReplayState.Writer.Finish();
+					const bool finishedStream = ReplayState.File.FinishRecording();
 					if (!finishedStream)
 						Debug::Log("[Replay] Failed to finish the compressed replay stream.\n");
 
-					if (wroteEnd && finishedStream && !StampCleanShutdownIntoHeader())
+					if (wroteEnd && finishedStream && !ReplayState.File.StampCleanShutdown(ReplayState.LastWrittenFrameNumber))
 						Debug::Log("[Replay] Failed to mark the replay as complete.\n");
 				}
 			}
@@ -1947,7 +1325,6 @@ namespace ReplaySystem
 			}
 
 
-
 			// Applied from the same point in the frame the recording read it from.
 			if ((frameRecord.Flags & FrameRecordFlag_GameSpeed) != 0u)
 			{
@@ -2067,7 +1444,7 @@ namespace ReplaySystem
 				return;
 
 			Debug::Log("[Replay] Mission over at frame %d; finishing the recording in %s. Later missions in "
-				"this campaign are not recorded.\n", ReplayState.LastWrittenFrameNumber, GetRecordingOutputPath());
+				"this campaign are not recorded.\n", ReplayState.LastWrittenFrameNumber, Replay::GetRecordingOutputPath(GetConfig()));
 
 			StopReplaySystem();
 			ReplayState.RecordingFinishedForSession = true;
@@ -2080,7 +1457,7 @@ namespace ReplaySystem
 			if (ReplayState.RecordingFinishedForSession)
 			{
 				Debug::Log("[Replay] Not recording this scenario: %s already holds this campaign's first "
-					"mission.\n", GetRecordingOutputPath());
+					"mission.\n", Replay::GetRecordingOutputPath(GetConfig()));
 				StopReplaySystem();
 				return;
 			}
@@ -2101,14 +1478,14 @@ namespace ReplaySystem
 				return;
 			}
 
-			if (!WriteInitialReplayFile())
+			if (!Replay::WriteInitialReplayFile(pConfig))
 			{
 				Debug::Log("[Replay] Failed to write replay header.\n");
 				StopReplaySystem();
 				return;
 			}
 
-			if (!OpenRecordingReplayStream())
+			if (!ReplayState.File.OpenRecording(Replay::GetRecordingOutputPath(pConfig)))
 			{
 				Debug::Log("[Replay] Failed to open replay file for recording.\n");
 				StopReplaySystem();
@@ -2130,7 +1507,7 @@ namespace ReplaySystem
 			if (!ReplayState.HasPlaybackHeader)
 			{
 				ReplayHeader header {};
-				if (ReadReplayHeaderFromPath(replayPath, header))
+				if (Replay::ReadReplayHeaderFromPath(replayPath, header))
 				{
 					ReplayState.PlaybackHeader = header;
 					ReplayState.HasPlaybackHeader = true;
@@ -2170,14 +1547,14 @@ namespace ReplaySystem
 			ReplaySystem::Seek::OnPlaybackStarted();
 
 			ReplayOpenFailure failure = ReplayOpenFailure::None;
-			if (!OpenPlaybackReplayStream(ReplayState.PlaybackPath, failure))
+			if (!ReplayState.File.OpenPlayback(ReplayState.PlaybackPath, failure))
 			{
 				StopReplaySystem();
 
 				// StartScenario already skipped CreateConnections, so there is no live session to
 				// fall back to. This message is all the player gets, so it names the reason.
 				Debug::FatalErrorAndExit("[Replay] Cannot play %s: %s.",
-					ReplayState.PlaybackPath, DescribeReplayOpenFailure(failure));
+					ReplayState.PlaybackPath, Replay::DescribeReplayOpenFailure(failure));
 			}
 		}
 	}

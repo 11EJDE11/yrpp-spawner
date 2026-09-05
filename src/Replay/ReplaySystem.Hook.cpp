@@ -21,6 +21,7 @@
 // and docs/replay-format.md has the detail behind the trickier hooks.
 
 #include "ReplayControls.h"
+#include "ReplayFile.h"
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplaySystem.h"
@@ -107,7 +108,7 @@ DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
 		return 0;
 
 	ReplayHeader header {};
-	if (!ReadReplayHeaderFromPath(pConfig->ReplayFile, header))
+	if (!Replay::ReadReplayHeaderFromPath(pConfig->ReplayFile, header))
 	{
 		Debug::Log("[Replay] Failed to read replay header from %s.\n", pConfig->ReplayFile);
 		return 0;
