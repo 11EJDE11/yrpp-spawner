@@ -20,6 +20,7 @@
 #include "ReplaySeek.h"
 #include "ReplayKeyframeState.h"
 #include "ReplayControls.h"
+#include "ReplayOverlay.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
 
@@ -305,6 +306,9 @@ namespace ReplaySystem
 				}
 
 				ReplayState.DivergenceReported = false;
+
+				// The panel is still on screen but the world under it has been swapped out.
+				Overlay::CancelInteraction();
 
 				return RepositionPlaybackStreamToFrame(keyframeFrame);
 			}
