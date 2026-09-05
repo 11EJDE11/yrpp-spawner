@@ -111,12 +111,10 @@ namespace Replay
 		uint32_t Magic;
 		uint32_t Version;
 		uint32_t HeaderSize;
-		char MapName[260];
 		uint8_t SpawnerVersionMajor;
 		uint8_t SpawnerVersionMinor;
 		uint8_t SpawnerVersionRevision;
 		uint8_t SpawnerVersionPatch;
-		char GameClientVersion[64];
 		uint32_t GameMode;
 
 		int UniqueIDCounter;
@@ -158,7 +156,7 @@ namespace Replay
 
 #pragma pack(pop)
 
-	static_assert(sizeof(ReplayHeader) == 1452, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(sizeof(ReplayHeader) == 1128, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameObjectCensus) == 8, "FrameObjectCensus layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameRandomState) == 8, "FrameRandomState layout changed; update docs/replay-format.md");
@@ -167,16 +165,14 @@ namespace Replay
 	static_assert(offsetof(ReplayHeader, Magic) == 0, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(offsetof(ReplayHeader, Version) == 4, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(offsetof(ReplayHeader, HeaderSize) == 8, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, MapName) == 12, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, SpawnerVersionMajor) == 272, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, GameClientVersion) == 276, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, SpawnIniSize) == 1360, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, SpawnMapSize) == 1364, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, RecordedGameSpeed) == 1368, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, RecordedUnixTime) == 1372, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, TotalFrames) == 1380, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, Flags) == 1384, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, Reserved) == 1388, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, SpawnerVersionMajor) == 12, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, SpawnIniSize) == 1036, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, SpawnMapSize) == 1040, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, RecordedGameSpeed) == 1044, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, RecordedUnixTime) == 1048, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, TotalFrames) == 1056, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, Flags) == 1060, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, Reserved) == 1064, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 
 	// Anything reporting which spawner recorded a file reads the four version bytes as one group.
 	static_assert(offsetof(ReplayHeader, SpawnerVersionPatch) == offsetof(ReplayHeader, SpawnerVersionMajor) + 3,

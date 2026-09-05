@@ -66,6 +66,8 @@ namespace ReplaySystem
 {
 	namespace Internal
 	{
+		constexpr const char* SpawnMapFileName = "spawnmap.ini";
+
 		ReplayRuntimeState ReplayState;
 
 		void StopReplaySystem();
@@ -380,7 +382,7 @@ namespace ReplaySystem
 		{
 		public:
 			explicit ScopedINIFile(const char* fileName)
-				: pINI { fileName ? CCINIClass::LoadINIFile(fileName) : nullptr }
+				: pINI { CCINIClass::LoadINIFile(fileName) }
 			{ }
 
 			~ScopedINIFile()
@@ -463,7 +465,7 @@ namespace ReplaySystem
 			return true;
 		}
 
-		ReplayHeader BuildReplayHeader(bool scenarioIsSpawnMap, uint32_t spawnIniSize, uint32_t spawnMapSize)
+		ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
 		{
 			ReplayHeader header {};
 			header.Magic = ReplayMagic;
@@ -471,13 +473,6 @@ namespace ReplaySystem
 			header.HeaderSize = sizeof(ReplayHeader);
 
 			const ScopedINIFile spawnIni { "spawn.ini" };
-
-			const ScopedINIFile spawnMapIni { scenarioIsSpawnMap ? "spawnmap.ini" : nullptr };
-
-			if (!TryReadString(spawnMapIni.Get(), "Basic", "Name", header.MapName, sizeof(header.MapName))
-				&& !TryReadString(spawnIni.Get(), "Settings", "UIMapName", header.MapName, sizeof(header.MapName))
-				&& ScenarioClass::Instance)
-				strncpy_s(header.MapName, sizeof(header.MapName), ScenarioClass::Instance->FileName, _TRUNCATE);
 
 			header.SpawnerVersionMajor = VERSION_MAJOR;
 			header.SpawnerVersionMinor = VERSION_MINOR;
@@ -496,7 +491,6 @@ namespace ReplaySystem
 				);
 			}
 
-			TryReadString(spawnIni.Get(), "Settings", "GameClientVersion", header.GameClientVersion, sizeof(header.GameClientVersion));
 			header.GameMode = static_cast<uint32_t>(SessionClass::Instance.GameMode);
 
 			header.UniqueIDCounter = ScenarioClass::Instance ? ScenarioClass::Instance->UniqueID : 0;
@@ -534,9 +528,9 @@ namespace ReplaySystem
 
 			const auto* const pRecordingConfig = GetConfig();
 			const bool scenarioIsSpawnMap = pRecordingConfig
-				&& _stricmp(pRecordingConfig->ScenarioName, "spawnmap.ini") == 0;
+				&& _stricmp(pRecordingConfig->ScenarioName, SpawnMapFileName) == 0;
 
-			if (scenarioIsSpawnMap && !ReadRequiredFile("spawnmap.ini", spawnMap))
+			if (scenarioIsSpawnMap && !ReadRequiredFile(SpawnMapFileName, spawnMap))
 			{
 				Debug::Log("[Replay] Required file spawnmap.ini was not found or could not be read.\n");
 				return false;
@@ -546,7 +540,6 @@ namespace ReplaySystem
 				spawnMap.clear();
 
 			const ReplayHeader header = BuildReplayHeader(
-				scenarioIsSpawnMap,
 				static_cast<uint32_t>(spawnIni.size()),
 				static_cast<uint32_t>(spawnMap.size())
 			);
