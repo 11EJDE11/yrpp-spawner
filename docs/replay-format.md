@@ -1,8 +1,9 @@
 # Replay file format (`.yrrp`)
 
 Defined in `src/Replay/ReplayFormat.h`. `ReplayFile.cpp` owns file I/O and compression-stream lifetime;
-`ReplayFile.Metadata.cpp` captures the header and embeds the launch INIs verbatim. `ReplaySystem.cpp` writes
-and reads frame records through that file API. The hooks
+`ReplayFile.Metadata.cpp` captures the header and embeds the launch INIs verbatim.
+`ReplayFrameCodec.cpp` encodes and decodes frame blocks and gameplay-event bytes through the file API.
+`ReplaySystem.cpp` coordinates engine capture and applies playback state. The hooks
 that drive it live in `src/Replay/ReplaySystem.Hook.cpp`. The CnCNet client mirrors the header by hand in
 `DXMainClient/Domain/ReplayGame.cs` — there is no compile-time link between the two, so **any
 change here must be made in both repos in the same change**. A size mismatch does not error; it
@@ -207,6 +208,12 @@ replay must not chain into another scenario even if playback itself stopped earl
 
 ## Frame records
 
+The frame writer owns the previous viewport, selection, and speed values used to omit unchanged
+state. The frame reader owns the last decoded frame number and resets it when the stream rewinds.
+Frame metadata is read in the main loop; gameplay-event bytes remain unread until the queue hook
+consumes them, or seeking skips them. The codec checks block sizes and ordering; engine-dependent
+side-channel checks are supplied by the caller.
+
 `FrameRecordHeader` (12 bytes):
 
 ```
@@ -283,7 +290,7 @@ every remote quit. `0x64CAC0` is reached by all of them.
 Events are written unexecuted, so the same event is always the same bytes on disk.
 
 Blocks are stored bare, so a reader that meets a flag it does not know cannot find the end of that
-block - the length is written down nowhere - and `ReadNextPlaybackFrameRecord` rejects the record.
+block - the length is written down nowhere - and `FrameReader::ReadFrame` rejects the record.
 
 They are written in the order listed above, which is *not* the numeric order of their flag bits:
 `ObjectCensus` (bit 5) and `GameSpeed` (bit 6) are written ahead of `Extensions` (bit 4), because

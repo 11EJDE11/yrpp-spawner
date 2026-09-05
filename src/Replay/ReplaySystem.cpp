@@ -19,6 +19,7 @@
 
 #include "ReplayControls.h"
 #include "ReplayFile.h"
+#include "ReplayFrameCodec.h"
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplaySystem.h"
@@ -149,32 +150,6 @@ namespace ReplaySystem
 			Unsorted::NetworkFrameTimer.TimeLeft = 0;
 		}
 
-		bool WriteRaw(const void* data, size_t size)
-		{
-			return ReplayState.File.Write(data, size);
-		}
-
-		bool ReadRaw(void* buffer, size_t size)
-		{
-			return ReplayState.File.Read(buffer, size);
-		}
-
-		bool SkipRaw(size_t size)
-		{
-			char scratch[512];
-
-			while (size > 0)
-			{
-				const size_t chunk = std::min(size, sizeof(scratch));
-				if (!ReadRaw(scratch, chunk))
-					return false;
-
-				size -= chunk;
-			}
-
-			return true;
-		}
-
 		void SyncFlushRecordingStream()
 		{
 			if (!ReplayState.File.SyncFlush())
@@ -196,7 +171,6 @@ namespace ReplaySystem
 			ReplayState.LastSyncFlushFrame = 0;
 			ReplayState.ExpectedGameCRC = 0;
 			ReplayState.HasExpectedGameCRC = false;
-			ReplayState.LastRecordedGameSpeed = -1;
 			ReplayState.DivergenceReported = false;
 			ReplayState.CheckedFrameCount = 0;
 			ReplayState.MismatchedFrameCount = 0;
@@ -212,17 +186,14 @@ namespace ReplaySystem
 			ReplayState.HasPendingPlaybackFrame = false;
 			ReplayState.PlaybackStreamEnded = false;
 			ReplayState.PreparedPlaybackFrame = -1;
-			ReplayState.LastReadPlaybackFrame = -1;
+			ReplayState.FrameReader.Reset();
 			ReplayState.HighestPlayedFrame = 0;
 			ReplayState.PendingPlaybackFrame = {};
 			ReplayState.LockedViewportPos = { 0, 0 };
 			ReplayState.HasLockedViewportPos = false;
 			ReplayState.LockedSelectionIDs.clear();
 			ReplayState.HasLockedSelection = false;
-			ReplayState.HasLastWrittenFrameState = false;
-			ReplayState.LastWrittenFrameNumber = 0;
-			ReplayState.LastRecordedTacticalPos = { 0, 0 };
-			ReplayState.LastRecordedSelectionIDs.clear();
+			ReplayState.FrameWriter.Reset();
 		}
 
 		void AbortReplaySystem()
@@ -489,112 +460,6 @@ namespace ReplaySystem
 			return index == ids.size();
 		}
 
-		// Record this frame when deterministic events or visible replay state changed.
-		bool WriteFrameCapture(const PendingRecordedFrameCapture& capture, int eventsThisFrame,
-			const std::vector<SideChannelRecord>& sideChannelEvents)
-		{
-			const bool tacticalPosChanged = !ReplayState.HasLastWrittenFrameState
-				|| capture.TacticalPos.X != ReplayState.LastRecordedTacticalPos.X
-				|| capture.TacticalPos.Y != ReplayState.LastRecordedTacticalPos.Y;
-
-			const bool selectionChanged = !ReplayState.HasLastWrittenFrameState
-				|| capture.SelectedObjectIDs != ReplayState.LastRecordedSelectionIDs;
-
-			const bool hasSideChannelEvents = !sideChannelEvents.empty();
-			const bool hasGameCRC = capture.HasGameCRC;
-
-			const bool hasSelectionTriggers = !capture.SelectionTriggerObjectIDs.empty();
-
-			if (eventsThisFrame == 0 && !tacticalPosChanged && !selectionChanged && !hasSideChannelEvents
-				&& !hasGameCRC && !capture.HasGameSpeed && !hasSelectionTriggers)
-			{
-				return true;
-			}
-
-			FrameRecordHeader header {};
-			header.FrameNumber = capture.FrameNumber;
-			header.EventCountThisFrame = eventsThisFrame;
-			header.Flags = FrameRecordFlag_None;
-			if (tacticalPosChanged)
-				header.Flags |= FrameRecordFlag_TacticalPos;
-			if (selectionChanged)
-				header.Flags |= FrameRecordFlag_Selection;
-			if (hasSideChannelEvents)
-				header.Flags |= FrameRecordFlag_SideChannel;
-			if (hasGameCRC)
-				header.Flags |= FrameRecordFlag_GameCRC;
-			if (capture.HasGameSpeed)
-				header.Flags |= FrameRecordFlag_GameSpeed;
-			if (hasSelectionTriggers)
-				header.Flags |= FrameRecordFlag_SelectionTriggers;
-
-			if (!WriteRaw(&header, sizeof(header)))
-				return false;
-
-			if ((header.Flags & FrameRecordFlag_TacticalPos) != 0u
-				&& !WriteRaw(&capture.TacticalPos, sizeof(capture.TacticalPos)))
-			{
-				return false;
-			}
-
-			if ((header.Flags & FrameRecordFlag_Selection) != 0u)
-			{
-				const int32_t selectedObjectCount = static_cast<int32_t>(capture.SelectedObjectIDs.size());
-				if (!WriteRaw(&selectedObjectCount, sizeof(selectedObjectCount)))
-					return false;
-
-				// One call for the whole block: every WriteRaw is a tdefl_compress call, and
-				// box-selecting a hundred units would otherwise mean a hundred of them.
-				if (!capture.SelectedObjectIDs.empty()
-					&& !WriteRaw(capture.SelectedObjectIDs.data(),
-						capture.SelectedObjectIDs.size() * sizeof(uint32_t)))
-				{
-					return false;
-				}
-			}
-
-			if (hasSideChannelEvents)
-			{
-				const int32_t count = static_cast<int32_t>(sideChannelEvents.size());
-				if (!WriteRaw(&count, sizeof(count))
-					|| !WriteRaw(sideChannelEvents.data(),
-						sideChannelEvents.size() * sizeof(SideChannelRecord)))
-				{
-					return false;
-				}
-			}
-
-			if (hasGameCRC && !WriteRaw(&capture.GameCRC, sizeof(capture.GameCRC)))
-				return false;
-
-
-			if (capture.HasGameSpeed)
-			{
-				if (!WriteRaw(&capture.GameSpeed, sizeof(capture.GameSpeed)))
-					return false;
-
-				ReplayState.LastRecordedGameSpeed = capture.GameSpeed;
-			}
-
-			if (hasSelectionTriggers)
-			{
-				const auto count = static_cast<int32_t>(capture.SelectionTriggerObjectIDs.size());
-				if (!WriteRaw(&count, sizeof(count))
-					|| !WriteRaw(capture.SelectionTriggerObjectIDs.data(),
-						capture.SelectionTriggerObjectIDs.size() * sizeof(uint32_t)))
-				{
-					return false;
-				}
-			}
-
-			ReplayState.HasLastWrittenFrameState = true;
-			ReplayState.LastWrittenFrameNumber = capture.FrameNumber;
-			ReplayState.LastRecordedTacticalPos = capture.TacticalPos;
-			ReplayState.LastRecordedSelectionIDs = capture.SelectedObjectIDs;
-
-			return true;
-		}
-
 		void FlushPendingRecordedFramesThrough(int frameNumber, int currentFrameEventCount)
 		{
 			while (!ReplayState.PendingFrameStates.empty())
@@ -623,7 +488,7 @@ namespace ReplaySystem
 					Debug::Log("[Replay] Dropped excess side-channel events on frame %d.\n", pendingFrame);
 
 				const int eventCount = pendingFrame == frameNumber ? currentFrameEventCount : 0;
-				if (!WriteFrameCapture(capture, eventCount, sideChannelForFrame))
+				if (!ReplayState.FrameWriter.WriteFrame(ReplayState.File, capture, eventCount, sideChannelForFrame))
 				{
 					Debug::Log("[Replay] Failed to write frame capture.\n");
 					AbortReplaySystem();
@@ -650,7 +515,7 @@ namespace ReplaySystem
 				ReplayState.PendingFrameStates.back().FrameNumber = frameNumber;
 			}
 
-			PendingRecordedFrameCapture& capture = ReplayState.PendingFrameStates.back();
+			RecordedFrameCapture& capture = ReplayState.PendingFrameStates.back();
 
 			capture.TacticalPos = TacticalClass::Instance
 				? TacticalClass::Instance->TacticalCoord1
@@ -659,14 +524,7 @@ namespace ReplaySystem
 			FillSelectedObjectIDs(capture.SelectedObjectIDs);
 
 			capture.GameSpeed = static_cast<int32_t>(GameOptionsClass::Instance.GameSpeed);
-			capture.HasGameSpeed = capture.GameSpeed != ReplayState.LastRecordedGameSpeed;
-		}
-
-		bool WriteReplayEndOfStreamMarker()
-		{
-			FrameRecordHeader marker {};
-			marker.FrameNumber = -1;
-			return WriteRaw(&marker, sizeof(marker));
+			capture.HasGameSpeed = capture.GameSpeed != ReplayState.FrameWriter.LastGameSpeed();
 		}
 
 		bool SanitizeSideChannelRecord(SideChannelRecord& record)
@@ -712,152 +570,6 @@ namespace ReplaySystem
 			}
 		}
 
-		bool ReadNextPlaybackFrameRecord(PlaybackFrameRecord& record)
-		{
-			FrameRecordHeader header {};
-			if (!ReadRaw(&header, sizeof(header)))
-				return false;
-
-			record = PlaybackFrameRecord {};
-			record.FrameNumber = header.FrameNumber;
-			record.EventCountThisFrame = header.EventCountThisFrame;
-			record.Flags = header.Flags;
-
-			if (record.FrameNumber == -1)
-			{
-				record.EndOfStream = header.EventCountThisFrame == 0
-					&& header.Flags == FrameRecordFlag_None;
-				return record.EndOfStream;
-			}
-
-			if (record.FrameNumber < 0
-				|| record.FrameNumber <= ReplayState.LastReadPlaybackFrame
-				|| record.EventCountThisFrame < 0
-				|| record.EventCountThisFrame > MaxEventsPerFrame)
-			{
-				return false;
-			}
-
-			if ((record.Flags & ~KnownFrameRecordFlags) != 0u)
-			{
-				Debug::Log("[Replay] Frame %d carries unknown block flags (0x%08X); "
-					"the replay was recorded in a newer format than this build can read.\n",
-					record.FrameNumber, record.Flags & ~KnownFrameRecordFlags);
-				return false;
-			}
-
-			if ((record.Flags & FrameRecordFlag_TacticalPos) != 0u
-				&& !ReadRaw(&record.TacticalPos, sizeof(record.TacticalPos)))
-			{
-				return false;
-			}
-
-			if ((record.Flags & FrameRecordFlag_Selection) != 0u)
-			{
-				if (!ReadRaw(&record.SelectedObjectCount, sizeof(record.SelectedObjectCount)))
-					return false;
-
-				if (record.SelectedObjectCount < 0 || record.SelectedObjectCount > 4096)
-					return false;
-
-				record.SelectedObjectIDs.resize(static_cast<size_t>(record.SelectedObjectCount), 0u);
-				if (!record.SelectedObjectIDs.empty()
-					&& !ReadRaw(record.SelectedObjectIDs.data(),
-						record.SelectedObjectIDs.size() * sizeof(uint32_t)))
-				{
-					return false;
-				}
-			}
-
-			if ((record.Flags & FrameRecordFlag_SideChannel) != 0u)
-			{
-				int32_t sideChannelCount = 0;
-				if (!ReadRaw(&sideChannelCount, sizeof(sideChannelCount)))
-					return false;
-
-				if (sideChannelCount < 0 || sideChannelCount > SideChannelMaxEventsPerFrame)
-					return false;
-
-				// Read every record to keep the stream aligned, but keep only the ones that survive
-				// validation - the rest would index out of an engine array or run off a text buffer.
-				record.SideChannelEvents.reserve(static_cast<size_t>(sideChannelCount));
-				for (int i = 0; i < sideChannelCount; ++i)
-				{
-					SideChannelRecord sideChannelRecord {};
-					if (!ReadRaw(&sideChannelRecord, sizeof(SideChannelRecord)))
-						return false;
-
-					if (sideChannelRecord.FrameNumber == record.FrameNumber
-						&& SanitizeSideChannelRecord(sideChannelRecord))
-						record.SideChannelEvents.push_back(sideChannelRecord);
-					else
-						Debug::Log("[Replay] Discarded an out-of-range side-channel record during playback.\n");
-				}
-			}
-
-			if ((record.Flags & FrameRecordFlag_GameCRC) != 0u
-				&& !ReadRaw(&record.GameCRC, sizeof(record.GameCRC)))
-			{
-				return false;
-			}
-
-			if ((record.Flags & FrameRecordFlag_ObjectCensus) != 0u
-				&& !SkipRaw(sizeof(FrameObjectCensus)))
-			{
-				return false;
-			}
-
-			if ((record.Flags & FrameRecordFlag_RandomState) != 0u
-				&& !SkipRaw(sizeof(FrameRandomState)))
-			{
-				return false;
-			}
-
-			if ((record.Flags & FrameRecordFlag_GameSpeed) != 0u
-				&& (!ReadRaw(&record.GameSpeed, sizeof(record.GameSpeed))
-					|| !IsReplayGameSpeedIndexValid(static_cast<uint32_t>(record.GameSpeed))))
-			{
-				return false;
-			}
-
-			if ((record.Flags & FrameRecordFlag_SelectionTriggers) != 0u)
-			{
-				int32_t triggerCount = 0;
-				if (!ReadRaw(&triggerCount, sizeof(triggerCount)))
-					return false;
-
-				if (triggerCount <= 0 || triggerCount > MaxSelectionTriggersPerFrame)
-					return false;
-
-				record.SelectionTriggerObjectIDs.resize(static_cast<size_t>(triggerCount), 0u);
-				if (!ReadRaw(record.SelectionTriggerObjectIDs.data(),
-					record.SelectionTriggerObjectIDs.size() * sizeof(uint32_t)))
-				{
-					return false;
-				}
-			}
-
-			if ((record.Flags & FrameRecordFlag_Extensions) != 0u)
-			{
-				uint32_t extensionBytes = 0;
-				if (!ReadRaw(&extensionBytes, sizeof(extensionBytes)))
-					return false;
-
-				if (extensionBytes > MaxFrameExtensionBytes)
-				{
-					Debug::Log("[Replay] Frame %d declares a %u byte extension block; refusing it.\n",
-						record.FrameNumber, extensionBytes);
-					return false;
-				}
-
-				if (!SkipRaw(extensionBytes))
-					return false;
-			}
-
-			ReplayState.LastReadPlaybackFrame = record.FrameNumber;
-			return true;
-		}
-
 		bool RepositionPlaybackStreamToFrame(int targetFrame)
 		{
 			if (!ReplayState.File.IsOpen())
@@ -872,7 +584,7 @@ namespace ReplaySystem
 			ReplayState.HasPendingPlaybackFrame = false;
 			ReplayState.PlaybackStreamEnded = false;
 			ReplayState.PreparedPlaybackFrame = -1;
-			ReplayState.LastReadPlaybackFrame = -1;
+			ReplayState.FrameReader.Reset();
 			ReplayState.PendingPlaybackFrame = {};
 			ReplayState.ExpectedEventsThisFrame = 0;
 			ReplayState.HasExpectedGameCRC = false;
@@ -880,7 +592,7 @@ namespace ReplaySystem
 			for (;;)
 			{
 				PlaybackFrameRecord record {};
-				if (!ReadNextPlaybackFrameRecord(record))
+				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, record, SanitizeSideChannelRecord))
 				{
 					Debug::Log("[Replay] Failed to read the replay stream while seeking to frame %d.\n",
 						targetFrame);
@@ -920,7 +632,7 @@ namespace ReplaySystem
 				}
 
 				// The frame's events sit in the stream immediately after its record.
-				if (!SkipRaw(static_cast<size_t>(record.EventCountThisFrame) * sizeof(EventClass)))
+				if (!ReplayState.FrameReader.SkipEvents(ReplayState.File, record.EventCountThisFrame))
 				{
 					Debug::Log("[Replay] Failed to step over frame %d's events while seeking.\n",
 						record.FrameNumber);
@@ -1190,7 +902,7 @@ namespace ReplaySystem
 				FlushPendingRecordedFramesThrough(std::numeric_limits<int>::max(), 0);
 				if (ReplayState.File.IsOpen())
 				{
-					const bool wroteEnd = WriteReplayEndOfStreamMarker();
+					const bool wroteEnd = ReplayState.FrameWriter.WriteEndMarker(ReplayState.File);
 					if (!wroteEnd)
 						Debug::Log("[Replay] Failed to write replay end-of-stream marker.\n");
 
@@ -1198,7 +910,7 @@ namespace ReplaySystem
 					if (!finishedStream)
 						Debug::Log("[Replay] Failed to finish the compressed replay stream.\n");
 
-					if (wroteEnd && finishedStream && !ReplayState.File.StampCleanShutdown(ReplayState.LastWrittenFrameNumber))
+					if (wroteEnd && finishedStream && !ReplayState.File.StampCleanShutdown(ReplayState.FrameWriter.LastFrameNumber()))
 						Debug::Log("[Replay] Failed to mark the replay as complete.\n");
 				}
 			}
@@ -1256,7 +968,7 @@ namespace ReplaySystem
 			if (!ReplayState.HasPendingPlaybackFrame && !ReplayState.PlaybackStreamEnded)
 			{
 				PlaybackFrameRecord nextRecord {};
-				if (!ReadNextPlaybackFrameRecord(nextRecord))
+				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, nextRecord, SanitizeSideChannelRecord))
 				{
 					Debug::Log("[Replay] Failed to read frame state during playback.\n");
 					StopReplaySystem();
@@ -1381,7 +1093,7 @@ namespace ReplaySystem
 				return;
 
 			if (hasCapturedEventsForFrame && !capturedEvents.empty()
-				&& !WriteRaw(capturedEvents.data(), capturedEvents.size() * sizeof(EventClass)))
+				&& !ReplayState.FrameWriter.WriteEvents(ReplayState.File, capturedEvents))
 			{
 				Debug::Log("[Replay] Failed writing events to replay stream.\n");
 				StopReplaySystem();
@@ -1418,7 +1130,7 @@ namespace ReplaySystem
 				alignas(EventClass) char eventBuffer[sizeof(EventClass)] = { 0 };
 				EventClass* replayEvent = reinterpret_cast<EventClass*>(eventBuffer);
 
-				if (!ReadRaw(replayEvent, sizeof(EventClass)))
+				if (!ReplayState.FrameReader.ReadEvent(ReplayState.File, *replayEvent))
 				{
 					Debug::Log("[Replay] Event stream ended unexpectedly during playback.\n");
 					StopReplaySystem();
@@ -1444,7 +1156,7 @@ namespace ReplaySystem
 				return;
 
 			Debug::Log("[Replay] Mission over at frame %d; finishing the recording in %s. Later missions in "
-				"this campaign are not recorded.\n", ReplayState.LastWrittenFrameNumber, Replay::GetRecordingOutputPath(GetConfig()));
+				"this campaign are not recorded.\n", ReplayState.FrameWriter.LastFrameNumber(), Replay::GetRecordingOutputPath(GetConfig()));
 
 			StopReplaySystem();
 			ReplayState.RecordingFinishedForSession = true;

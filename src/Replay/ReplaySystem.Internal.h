@@ -22,7 +22,7 @@
 // Runtime state and the entry points the replay hooks drive. Only src/Replay includes this; the
 // public surface is ReplaySystem.h.
 
-#include "ReplayFormat.h"
+#include "ReplayFrameCodec.h"
 #include "ReplayFile.h"
 
 #include <Spawner/Spawner.Config.h>
@@ -44,39 +44,6 @@ namespace ReplaySystem
 		// How often the compressed stream is given a decodable point. A recording cut short by a
 		// crash loses at most this many frames.
 		constexpr int SyncFlushFrameInterval = 60;
-
-		struct PlaybackFrameRecord
-		{
-			int32_t FrameNumber = 0;
-			int32_t EventCountThisFrame = 0;
-			uint32_t Flags = FrameRecordFlag_None;
-			Point2D TacticalPos = { 0, 0 };
-			int32_t SelectedObjectCount = 0;
-			std::vector<uint32_t> SelectedObjectIDs;
-			std::vector<uint32_t> SelectionTriggerObjectIDs;
-			std::vector<SideChannelRecord> SideChannelEvents;
-			uint32_t GameCRC = 0;
-			int32_t GameSpeed = 0;
-			bool EndOfStream = false;
-		};
-
-		// One frame's worth of visible state, captured in the main loop and written out once the
-		// queue hook knows how many events the frame carried.
-		struct PendingRecordedFrameCapture
-		{
-			int FrameNumber = 0;
-			Point2D TacticalPos { 0, 0 };
-			std::vector<uint32_t> SelectedObjectIDs;
-			// Appended to during the frame rather than sampled once, because the spring happens in
-			// the input pass after this capture is made and before Queue_AI writes it out.
-			std::vector<uint32_t> SelectionTriggerObjectIDs;
-			// Filled in later than the rest of the capture: the engine has not computed the hash
-			// when this struct is created. See CaptureGameCRCForCurrentFrame.
-			uint32_t GameCRC = 0;
-			bool HasGameCRC = false;
-			int32_t GameSpeed = 0;
-			bool HasGameSpeed = false;
-		};
 
 		struct ReplayRuntimeState
 		{
@@ -105,9 +72,6 @@ namespace ReplaySystem
 
 			uint32_t ExpectedGameCRC = 0;
 			bool HasExpectedGameCRC = false;
-			// The game speed as last written into the stream, so only changes are recorded. -1
-			// forces the first frame to establish the baseline.
-			int LastRecordedGameSpeed = -1;
 			bool DivergenceReported = false;
 
 			// CRC comparison summary.
@@ -118,9 +82,11 @@ namespace ReplaySystem
 			int LastMismatchFrame = -1;
 
 			Replay::File File;
+			Replay::FrameWriter FrameWriter;
+			Replay::FrameReader FrameReader;
 
 			char PlaybackPath[MAX_PATH] = { 0 };
-			std::deque<PendingRecordedFrameCapture> PendingFrameStates;
+			std::deque<RecordedFrameCapture> PendingFrameStates;
 			std::deque<SideChannelRecord> PendingSideChannelEvents;
 			int CapturedFrameEventsFrame = -1;
 			// Events executed during the current frame.
@@ -131,7 +97,6 @@ namespace ReplaySystem
 			bool HasPendingPlaybackFrame = false;
 			bool PlaybackStreamEnded = false;
 			int PreparedPlaybackFrame = -1;
-			int LastReadPlaybackFrame = -1;
 
 			// The furthest frame playback has reached, which stands in for the replay's length
 			// when the recording died before it could stamp one into the header.
@@ -143,11 +108,6 @@ namespace ReplaySystem
 			std::vector<uint32_t> LockedSelectionIDs;
 			bool HasLockedSelection = false;
 			PlaybackFrameRecord PendingPlaybackFrame = {};
-
-			bool HasLastWrittenFrameState = false;
-			int32_t LastWrittenFrameNumber = 0;
-			Point2D LastRecordedTacticalPos = { 0, 0 };
-			std::vector<uint32_t> LastRecordedSelectionIDs;
 
 			// Scratch buffers reused every frame so recording does not allocate on the game thread.
 			std::vector<SideChannelRecord> SideChannelScratch;

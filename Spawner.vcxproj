@@ -58,6 +58,7 @@
     <ClCompile Include="$(ThisDir)\src\Misc\VideoMode.cpp" />
     <!-- Replay -->
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayControls.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayFrameCodec.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayFile.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayFile.Metadata.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayOverlay.cpp" />
@@ -112,6 +113,7 @@
     <ClInclude Include="$(ThisDir)\src\UI\Dialogs.h" />
     <!-- Replay -->
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayControls.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplayFrameCodec.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFile.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFormat.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayOverlay.h" />
