@@ -463,6 +463,22 @@ A seek runs in two halves, in `src/Replay/ReplaySeek.cpp`:
    in 61 so it reads as progress rather than as a hang) and the sound off (`VocAllowed` at
    0x8464AC, which every `VocClass::Play` path tests, is cleared for the duration).
 
+The temporary savegame's in-memory sidecar is owned by
+`ReplaySystem::KeyframeState::Snapshot`. Its implementation is split into
+`ReplayKeyframeState.cpp` for capture/restore coordination and collection order,
+and `.Objects.cpp`, `.Map.cpp`, `.Planning.cpp`, and `.AresParticles.cpp` for the
+individual state repairs. Snapshot data definitions stay in
+`ReplayKeyframeState.Internal.h`; the seek controller only includes the public header.
+
+The order in `ReplaySeek.cpp` is significant: `CaptureAfterSave()` runs after
+`SaveGame` succeeds. After `LoadMission` and transient event-queue cleanup,
+`RestoreBeforeResume(frame)` restores the frame counter and simulation state.
+The seek controller then restores the temporary surface, resumes the session,
+and reapplies the spectator seat before calling `RestoreAfterResume(frame)` for
+house repair state, reset timers, slave managers, and in-playfield flags.
+Keyframe storage and eviction stay with the seek controller; snapshot destruction
+releases the associated sidecar memory.
+
 ### What a savegame load does to the state a replay depends on
 
 Several things, all verified in the binary, and all of which the seek has to undo.

@@ -59,6 +59,11 @@
     <!-- Replay -->
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayControls.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayOverlay.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.AresParticles.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Planning.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Map.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Objects.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySeek.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.Hook.cpp" />
@@ -107,6 +112,8 @@
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayControls.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFormat.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayOverlay.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplayKeyframeState.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Internal.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySeek.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.Internal.h" />
