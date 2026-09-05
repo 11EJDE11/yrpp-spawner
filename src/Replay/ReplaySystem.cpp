@@ -22,6 +22,7 @@
 #include "ReplayFrameCodec.h"
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
+#include "ReplaySideChannels.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
 
@@ -29,9 +30,8 @@
 #include <Utilities/Debug.h>
 #include <Ext/Event/Body.h>
 
-#include <AbstractClass.h>
-#include <BeaconManagerClass.h>
 #include <ColorScheme.h>
+#include <AbstractClass.h>
 #include <EventClass.h>
 #include <GameModeOptionsClass.h>
 #include <GameOptionsClass.h>
@@ -39,7 +39,6 @@
 #include <MapClass.h>
 #include <MessageListClass.h>
 #include <ObjectClass.h>
-#include <RulesClass.h>
 #include <SessionClass.h>
 #include <MouseClass.h>
 #include <TagClass.h>
@@ -47,8 +46,6 @@
 #include <TacticalClass.h>
 #include <Timer.h>
 #include <Unsorted.h>
-#include <VocClass.h>
-#include <VoxClass.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -75,81 +72,6 @@ namespace ReplaySystem
 			return Spawner::GetConfig();
 		}
 
-		// The playback frame rate, in frames per second: whatever the viewer's speed controls last
-		// asked for, falling back to the rate the recorded game speed implies.
-		int GetPlaybackTargetFPS()
-		{
-			if (ReplayState.PlaybackFPS > 0)
-				return ReplayState.PlaybackFPS;
-
-			return GetReplayFPSFromGameSpeed(GameOptionsClass::Instance.GameSpeed);
-		}
-
-		// Milliseconds off the performance counter. The engine's own clocks are 60Hz ticks or whole
-		// milliseconds, and neither can express the faster end of the playback speed ladder.
-		double PlaybackClockMilliseconds()
-		{
-			static double ticksPerMillisecond = 0.0;
-			if (ticksPerMillisecond == 0.0)
-			{
-				LARGE_INTEGER frequency {};
-				if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart == 0)
-					return 0.0;
-
-				ticksPerMillisecond = static_cast<double>(frequency.QuadPart) / 1000.0;
-			}
-
-			LARGE_INTEGER counter {};
-			if (!QueryPerformanceCounter(&counter))
-				return 0.0;
-
-			return static_cast<double>(counter.QuadPart) / ticksPerMillisecond;
-		}
-
-		void ApplyPlaybackFramePacing()
-		{
-			if (!ReplayState.Playback)
-				return;
-
-			// A seek is not being watched, so it runs as fast as the machine manages. The engine
-			// still has to be told not to wait, which is what the two timers below do.
-			if (ReplaySystem::Seek::IsSeeking())
-			{
-				Unsorted::GameFrameTimer.TimeLeft = 0;
-				Unsorted::NetworkFrameTimer.TimeLeft = 0;
-				return;
-			}
-
-			if (ReplayState.PlaybackFPS <= 0)
-				return;
-
-			const double frameMilliseconds = 1000.0 / ReplayState.PlaybackFPS;
-			const double now = PlaybackClockMilliseconds();
-
-			if (now > 0.0)
-			{
-				if (ReplayState.PlaybackNextFrameDue == 0.0
-					|| now > ReplayState.PlaybackNextFrameDue + frameMilliseconds)
-				{
-					ReplayState.PlaybackNextFrameDue = now;
-				}
-
-				for (double remaining = ReplayState.PlaybackNextFrameDue - PlaybackClockMilliseconds();
-					remaining > 0.0;
-					remaining = ReplayState.PlaybackNextFrameDue - PlaybackClockMilliseconds())
-				{
-					// Sleep(1) can overshoot by a whole scheduler tick, so it covers the bulk and the
-					// last couple of milliseconds are given up with Sleep(0).
-					Sleep(remaining > 2.0 ? 1 : 0);
-				}
-
-				ReplayState.PlaybackNextFrameDue += frameMilliseconds;
-			}
-
-			Unsorted::GameFrameTimer.TimeLeft = 0;
-			Unsorted::NetworkFrameTimer.TimeLeft = 0;
-		}
-
 		void SyncFlushRecordingStream()
 		{
 			if (!ReplayState.File.SyncFlush())
@@ -164,9 +86,7 @@ namespace ReplaySystem
 			ReplayState.Recording = false;
 			ReplayState.Playback = false;
 			ReplayState.SpectatorView = false;
-			ReplayState.PlaybackFPS = 0;
-			ReplayState.PlaybackNextFrameDue = 0.0;
-			ReplayState.PlaybackPaused = false;
+			Controls::OnPlaybackStopped();
 			ReplayState.ExpectedEventsThisFrame = 0;
 			ReplayState.LastSyncFlushFrame = 0;
 			ReplayState.ExpectedGameCRC = 0;
@@ -178,7 +98,7 @@ namespace ReplaySystem
 			ReplayState.FirstMismatchFrame = -1;
 			ReplayState.LastMismatchFrame = -1;
 			ReplayState.PendingFrameStates.clear();
-			ReplayState.PendingSideChannelEvents.clear();
+			SideChannels::Reset();
 			ReplayState.CapturedFrameEventsFrame = -1;
 			ReplayState.CapturedFrameEvents.clear();
 			ReplayState.HasPlaybackHeader = false;
@@ -408,11 +328,7 @@ namespace ReplaySystem
 				const auto& event = EventClass::DoList[i];
 				if (event.Frame == currentFrame && event.Type == EventType::GameSpeed)
 				{
-					const int requestedFPS = GetReplayFPSFromGameSpeed(
-						std::clamp(event.GameSpeed.GameSpeed, 0, MaxGameSpeedIndex));
-
-					ReplayState.PlaybackFPS = requestedFPS;
-					ReplayState.PlaybackNextFrameDue = 0.0;
+					Controls::SetPlaybackGameSpeedIndex(event.GameSpeed.GameSpeed);
 				}
 			}
 
@@ -469,23 +385,7 @@ namespace ReplaySystem
 				if (pendingFrame > frameNumber)
 					break;
 
-				// Keep playback parsing bounded and discard overflow from the same frame.
-				std::vector<SideChannelRecord>& sideChannelForFrame = ReplayState.SideChannelScratch;
-				sideChannelForFrame.clear();
-				bool droppedSideChannelEvent = false;
-				while (!ReplayState.PendingSideChannelEvents.empty()
-					&& ReplayState.PendingSideChannelEvents.front().FrameNumber <= pendingFrame)
-				{
-					if (sideChannelForFrame.size() < static_cast<size_t>(SideChannelMaxEventsPerFrame))
-						sideChannelForFrame.push_back(ReplayState.PendingSideChannelEvents.front());
-					else
-						droppedSideChannelEvent = true;
-
-					ReplayState.PendingSideChannelEvents.pop_front();
-				}
-
-				if (droppedSideChannelEvent)
-					Debug::Log("[Replay] Dropped excess side-channel events on frame %d.\n", pendingFrame);
+				const auto& sideChannelForFrame = SideChannels::DrainThroughFrame(pendingFrame);
 
 				const int eventCount = pendingFrame == frameNumber ? currentFrameEventCount : 0;
 				if (!ReplayState.FrameWriter.WriteFrame(ReplayState.File, capture, eventCount, sideChannelForFrame))
@@ -527,49 +427,6 @@ namespace ReplaySystem
 			capture.HasGameSpeed = capture.GameSpeed != ReplayState.FrameWriter.LastGameSpeed();
 		}
 
-		bool SanitizeSideChannelRecord(SideChannelRecord& record)
-		{
-			record.SenderName[SideChannelNameLength - 1] = L'\0';
-			record.Text[SideChannelTextLength - 1] = L'\0';
-
-			switch (static_cast<SideChannelEventType>(record.Type))
-			{
-			case SideChannelEventType::ChatMessage:
-				if (record.House < 0 || record.House >= MaxHouses)
-					return false;
-
-				// Indexes ColorScheme::Array in TextLabelClass; fall back to the first scheme.
-				if (record.Aux < 0 || record.Aux >= ColorScheme::Array.Count)
-					record.Aux = 0;
-
-				return true;
-
-			case SideChannelEventType::BeaconPlace:
-				// -1 asks the engine to pick a free slot, which is how a local placement is recorded.
-				if (record.House < 0 || record.House >= MaxHouses
-					|| record.Aux < -1 || record.Aux >= MaxBeaconSlots)
-				{
-					return false;
-				}
-
-				return record.Coord.X >= 0 && record.Coord.X < MaxMapLeptonCoord
-					&& record.Coord.Y >= 0 && record.Coord.Y < MaxMapLeptonCoord;
-
-			case SideChannelEventType::BeaconDelete:
-			case SideChannelEventType::BeaconText:
-				return record.House >= 0 && record.House < MaxHouses
-					&& record.Aux >= 0 && record.Aux < MaxBeaconSlots;
-
-			case SideChannelEventType::Taunt:
-				// PlayTaunt range-checks the command itself, but a value that came off disk should
-				// not be bounded only by a function we do not own.
-				return VoxClass::IsValidTauntCommand(record.Aux);
-
-			default:
-				return false;
-			}
-		}
-
 		bool RepositionPlaybackStreamToFrame(int targetFrame)
 		{
 			if (!ReplayState.File.IsOpen())
@@ -592,7 +449,7 @@ namespace ReplaySystem
 			for (;;)
 			{
 				PlaybackFrameRecord record {};
-				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, record, SanitizeSideChannelRecord))
+				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, record, SideChannels::ValidateRecord))
 				{
 					Debug::Log("[Replay] Failed to read the replay stream while seeking to frame %d.\n",
 						targetFrame);
@@ -754,64 +611,6 @@ namespace ReplaySystem
 			ApplyPlaybackSelection(record);
 		}
 
-		int GetChatMessageDurationFrames()
-		{
-			constexpr int TicksPerMinute = 900;
-			constexpr double DefaultMessageDelay = 0.6; // Rules' own default, if Rules is not loaded.
-
-			const double messageDelay = RulesClass::Instance
-				? RulesClass::Instance->MessageDelay
-				: DefaultMessageDelay;
-
-			return static_cast<int>(messageDelay * TicksPerMinute);
-		}
-
-		// Replays recorded chat, beacons and taunts without using the network.
-		void ApplySideChannelEvent(const SideChannelRecord& record)
-		{
-			if (!ReplayState.ShowChatAndBeacons)
-				return;
-
-			const auto eventType = static_cast<SideChannelEventType>(record.Type);
-			if (ReplaySystem::Seek::IsSeeking()
-				&& (eventType == SideChannelEventType::ChatMessage
-					|| eventType == SideChannelEventType::Taunt))
-			{
-				return;
-			}
-
-			switch (eventType)
-			{
-			case SideChannelEventType::ChatMessage:
-				MessageListClass::Instance.AddMessage(
-					record.SenderName, record.House, record.Text, record.Aux,
-					TextPrintType::UseGradPal | TextPrintType::FullShadow | TextPrintType::Point6Grad,
-					GetChatMessageDurationFrames(), false);
-				if (RulesClass::Instance)
-					VocClass::PlayGlobal(RulesClass::Instance->IncomingMessage, 0x2000, 1.0f);
-				break;
-
-			case SideChannelEventType::BeaconPlace:
-				BeaconManagerClass::Instance.PlaceBeacon(record.House, record.Coord, record.Aux);
-				break;
-
-			case SideChannelEventType::BeaconDelete:
-				BeaconManagerClass::Instance.DeleteBeacon(record.House, record.Aux);
-				break;
-
-			case SideChannelEventType::BeaconText:
-				BeaconManagerClass::Instance.EditBeaconMessage(record.Text, record.House, record.Aux, true);
-				break;
-
-			case SideChannelEventType::Taunt:
-				VoxClass::PlayTaunt(record.Aux);
-				break;
-
-			default:
-				break;
-			}
-		}
-
 		constexpr int DivergenceMessageDurationFrames = 1800;
 		constexpr const wchar_t* DivergenceMessage = L"Replay playback has diverged from the recording.";
 		constexpr int MaxLoggedDivergences = 10;
@@ -968,7 +767,7 @@ namespace ReplaySystem
 			if (!ReplayState.HasPendingPlaybackFrame && !ReplayState.PlaybackStreamEnded)
 			{
 				PlaybackFrameRecord nextRecord {};
-				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, nextRecord, SanitizeSideChannelRecord))
+				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, nextRecord, SideChannels::ValidateRecord))
 				{
 					Debug::Log("[Replay] Failed to read frame state during playback.\n");
 					StopReplaySystem();
@@ -1027,7 +826,8 @@ namespace ReplaySystem
 			if ((frameRecord.Flags & FrameRecordFlag_SideChannel) != 0u)
 			{
 				for (const auto& sideChannelEvent : frameRecord.SideChannelEvents)
-					ApplySideChannelEvent(sideChannelEvent);
+					SideChannels::ApplyRecord(sideChannelEvent,
+						ReplayState.ShowChatAndBeacons, Seek::IsSeeking());
 			}
 
 			if ((frameRecord.Flags & FrameRecordFlag_GameCRC) != 0u)
@@ -1108,12 +908,6 @@ namespace ReplaySystem
 				ReplayState.LastSyncFlushFrame = frameNumber;
 				SyncFlushRecordingStream();
 			}
-		}
-
-		void PushSideChannelEvent(SideChannelRecord&& record)
-		{
-			record.FrameNumber = Unsorted::CurrentFrame;
-			ReplayState.PendingSideChannelEvents.push_back(std::move(record));
 		}
 
 		void PlaybackFrameEvents()
@@ -1229,9 +1023,10 @@ namespace ReplaySystem
 			if (ReplayState.HasPlaybackHeader)
 				recordedGameSpeed = std::clamp(static_cast<int>(ReplayState.PlaybackHeader.RecordedGameSpeed), 0, MaxGameSpeedIndex);
 
-			ReplayState.PlaybackFPS = requestedFPS > 0
+			Controls::OnPlaybackStarted(requestedFPS > 0
 				? requestedFPS
-				: GetReplayFPSFromGameSpeed(recordedGameSpeed);
+				: GetReplayFPSFromGameSpeed(recordedGameSpeed),
+				pConfig && pConfig->ReplayControlBar);
 
 			// The speed the recording started at, applied once and never re-pinned: a change the
 			// player made during the game is in the event stream and is replayed like any other.
@@ -1255,7 +1050,6 @@ namespace ReplaySystem
 
 			strncpy_s(ReplayState.PlaybackPath, sizeof(ReplayState.PlaybackPath), replayPath, _TRUNCATE);
 
-			ReplaySystem::Controls::InitControlBarVisibility();
 			ReplaySystem::Seek::OnPlaybackStarted();
 
 			ReplayOpenFailure failure = ReplayOpenFailure::None;
@@ -1275,81 +1069,15 @@ namespace ReplaySystem
 // The public API below is defined outside Internal, so pull its names in.
 using namespace ReplaySystem::Internal;
 
-void ReplaySystem::RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex)
-{
-	if (!ReplayState.Recording)
-		return;
-
-	SideChannelRecord record {};
-	record.Type = static_cast<uint8_t>(SideChannelEventType::ChatMessage);
-	record.House = houseIndex;
-	record.Aux = colorSchemeIndex;
-	if (senderName)
-		wcsncpy_s(record.SenderName, senderName, _TRUNCATE);
-	if (message)
-		wcsncpy_s(record.Text, message, _TRUNCATE);
-
-	PushSideChannelEvent(std::move(record));
-}
-
-void ReplaySystem::RecordTaunt(int tauntCommand)
-{
-	if (!ReplayState.Recording)
-		return;
-
-	SideChannelRecord record {};
-	record.Type = static_cast<uint8_t>(SideChannelEventType::Taunt);
-	record.Aux = tauntCommand;
-
-	PushSideChannelEvent(std::move(record));
-}
-
-void ReplaySystem::RecordBeaconPlace(int houseIndex, const CoordStruct& coord, int beaconSlot)
-{
-	if (!ReplayState.Recording)
-		return;
-
-	SideChannelRecord record {};
-	record.Type = static_cast<uint8_t>(SideChannelEventType::BeaconPlace);
-	record.House = houseIndex;
-	record.Aux = beaconSlot;
-	record.Coord = coord;
-
-	PushSideChannelEvent(std::move(record));
-}
-
-void ReplaySystem::RecordBeaconDelete(int houseIndex, int beaconSlot)
-{
-	if (!ReplayState.Recording)
-		return;
-
-	SideChannelRecord record {};
-	record.Type = static_cast<uint8_t>(SideChannelEventType::BeaconDelete);
-	record.House = houseIndex;
-	record.Aux = beaconSlot;
-
-	PushSideChannelEvent(std::move(record));
-}
-
-void ReplaySystem::RecordBeaconText(int houseIndex, int beaconSlot, const wchar_t* text)
-{
-	if (!ReplayState.Recording)
-		return;
-
-	SideChannelRecord record {};
-	record.Type = static_cast<uint8_t>(SideChannelEventType::BeaconText);
-	record.House = houseIndex;
-	record.Aux = beaconSlot;
-	if (text)
-		wcsncpy_s(record.Text, text, _TRUNCATE);
-
-	PushSideChannelEvent(std::move(record));
-}
-
 bool ReplaySystem::IsPlaybackRequested()
 {
 	const auto* pConfig = GetConfig();
 	return pConfig && pConfig->ReplayFile[0] != '\0';
+}
+
+bool ReplaySystem::IsRecordingActive()
+{
+	return ReplayState.Recording;
 }
 
 bool ReplaySystem::IsPlaybackActive()

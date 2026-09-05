@@ -190,15 +190,4 @@ namespace Replay
 		return std::max(1, 60 / gameSpeed);
 	}
 
-	inline bool IsReplayHeaderValid(const ReplayHeader& header)
-	{
-		return header.Magic == ReplayMagic
-			&& header.HeaderSize >= sizeof(ReplayHeader)
-			&& header.UniqueIDCounter >= 0
-			&& header.RandomNext1 >= 0 && header.RandomNext1 < 250
-			&& header.RandomNext2 >= 0 && header.RandomNext2 < 250
-			&& header.SpawnIniSize <= MaxEmbeddedFileBytes
-			&& header.SpawnMapSize <= MaxEmbeddedFileBytes
-			&& IsReplayGameSpeedIndexValid(header.RecordedGameSpeed);
-	}
 }

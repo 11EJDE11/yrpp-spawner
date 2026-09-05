@@ -21,7 +21,6 @@
 #include "ReplayControls.h"
 #include "ReplaySeek.h"
 #include "ReplaySystem.h"
-#include "ReplaySystem.Internal.h"
 
 #include <Drawing.h>
 #include <Surface.h>
@@ -30,8 +29,6 @@
 
 #include <algorithm>
 #include <cstdio>
-
-using namespace ReplaySystem::Internal;
 
 namespace ReplaySystem
 {

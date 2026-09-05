@@ -59,14 +59,6 @@ namespace ReplaySystem
 			// Playback only; recording keeps this data unconditionally.
 			bool ShowChatAndBeacons = true;
 
-			int PlaybackFPS = 0;
-			// Performance-counter deadline for the next playback frame, in milliseconds. Zero
-			// means the pacing has not started yet, or needs resyncing to now.
-			double PlaybackNextFrameDue = 0.0;
-			// Set by the pause hotkey. While it is set the main loop still renders, scrolls and
-			// takes input, but LogicClass::AI, Queue_AI and the frame counter are all held.
-			bool PlaybackPaused = false;
-
 			int ExpectedEventsThisFrame = 0;
 			int LastSyncFlushFrame = 0;
 
@@ -87,7 +79,6 @@ namespace ReplaySystem
 
 			char PlaybackPath[MAX_PATH] = { 0 };
 			std::deque<RecordedFrameCapture> PendingFrameStates;
-			std::deque<SideChannelRecord> PendingSideChannelEvents;
 			int CapturedFrameEventsFrame = -1;
 			// Events executed during the current frame.
 			std::vector<EventClass> CapturedFrameEvents;
@@ -110,7 +101,6 @@ namespace ReplaySystem
 			PlaybackFrameRecord PendingPlaybackFrame = {};
 
 			// Scratch buffers reused every frame so recording does not allocate on the game thread.
-			std::vector<SideChannelRecord> SideChannelScratch;
 			std::vector<EventClass> PreservedEventsScratch;
 		};
 
@@ -136,9 +126,6 @@ namespace ReplaySystem
 		void RecordSelectionTriggerSpring(TechnoClass* pTechno);
 		void SpringRecordedSelectionTriggers(const PlaybackFrameRecord& frameRecord);
 		void ComputeAndCaptureGameCRCForCurrentFrame();
-		int GetPlaybackTargetFPS();
-		double PlaybackClockMilliseconds();
-		void ApplyPlaybackFramePacing();
 		void CaptureEventsForCurrentFrame();
 		void RecordExecutedEvent(const EventClass* pEvent);
 		void RecordCapturedEventsForCurrentFrame();

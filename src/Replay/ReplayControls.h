@@ -29,6 +29,15 @@ namespace ReplaySystem
 		constexpr int SpeedLadder[] = { 10, 12, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 500, 1000, 2000 };
 		constexpr int SpeedLadderCount = static_cast<int>(std::size(SpeedLadder));
 
+		// Called by the replay lifecycle. Frame rate is a viewer setting, separate from game speed.
+		void OnPlaybackStarted(int playbackFPS, bool controlBarVisible);
+		void OnPlaybackStopped();
+
+		void ApplyFramePacing();
+		void ResetFramePacing();
+		// Whether a playback rate is initialized (used by the options-dialog hooks).
+		bool HasPlaybackSpeed();
+
 		// True while playback is frozen. The main loop still renders, scrolls and takes input;
 		// only the simulation is held.
 		bool IsPlaybackPaused();
@@ -55,7 +64,6 @@ namespace ReplaySystem
 		// ReplayControlBar setting.
 		bool IsControlBarVisible();
 		void ToggleControlBar();
-		void InitControlBarVisibility();
 
 		// Live viewer-state toggles.
 		void ToggleLockedViewport();

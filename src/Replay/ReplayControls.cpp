@@ -20,8 +20,8 @@
 #include "ReplayControls.h"
 #include "ReplaySeek.h"
 #include "ReplaySystem.h"
+#include "ReplayFormat.h"
 #include "ReplaySystem.Internal.h"
-#include <Spawner/Spawner.h>
 #include <ColorScheme.h>
 #include <MapClass.h>
 #include <MessageListClass.h>
@@ -41,20 +41,46 @@ namespace ReplaySystem
 		{
 			constexpr int ControlMessageDurationFrames = 90;
 
-			// The frame at which a single step takes the pause back. The pause flag is read at four
-			// points in a main-loop iteration, so it is held steady from one frame start to the next.
-			int SingleStepTargetFrame = -1;
-			// Input is handled after RestoreFrameState. A resume requested there must wait for the
-			// next frame-start hook or the simulation advances without preparing this frame's record.
-			bool ResumePending = false;
-			bool ControlBarVisible = false;
+			struct PlaybackControlState
+			{
+				int FrameRate = 0;
+				// Performance-counter deadline; reset after pause, speed changes, and seeking.
+				double NextFrameDue = 0.0;
+				bool Paused = false;
+				// Hold the pause state steady until the next frame-start hook.
+				int SingleStepTargetFrame = -1;
+				// Input runs after frame preparation, so resuming must wait for frame start.
+				bool ResumePending = false;
+				bool ControlBarVisible = false;
+			};
+
+			PlaybackControlState State;
+			// Use a high-resolution clock for playback rates above the engine timer resolution.
+			double PlaybackClockMilliseconds()
+			{
+				static double ticksPerMillisecond = 0.0;
+				if (ticksPerMillisecond == 0.0)
+				{
+					LARGE_INTEGER frequency {};
+					if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart == 0)
+						return 0.0;
+
+					ticksPerMillisecond = static_cast<double>(frequency.QuadPart) / 1000.0;
+				}
+
+				LARGE_INTEGER counter {};
+				if (!QueryPerformanceCounter(&counter))
+					return 0.0;
+
+				return static_cast<double>(counter.QuadPart) / ticksPerMillisecond;
+			}
 
 			void SetPausedState(bool paused)
 			{
-				ReplayState.PlaybackPaused = paused;
+				State.Paused = paused;
 				// Never carry a pre-pause or single-step deadline into resumed playback. Starting the
 				// pacing clock afresh prevents a burst of unpaced frames on resume.
-				ReplayState.PlaybackNextFrameDue = 0.0;
+				State.NextFrameDue = 0.0;
 			}
 
 			void PrintControlMessageInternal(const wchar_t* pMessage)
@@ -94,7 +120,7 @@ namespace ReplaySystem
 
 			void ReportPlaybackSpeed()
 			{
-				const int fps = ReplayState.PlaybackFPS;
+				const int fps = State.FrameRate;
 				const int recordedFPS = GetRecordedFPS();
 				const double multiplier = recordedFPS > 0 ? static_cast<double>(fps) / recordedFPS : 1.0;
 
@@ -105,9 +131,76 @@ namespace ReplaySystem
 
 		}
 
+		void OnPlaybackStarted(int playbackFPS, bool controlBarVisible)
+		{
+			State = PlaybackControlState {};
+			State.FrameRate = playbackFPS;
+			State.ControlBarVisible = controlBarVisible;
+		}
+
+		void OnPlaybackStopped()
+		{
+			// A new session must not inherit a pending resume or half-finished single step.
+			State = PlaybackControlState {};
+		}
+
+		void ResetFramePacing()
+		{
+			State.NextFrameDue = 0.0;
+		}
+
+		bool HasPlaybackSpeed()
+		{
+			return State.FrameRate > 0;
+		}
+
+		void ApplyFramePacing()
+		{
+			if (!ReplayState.Playback)
+				return;
+
+			// A seek is not being watched, so it runs as fast as the machine manages. The engine
+			// still has to be told not to wait, which is what the two timers below do.
+			if (ReplaySystem::Seek::IsSeeking())
+			{
+				Unsorted::GameFrameTimer.TimeLeft = 0;
+				Unsorted::NetworkFrameTimer.TimeLeft = 0;
+				return;
+			}
+
+			if (State.FrameRate <= 0)
+				return;
+
+			const double frameMilliseconds = 1000.0 / State.FrameRate;
+			const double now = PlaybackClockMilliseconds();
+
+			if (now > 0.0)
+			{
+				if (State.NextFrameDue == 0.0
+					|| now > State.NextFrameDue + frameMilliseconds)
+				{
+					State.NextFrameDue = now;
+				}
+
+				for (double remaining = State.NextFrameDue - PlaybackClockMilliseconds();
+					remaining > 0.0;
+					remaining = State.NextFrameDue - PlaybackClockMilliseconds())
+				{
+					// Sleep(1) can overshoot by a whole scheduler tick, so it covers the bulk and the
+					// last couple of milliseconds are given up with Sleep(0).
+					Sleep(remaining > 2.0 ? 1 : 0);
+				}
+
+				State.NextFrameDue += frameMilliseconds;
+			}
+
+			Unsorted::GameFrameTimer.TimeLeft = 0;
+			Unsorted::NetworkFrameTimer.TimeLeft = 0;
+		}
+
 		bool IsPlaybackPaused()
 		{
-			return ReplayState.Playback && ReplayState.PlaybackPaused;
+			return ReplayState.Playback && State.Paused;
 		}
 
 		void TogglePlaybackPause()
@@ -115,16 +208,16 @@ namespace ReplaySystem
 			if (!ReplayState.Playback)
 				return;
 
-			SingleStepTargetFrame = -1;
-			if (ReplayState.PlaybackPaused)
+			State.SingleStepTargetFrame = -1;
+			if (State.Paused)
 			{
-				ResumePending = true;
-				ReplayState.PlaybackNextFrameDue = 0.0;
+				State.ResumePending = true;
+				State.NextFrameDue = 0.0;
 				PrintControlMessage(L"Replay resumed.");
 			}
 			else
 			{
-				ResumePending = false;
+				State.ResumePending = false;
 				SetPausedState(true);
 				PrintControlMessage(L"Replay paused.");
 			}
@@ -140,16 +233,16 @@ namespace ReplaySystem
 			if (!ReplayState.Playback)
 				return;
 
-			SingleStepTargetFrame = -1;
+			State.SingleStepTargetFrame = -1;
 			if (paused)
 			{
-				ResumePending = false;
+				State.ResumePending = false;
 				SetPausedState(true);
 			}
-			else if (ReplayState.PlaybackPaused)
+			else if (State.Paused)
 			{
-				ResumePending = true;
-				ReplayState.PlaybackNextFrameDue = 0.0;
+				State.ResumePending = true;
+				State.NextFrameDue = 0.0;
 			}
 		}
 
@@ -160,8 +253,8 @@ namespace ReplaySystem
 
 			// Stepping out of a running replay freezes it on the next frame rather than the one
 			// after, which is what a viewer reaching for the button is asking for.
-			SingleStepTargetFrame = static_cast<int>(Unsorted::CurrentFrame) + 1;
-			ResumePending = false;
+			State.SingleStepTargetFrame = static_cast<int>(Unsorted::CurrentFrame) + 1;
+			State.ResumePending = false;
 			SetPausedState(true);
 		}
 
@@ -169,23 +262,23 @@ namespace ReplaySystem
 		{
 			if (!ReplayState.Playback)
 			{
-				SingleStepTargetFrame = -1;
-				ResumePending = false;
+				State.SingleStepTargetFrame = -1;
+				State.ResumePending = false;
 				return;
 			}
 
-			if (ResumePending)
+			if (State.ResumePending)
 			{
-				ResumePending = false;
+				State.ResumePending = false;
 				SetPausedState(false);
 			}
 
-			if (SingleStepTargetFrame < 0)
+			if (State.SingleStepTargetFrame < 0)
 				return;
 
-			if (static_cast<int>(Unsorted::CurrentFrame) >= SingleStepTargetFrame)
+			if (static_cast<int>(Unsorted::CurrentFrame) >= State.SingleStepTargetFrame)
 			{
-				SingleStepTargetFrame = -1;
+				State.SingleStepTargetFrame = -1;
 				SetPausedState(true);
 				return;
 			}
@@ -195,7 +288,7 @@ namespace ReplaySystem
 
 		int PlaybackFPS()
 		{
-			return ReplayState.PlaybackFPS > 0 ? ReplayState.PlaybackFPS : GetRecordedFPS();
+			return State.FrameRate > 0 ? State.FrameRate : GetRecordedFPS();
 		}
 
 		double PlaybackSpeedMultiplier()
@@ -209,7 +302,7 @@ namespace ReplaySystem
 
 		bool IsControlBarVisible()
 		{
-			return ReplayState.Playback && ControlBarVisible;
+			return ReplayState.Playback && State.ControlBarVisible;
 		}
 
 		void ToggleControlBar()
@@ -217,13 +310,7 @@ namespace ReplaySystem
 			if (!ReplayState.Playback)
 				return;
 
-			ControlBarVisible = !ControlBarVisible;
-		}
-
-		void InitControlBarVisibility()
-		{
-			const auto* const pConfig = Spawner::GetConfig();
-			ControlBarVisible = pConfig && pConfig->ReplayControlBar;
+			State.ControlBarVisible = !State.ControlBarVisible;
 		}
 
 		void ToggleLockedViewport()
@@ -259,11 +346,11 @@ namespace ReplaySystem
 			if (!ReplayState.Playback || direction == 0)
 				return;
 
-			const int currentIndex = FindNearestLadderIndex(ReplayState.PlaybackFPS);
+			const int currentIndex = FindNearestLadderIndex(State.FrameRate);
 			const int nextIndex = std::clamp(currentIndex + (direction > 0 ? 1 : -1), 0, SpeedLadderCount - 1);
 
-			ReplayState.PlaybackFPS = SpeedLadder[nextIndex];
-			ReplayState.PlaybackNextFrameDue = 0.0;
+			State.FrameRate = SpeedLadder[nextIndex];
+			State.NextFrameDue = 0.0;
 			ReportPlaybackSpeed();
 		}
 
@@ -280,7 +367,7 @@ namespace ReplaySystem
 		{
 			for (int gameSpeedIndex = 0; gameSpeedIndex <= MaxGameSpeedIndex; ++gameSpeedIndex)
 			{
-				if (GetReplayFPSFromGameSpeed(gameSpeedIndex) <= ReplayState.PlaybackFPS)
+				if (GetReplayFPSFromGameSpeed(gameSpeedIndex) <= State.FrameRate)
 					return gameSpeedIndex;
 			}
 
@@ -289,8 +376,8 @@ namespace ReplaySystem
 
 		void SetPlaybackGameSpeedIndex(int gameSpeedIndex)
 		{
-			ReplayState.PlaybackFPS = GetReplayFPSFromGameSpeed(std::clamp(gameSpeedIndex, 0, MaxGameSpeedIndex));
-			ReplayState.PlaybackNextFrameDue = 0.0;
+			State.FrameRate = GetReplayFPSFromGameSpeed(std::clamp(gameSpeedIndex, 0, MaxGameSpeedIndex));
+			State.NextFrameDue = 0.0;
 		}
 	}
 }

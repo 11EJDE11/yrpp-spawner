@@ -392,7 +392,7 @@ namespace ReplaySystem
 					Controls::SetPlaybackPaused(true);
 
 				// The pacing deadline is stale by however long the seek took.
-				ReplayState.PlaybackNextFrameDue = 0.0;
+				Controls::ResetFramePacing();
 			}
 
 			void BeginSeek(int targetFrame, bool pauseOnArrival)

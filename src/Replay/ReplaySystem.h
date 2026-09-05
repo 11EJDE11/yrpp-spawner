@@ -25,6 +25,7 @@ namespace ReplaySystem
 {
 	bool IsPlaybackRequested();
 	bool IsPlaybackActive();
+	bool IsRecordingActive();
 	bool IsSpectatorPlayback();
 	void OnGameStartReset();
 	int GetViewPlayerIndex();
