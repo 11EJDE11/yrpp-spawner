@@ -582,11 +582,6 @@ DEFINE_HOOK(0x4E1EBA, GameControlsApply_ApplyPlaybackSpeedDirectly, 0x6)
 
 #pragma endregion In-game options dialog game speed
 
-DEFINE_HOOK(0x533066, Init_Commands_RegisterReplayCommands, 0x6)
-{
-	ReplaySystem::Controls::RegisterReplayCommands();
-	return 0;
-}
 #pragma region Playback pause
 
 // Pause replay simulation without blocking input or menus. The related hooks stop event processing,

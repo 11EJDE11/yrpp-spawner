@@ -76,9 +76,5 @@ namespace ReplaySystem
 		// Applies a game-speed index chosen from the options dialog or replayed from a GameSpeed
 		// event.
 		void SetPlaybackGameSpeedIndex(int gameSpeedIndex);
-
-		// Adds the replay commands to CommandClass::Array so the keyboard options dialog lists
-		// them.
-		void RegisterReplayCommands();
 	}
 }

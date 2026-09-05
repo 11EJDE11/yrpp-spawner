@@ -310,86 +310,6 @@ namespace ReplaySystem
 			return true;
 		}
 
-		bool TryReadIniValueFromBuffer(const std::vector<char>& text, const char* sectionName,
-			const char* keyName, char* outBuffer, size_t outBufferSize)
-		{
-			if (!outBuffer || outBufferSize == 0)
-				return false;
-
-			outBuffer[0] = '\0';
-
-			const char* const base = text.data();
-			const size_t size = text.size();
-			bool inSection = false;
-
-			size_t lineStart = 0;
-			while (lineStart < size)
-			{
-				size_t lineEnd = lineStart;
-				while (lineEnd < size && base[lineEnd] != '\n')
-					++lineEnd;
-
-				size_t begin = lineStart;
-				size_t end = lineEnd;
-				if (end > begin && base[end - 1] == '\r')
-					--end;
-
-				// A ';' anywhere outside a value starts a comment; map files do not quote values.
-				for (size_t i = begin; i < end; ++i)
-				{
-					if (base[i] == ';')
-					{
-						end = i;
-						break;
-					}
-				}
-
-				while (begin < end && isspace(static_cast<unsigned char>(base[begin])))
-					++begin;
-				while (end > begin && isspace(static_cast<unsigned char>(base[end - 1])))
-					--end;
-
-				if (begin < end && base[begin] == '[')
-				{
-					const size_t close = static_cast<size_t>(
-						std::find(base + begin, base + end, ']') - base);
-					inSection = close < end
-						&& EqualsIgnoreCase(base + begin + 1, close - begin - 1, sectionName);
-				}
-				else if (inSection && begin < end)
-				{
-					const size_t separator = static_cast<size_t>(
-						std::find(base + begin, base + end, '=') - base);
-
-					if (separator < end)
-					{
-						size_t keyEnd = separator;
-						while (keyEnd > begin && isspace(static_cast<unsigned char>(base[keyEnd - 1])))
-							--keyEnd;
-
-						if (EqualsIgnoreCase(base + begin, keyEnd - begin, keyName))
-						{
-							size_t valueStart = separator + 1;
-							while (valueStart < end && isspace(static_cast<unsigned char>(base[valueStart])))
-								++valueStart;
-
-							if (valueStart >= end)
-								return false;
-
-							const size_t length = std::min(end - valueStart, outBufferSize - 1);
-							memcpy(outBuffer, base + valueStart, length);
-							outBuffer[length] = '\0';
-							return true;
-						}
-					}
-				}
-
-				lineStart = lineEnd + 1;
-			}
-
-			return false;
-		}
-
 		void SanitizeSpawnIniForReplay(std::vector<char>& spawnIni)
 		{
 			static constexpr const char* AddressKeys[] = { "Ip", "IPv6", "LanIP" };
@@ -460,7 +380,7 @@ namespace ReplaySystem
 		{
 		public:
 			explicit ScopedINIFile(const char* fileName)
-				: pINI { CCINIClass::LoadINIFile(fileName) }
+				: pINI { fileName ? CCINIClass::LoadINIFile(fileName) : nullptr }
 			{ }
 
 			~ScopedINIFile()
@@ -543,7 +463,7 @@ namespace ReplaySystem
 			return true;
 		}
 
-		ReplayHeader BuildReplayHeader(const std::vector<char>& spawnMap, uint32_t spawnIniSize, uint32_t spawnMapSize)
+		ReplayHeader BuildReplayHeader(bool scenarioIsSpawnMap, uint32_t spawnIniSize, uint32_t spawnMapSize)
 		{
 			ReplayHeader header {};
 			header.Magic = ReplayMagic;
@@ -552,9 +472,9 @@ namespace ReplaySystem
 
 			const ScopedINIFile spawnIni { "spawn.ini" };
 
-			// ScenarioClass is no use for the map name here: this runs from inside Clear_Scenario,
-			// which has already blanked it, and its UIName is a 32 byte buffer besides.
-			if (!TryReadIniValueFromBuffer(spawnMap, "Basic", "Name", header.MapName, sizeof(header.MapName))
+			const ScopedINIFile spawnMapIni { scenarioIsSpawnMap ? "spawnmap.ini" : nullptr };
+
+			if (!TryReadString(spawnMapIni.Get(), "Basic", "Name", header.MapName, sizeof(header.MapName))
 				&& !TryReadString(spawnIni.Get(), "Settings", "UIMapName", header.MapName, sizeof(header.MapName))
 				&& ScenarioClass::Instance)
 				strncpy_s(header.MapName, sizeof(header.MapName), ScenarioClass::Instance->FileName, _TRUNCATE);
@@ -610,7 +530,6 @@ namespace ReplaySystem
 				return false;
 			}
 
-			// Must happen before the header is built - SpawnIniSize has to describe what actually gets written.
 			SanitizeSpawnIniForReplay(spawnIni);
 
 			const auto* const pRecordingConfig = GetConfig();
@@ -627,7 +546,7 @@ namespace ReplaySystem
 				spawnMap.clear();
 
 			const ReplayHeader header = BuildReplayHeader(
-				spawnMap,
+				scenarioIsSpawnMap,
 				static_cast<uint32_t>(spawnIni.size()),
 				static_cast<uint32_t>(spawnMap.size())
 			);

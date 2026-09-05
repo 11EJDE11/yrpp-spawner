@@ -24,6 +24,9 @@
     <ClCompile Include="$(ThisDir)\src\Main.Config.cpp" />
     <ClCompile Include="$(ThisDir)\src\Main.Ext.cpp" />
     <ClCompile Include="$(ThisDir)\src\Main.Hook.cpp" />
+    <!-- Commands -->
+    <ClCompile Include="$(ThisDir)\src\Commands\Commands.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Commands\ReplayCommands.cpp" />
     <!-- Ext -->
     <ClCompile Include="$(ThisDir)\src\Ext\Event\Body.cpp" />
     <ClCompile Include="$(ThisDir)\src\Ext\INIClass\Body.cpp" />
@@ -89,6 +92,9 @@
     <ClInclude Include="$(ThisDir)\src\version.h" />
     <ClInclude Include="$(ThisDir)\src\Main.h" />
     <ClInclude Include="$(ThisDir)\src\Main.Config.h" />
+    <!-- Commands -->
+    <ClInclude Include="$(ThisDir)\src\Commands\Commands.h" />
+    <ClInclude Include="$(ThisDir)\src\Commands\ReplayCommands.h" />
     <!-- Ext -->
     <ClInclude Include="$(ThisDir)\src\Ext\Event\Body.h" />
     <ClInclude Include="$(ThisDir)\src\Ext\INIClass\Body.h" />
