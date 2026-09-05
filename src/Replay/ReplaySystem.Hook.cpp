@@ -22,6 +22,7 @@
 
 #include "ReplayControls.h"
 #include "ReplayFile.h"
+#include "ReplaySeek.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
 
@@ -129,6 +130,9 @@ DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
 	if (!pConfig)
 		return 0;
 
+	if (ReplaySystem::Seek::IsLoadInProgress())
+		return 0;
+
 	if (ReplaySystem::IsPlaybackRequested())
 	{
 		ApplyPlaybackInitialState();
@@ -150,7 +154,7 @@ DEFINE_HOOK(0x686B6A, ReadScenarioINI_ReplayApplyState, 0x6)
 {
 	// A keyframe load restores the recorded state instead of re-deriving it, so re-seeding the
 	// RNG and the object ID counter here would undo the load.
-	if (ReplayState.Playback)
+	if (ReplayState.Playback && !ReplaySystem::Seek::IsLoadInProgress())
 		ApplyPlaybackInitialState();
 
 	return 0;
@@ -164,6 +168,7 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 		RecordFrameState();
 
 	ReplaySystem::Controls::ServiceFrameStart();
+	ReplaySystem::Seek::ServiceFrameStart();
 
 	if (ReplayState.Playback && !ReplaySystem::Controls::IsPlaybackPaused())
 		RestoreFrameState();
@@ -487,6 +492,31 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 
 	return 0;
 }
+
+#pragma region Playback controls overlay
+
+
+
+// Main_Loop's per-frame render. A seek runs frames as fast as it can and drawing is most of what
+// one costs, so it draws only every so often - enough to read as progress rather than as a hang.
+DEFINE_HOOK(0x55D8F2, MainLoop_SkipRenderWhileSeeking, 0x5)
+{
+	enum { SkipRender = 0x55D8F7 };
+
+	if (!ReplaySystem::Seek::IsSeeking())
+		return 0;
+
+	if (ReplaySystem::Seek::ShouldSkipRenderThisFrame())
+	{
+		ReplaySystem::Seek::CountRenderedFrame();
+		return SkipRender;
+	}
+
+	ReplaySystem::Seek::CountRenderedFrame();
+	return 0;
+}
+
+#pragma endregion Playback controls overlay
 
 #pragma region In-game options dialog game speed
 
