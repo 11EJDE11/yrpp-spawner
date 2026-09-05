@@ -22,6 +22,8 @@
 #include "ReplayFormat.h"
 #include "ReplayStream.h"
 
+class SpawnerConfig;
+
 namespace Replay
 {
 	// Header/open failures stay distinct so the caller can show the appropriate message.
@@ -41,6 +43,10 @@ namespace Replay
 	// Read the uncompressed header without opening a playback stream.
 	bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader);
 
+	// Recording setup reads the current engine state and embeds the launch INIs.
+	const char* GetRecordingOutputPath(const SpawnerConfig* pConfig);
+	bool WriteInitialReplayFile(const SpawnerConfig* pConfig);
+
 	// Owns the file handle and compression state. The header and embedded files are
 	// uncompressed; frame bytes use one deflate stream beginning just after them.
 	class File
@@ -51,7 +57,7 @@ namespace Replay
 		File(const File&) = delete;
 		File& operator=(const File&) = delete;
 
-		// Append to the header/INIs already written at the start of the file.
+		// Append to the header/INIs written by WriteInitialReplayFile.
 		bool OpenRecording(const char* outputPath);
 		bool OpenPlayback(const char* replayPath, ReplayOpenFailure& outFailure);
 		bool IsOpen() const { return this->Handle != INVALID_HANDLE_VALUE; }
