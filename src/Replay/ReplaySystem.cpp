@@ -20,6 +20,7 @@
 #include "ReplayControls.h"
 #include "ReplayFile.h"
 #include "ReplayFrameCodec.h"
+#include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplaySideChannels.h"
 #include "ReplaySystem.h"
