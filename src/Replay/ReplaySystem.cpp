@@ -20,6 +20,7 @@
 #include "ReplayControls.h"
 #include "ReplayFile.h"
 #include "ReplayFrameCodec.h"
+#include "ReplaySeek.h"
 #include "ReplaySideChannels.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
@@ -116,6 +117,7 @@ namespace ReplaySystem
 
 		void AbortReplaySystem()
 		{
+			ReplaySystem::Seek::OnPlaybackStopped();
 			ResetRuntimeFlagsForScenario();
 			ReplayState.File.Close();
 		}
@@ -824,7 +826,7 @@ namespace ReplaySystem
 			{
 				for (const auto& sideChannelEvent : frameRecord.SideChannelEvents)
 					SideChannels::ApplyRecord(sideChannelEvent,
-						ReplayState.ShowChatAndBeacons, false);
+						ReplayState.ShowChatAndBeacons, Seek::IsSeeking());
 			}
 
 			if ((frameRecord.Flags & FrameRecordFlag_GameCRC) != 0u)
@@ -1046,6 +1048,8 @@ namespace ReplaySystem
 			}
 
 			strncpy_s(ReplayState.PlaybackPath, sizeof(ReplayState.PlaybackPath), replayPath, _TRUNCATE);
+
+			ReplaySystem::Seek::OnPlaybackStarted();
 
 			ReplayOpenFailure failure = ReplayOpenFailure::None;
 			if (!ReplayState.File.OpenPlayback(ReplayState.PlaybackPath, failure))
