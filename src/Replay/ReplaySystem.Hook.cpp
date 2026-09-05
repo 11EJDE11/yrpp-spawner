@@ -22,6 +22,7 @@
 
 #include "ReplayControls.h"
 #include "ReplayFile.h"
+#include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
@@ -495,7 +496,27 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 
 #pragma region Playback controls overlay
 
+DEFINE_HOOK(0x4F4583, GScreenClass_Render_DrawReplayOverlay, 0x6)
+{
+	ReplaySystem::Overlay::Draw();
+	return 0;
+}
 
+DEFINE_HOOK(0x5BDF13, MouseClass_AI_ReplayOverlayInput, 0x8)
+{
+	enum { SkipInputChain = 0x5BDF24 };
+
+	if (ReplayState.Playback && WWMouseClass::Instance)
+	{
+		const int mouseX = WWMouseClass::Instance->GetX();
+		const int mouseY = WWMouseClass::Instance->GetY();
+
+		if (ReplaySystem::Overlay::ProcessMouseInput(mouseX, mouseY))
+			return SkipInputChain;
+	}
+
+	return 0;
+}
 
 // Main_Loop's per-frame render. A seek runs frames as fast as it can and drawing is most of what
 // one costs, so it draws only every so often - enough to read as progress rather than as a hang.

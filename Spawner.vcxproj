@@ -62,6 +62,7 @@
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayFrameCodec.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayFile.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayFile.Metadata.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayOverlay.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.AresParticles.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Planning.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Map.cpp" />
@@ -118,6 +119,7 @@
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFrameCodec.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFile.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFormat.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplayOverlay.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayKeyframeState.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Internal.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySideChannels.h" />
