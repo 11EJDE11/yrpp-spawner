@@ -30,21 +30,8 @@
 // a Yuri unit - is absent altogether, so a house at difficulty 1 or 2 reads off the end of the
 // array. AISlaveMinerNumber is worse than out of range: an empty TypeList has a null Items, so the
 // read is through a null pointer.
-//
-// The consequence is not a crash, because the value read is only compared against:
-//
-//     maxHarvesters = HarvestersPerRefinery[AIDiff] * pThis->CountResourceDestinations;
-//     if (... && CountResourceGatherers < maxHarvesters && ...) { return true; }  // skips the rolls
-//
-// It is worse than a crash. Whatever happens to sit past the end of the array decides whether the
-// house's whole production block runs, and that block draws from the synchronised randomiser. The
-// heap does not have to hold the same thing twice, so the same frame can take a different branch
-// the second time it is run - which is exactly what replay seeking does after loading a keyframe.
-// One house skipping its two production draws puts the randomiser two draws out and every timer
-// downstream of it drifts.
-//
-// Neither extension is ours to change, so the lists are made long enough that the index they use is
-// always in range. Entries the ruleset actually defines are never touched, so a YR ruleset with a
+// The lists are made long enough that the index they use is always in range.
+// Entries the ruleset actually defines are never touched, so a YR ruleset with a
 // full set of three sees no change at all; only the indices that were previously read out of bounds
 // gain a defined value. A short list is extended by repeating its last entry, which is the usual
 // reading of a ruleset that gives one value for every difficulty. An empty one is filled with zero,
@@ -78,10 +65,6 @@ namespace
 	}
 }
 
-// RulesClass::Process, just past the last of the section readers - RulesClass::AI, ::IQ and
-// ::Objects have all run, so the three lists hold whatever this INI had to say about them. The
-// stolen bytes are a single absolute push, and Process is re-entered for the map's own rules
-// overrides, so this fires again after each one and pads whatever that pass left short.
 DEFINE_HOOK(0x668EF5, RulesClass_Process_PadAIDifficultyLists, 0x5)
 {
 	GET(RulesClass* const, pRules, EDI);

@@ -21,15 +21,12 @@
 #include "ReplaySeek.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
-
 #include <Spawner/Spawner.h>
-
 #include <ColorScheme.h>
 #include <MapClass.h>
 #include <MessageListClass.h>
 #include <TacticalClass.h>
 #include <Unsorted.h>
-
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -265,8 +262,6 @@ namespace ReplaySystem
 			const int currentIndex = FindNearestLadderIndex(ReplayState.PlaybackFPS);
 			const int nextIndex = std::clamp(currentIndex + (direction > 0 ? 1 : -1), 0, SpeedLadderCount - 1);
 
-			// Reported either way: the ladder may have run out, or an off-ladder speed may have
-			// snapped onto the rung it was nearest to without moving.
 			ReplayState.PlaybackFPS = SpeedLadder[nextIndex];
 			ReplayState.PlaybackNextFrameDue = 0.0;
 			ReportPlaybackSpeed();

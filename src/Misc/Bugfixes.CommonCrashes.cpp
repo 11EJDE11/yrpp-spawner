@@ -82,8 +82,6 @@ DEFINE_HOOK(0x65DC17, DoReinforcements_FixCrash, 0x6)
 // Prog_End (0x6BE1C0) frees the colour schemes and nulls ColorSchemes.Vector before it calls
 // Destroy_Vectors (0x6BE280), so any object still alive at that point is destroyed with no colour
 // schemes left.
-// Destroying the objects first leaves the schemes standing for exactly as long as the destructors
-// need them; nothing else in Prog_End runs between the two points.
 void DestroyGameObjectVectors()
 {
 	reinterpret_cast<void(__fastcall*)()>(0x534450)(); // Destroy_Vectors

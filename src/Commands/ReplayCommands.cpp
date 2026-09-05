@@ -44,8 +44,6 @@ namespace Commands
 				ReplaySystem::Controls::PrintControlMessage(L"Nothing to rewind to yet.");
 		}
 
-		// None of these labels exist in the stock CSF, so every one carries an English
-		// fallback for clients that have not shipped a translation.
 		const wchar_t* ReplayCategory()
 		{
 			return StringTable::TryFetchString("TXT_REPLAY_CATEGORY", L"Replay");

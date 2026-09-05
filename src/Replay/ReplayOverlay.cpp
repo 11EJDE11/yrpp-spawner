@@ -41,11 +41,9 @@ namespace ReplaySystem
 		{
 #pragma region Layout
 
-			// One place the panel's shape is decided, so drawing and hit testing cannot drift apart.
 			constexpr int PanelHeight = 58;
 			constexpr int PanelMaxWidth = 620;
 			constexpr int PanelMinWidth = 320;
-			// Clear of the bottom screen edge, which is also the edge-scroll strip.
 			constexpr int PanelBottomMargin = 14;
 			constexpr int PanelPadding = 10;
 
@@ -59,7 +57,6 @@ namespace ReplaySystem
 			constexpr int HandleWidth = 7;
 			constexpr int HandleOverhang = 3;
 
-			// How wide a keyframe tick is drawn on the track.
 			constexpr int KeyframeTickWidth = 1;
 			constexpr int MaxDrawnKeyframes = 256;
 
@@ -81,8 +78,6 @@ namespace ReplaySystem
 				RectangleStruct Panel {};
 				RectangleStruct Buttons[ButtonCount] {};
 				RectangleStruct Track {};
-				// Where the clock and the speed readout are drawn from; both are right-aligned so
-				// the digits changing width does not shuffle the row about.
 				Point2D ClockRight {};
 				Point2D SpeedRight {};
 			};
@@ -136,8 +131,6 @@ namespace ReplaySystem
 				return layout;
 			}
 
-			// The track's hit area is taller than the track itself: a 10 pixel bar is a hard thing
-			// to hit, and the handle sticks out above and below it anyway.
 			RectangleStruct TrackHitArea(const PanelLayout& layout)
 			{
 				return {
@@ -206,8 +199,6 @@ namespace ReplaySystem
 				DSurface::Composite->FillRectTrans(&copy, &color, opacity);
 			}
 
-			// Glyphs are built from one-pixel rows rather than a font, so the transport symbols look
-			// like transport symbols at any screen size instead of like punctuation.
 			void DrawTriangle(int x, int y, int width, int height, bool pointsRight, int color)
 			{
 				const int half = height / 2;
@@ -249,8 +240,6 @@ namespace ReplaySystem
 				bool LeftDownLastFrame = false;
 				int PressedButton = -1;
 				bool DraggingHandle = false;
-				// Where the handle has been dragged to, shown on the bar until the drag is let go
-				// and the seek actually runs.
 				int ScrubFrame = 0;
 				int HoveredButton = -1;
 				int HoveredTrackFrame = -1;
@@ -296,8 +285,6 @@ namespace ReplaySystem
 					break;
 
 				case Button_StepBack:
-					// One frame back is a seek like any other: there is no way to run a frame
-					// backwards, so it reloads a keyframe and runs forward to the frame before.
 					if (!Seek::RequestSeek(Seek::CurrentFrame() - 1, /* pauseOnArrival: */ true))
 						Controls::PrintControlMessage(L"Nothing to rewind to yet.");
 					break;

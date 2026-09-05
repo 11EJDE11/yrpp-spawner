@@ -58,8 +58,6 @@ constexpr DWORD TimerResetsToSuppress[] =
 	0x721FC7, // GrowthLogic.Timer
 };
 
-// The offsets the six call sites write through, so a YRpp layout change is a build error here
-// rather than six silently misplaced timers at runtime.
 static_assert(offsetof(BulletClass, Data) == 0xB8,
 	"BulletClass::Load (0x46AE70) resets both flight timers at BulletClass+0xB8");
 static_assert(offsetof(SlaveManagerClass, RespawnTimer) == 0x50,

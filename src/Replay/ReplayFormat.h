@@ -31,7 +31,6 @@ namespace Replay
 	constexpr uint32_t ReplayMagic = 0x50525259u; // 'YRRP'
 	constexpr uint32_t ReplayVersion = 1;
 	constexpr uint32_t MinSupportedReplayVersion = 1;
-	// GameSpeed is an index into a fixed table; anything above this is out of range.
 	constexpr int MaxGameSpeedIndex = 6;
 
 	enum ReplayHeaderFlags : uint32_t
