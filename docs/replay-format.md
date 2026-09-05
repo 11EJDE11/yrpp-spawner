@@ -17,7 +17,7 @@ without the magic number - would look to the player like the update had deleted 
 ## Layout
 
 ```
-[ReplayHeader]        HeaderSize bytes (1452 today), #pragma pack(1)
+[ReplayHeader]        HeaderSize bytes (1128 today), #pragma pack(1)
 [spawn.ini]           SpawnIniSize bytes, verbatim text (sanitized, see below)
 [spawnmap.ini]        SpawnMapSize bytes, verbatim text
 --- everything past this point is one raw deflate stream ---
@@ -69,28 +69,34 @@ the two questions are answered separately and independently.
 | 0 | 4 | `Magic` | `0x50525259` (`YRRP` in file order) |
 | 4 | 4 | `Version` | `1` |
 | 8 | 4 | `HeaderSize` | bytes from the start of the file to the embedded spawn.ini; what readers seek by |
-| 12 | 260 | `MapName` | `spawnmap.ini [Basic] Name`, else spawn.ini `UIMapName`, else `ScenarioClass::FileName` |
-| 272 | 4 | `SpawnerVersion{Major,Minor,Revision,Patch}` | four `uint8`; from spawn.ini `SpawnerVersion` if present, else the compiled-in `VERSION_*` |
-| 276 | 64 | `GameClientVersion` | from spawn.ini `GameClientVersion` |
-| 340 | 4 | `GameMode` | `SessionClass::GameMode` — Campaign 0, LAN 3, Internet 4, Skirmish 5 |
-| 344 | 4 | `UniqueIDCounter` | `ScenarioClass::UniqueID` at recording start |
-| 348 | 4 | `Seed` | `Game::Seed` |
-| 352 | 4 | `RandomNext1` | |
-| 356 | 4 | `RandomNext2` | |
-| 360 | 1000 | `RandomizerTable[250]` | full RNG table snapshot |
-| 1360 | 4 | `SpawnIniSize` | bytes of embedded spawn.ini |
-| 1364 | 4 | `SpawnMapSize` | bytes of embedded spawnmap.ini |
-| 1368 | 4 | `RecordedGameSpeed` | 0–6; validated on load |
-| 1372 | 8 | `RecordedUnixTime` | `time()` at recording start |
-| 1380 | 4 | `TotalFrames` | last frame that carried a record |
-| 1384 | 4 | `Flags` | bit 0 = `CleanShutdown`; see below |
-| 1388 | 64 | `Reserved[16]` | zeroed on write; space for header fields added without moving anything. A reader that meets a value it does not understand here ignores it — that is what makes claiming one additive |
+| 12 | 4 | `SpawnerVersion{Major,Minor,Revision,Patch}` | four `uint8`; from spawn.ini `SpawnerVersion` if present, else the compiled-in `VERSION_*` |
+| 16 | 4 | `GameMode` | `SessionClass::GameMode` — Campaign 0, LAN 3, Internet 4, Skirmish 5. Written for future use; nothing reads it back yet |
+| 20 | 4 | `UniqueIDCounter` | `ScenarioClass::UniqueID` at recording start |
+| 24 | 4 | `Seed` | `Game::Seed` |
+| 28 | 4 | `RandomNext1` | |
+| 32 | 4 | `RandomNext2` | |
+| 36 | 1000 | `RandomizerTable[250]` | full RNG table snapshot |
+| 1036 | 4 | `SpawnIniSize` | bytes of embedded spawn.ini |
+| 1040 | 4 | `SpawnMapSize` | bytes of embedded spawnmap.ini |
+| 1044 | 4 | `RecordedGameSpeed` | 0–6; validated on load |
+| 1048 | 8 | `RecordedUnixTime` | `time()` at recording start |
+| 1056 | 4 | `TotalFrames` | last frame that carried a record |
+| 1060 | 4 | `Flags` | bit 0 = `CleanShutdown`; see below |
+| 1064 | 64 | `Reserved[16]` | zeroed on write; space for header fields added without moving anything. A reader that meets a value it does not understand here ignores it — that is what makes claiming one additive |
 
-Both version fields are written and read. `SpawnerVersion` identifies the DLL that produced the
-file and the client shows it in the replay's details; nothing gates on it, and it is the first thing
-worth having when someone reports a replay that will not play. No client writes the spawn.ini
-`SpawnerVersion` key, so in practice the spawner's own compiled-in version is always what lands
-here — which is the value you want anyway.
+The map name and the game client version are deliberately not header fields: the client already
+writes both into the embedded spawn.ini (`UIMapName`, `GameClientVersion`) and reads them back from
+there for display, the same way it already does for `UIGameMode` (which was never in the header
+either). Duplicating them into the fixed, hand-mirrored header would just be more fields the two
+repos have to keep in step for no benefit — the embedded spawn.ini is already read on every listing,
+uncompressed, with a plain seek.
+
+`SpawnerVersion` is the one version field that does live in the header, because it is not
+recoverable from spawn.ini the same way: it identifies the DLL that produced the file, and no client
+writes the spawn.ini `SpawnerVersion` key, so in practice the spawner's own compiled-in version is
+always what lands here — which is the value you want anyway. The client shows it in the replay's
+details; nothing gates on it, and it is the first thing worth having when someone reports a replay
+that will not play.
 
 `TotalFrames` counts the last frame a record was *written* for. Every simulated frame carries a
 record now that each one records a hash (see [Frame records](#frame-records)), so the two are the
@@ -111,7 +117,7 @@ sees. Playback failure is fatal — `StartScenario` has already skipped `CreateC
 is nothing to fall back on — which makes that message the last thing anyone gets, and an unsupported
 version says so rather than being folded into a generic read error.
 
-`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1452`, `sizeof(FrameRecordHeader) == 12`
+`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1128`, `sizeof(FrameRecordHeader) == 12`
 and `sizeof(SideChannelRecord) == 329`, **and** the individual `offsetof` of every header field the
 client hardcodes. Size alone does not pin a layout: swapping two fields of the same width, or
 shortening one array while lengthening another, leaves `sizeof` untouched and mis-parses everything
