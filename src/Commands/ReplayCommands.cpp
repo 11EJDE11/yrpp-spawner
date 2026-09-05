@@ -21,6 +21,7 @@
 #include "Commands.h"
 
 #include <Replay/ReplayControls.h>
+#include <Replay/ReplaySeek.h>
 #include <Replay/ReplaySystem.h>
 
 #include <StringTable.h>
@@ -29,6 +30,20 @@ namespace Commands
 {
 	namespace
 	{
+		// How far the jump hotkeys move, in seconds of recorded game time. The seek bar is for
+		// anything longer than a nudge.
+		constexpr int HotkeySeekSeconds = 10;
+
+		void SeekBySeconds(int seconds)
+		{
+			if (!ReplaySystem::IsPlaybackActive())
+				return;
+
+			const int target = ReplaySystem::Seek::CurrentFrame() + seconds * ReplaySystem::Seek::RecordedFPS();
+			if (!ReplaySystem::Seek::RequestSeek(target))
+				ReplaySystem::Controls::PrintControlMessage(L"Nothing to rewind to yet.");
+		}
+
 		const wchar_t* ReplayCategory()
 		{
 			return StringTable::TryFetchString("TXT_REPLAY_CATEGORY", L"Replay");
@@ -110,6 +125,44 @@ namespace Commands
 			virtual void Execute(WWKey) const override { ReplaySystem::Controls::RequestSingleStep(); }
 		};
 
+		class ReplaySeekBackCommandClass : public CommandClass
+		{
+		public:
+			virtual const char* GetName() const override { return "ReplaySeekBack"; }
+
+			virtual const wchar_t* GetUIName() const override
+				{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_BACK", L"Replay: Jump Back"); }
+
+			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+			virtual const wchar_t* GetUIDescription() const override
+			{
+				return StringTable::TryFetchString("TXT_REPLAY_SEEK_BACK_DESC",
+					L"Jumps ten seconds back, restarting from the nearest keyframe.");
+			}
+
+			virtual void Execute(WWKey) const override { SeekBySeconds(-HotkeySeekSeconds); }
+		};
+
+		class ReplaySeekForwardCommandClass : public CommandClass
+		{
+		public:
+			virtual const char* GetName() const override { return "ReplaySeekForward"; }
+
+			virtual const wchar_t* GetUIName() const override
+				{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_FORWARD", L"Replay: Jump Forward"); }
+
+			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+			virtual const wchar_t* GetUIDescription() const override
+			{
+				return StringTable::TryFetchString("TXT_REPLAY_SEEK_FORWARD_DESC",
+					L"Jumps ten seconds forward, running the frames in between without drawing them.");
+			}
+
+			virtual void Execute(WWKey) const override { SeekBySeconds(HotkeySeekSeconds); }
+		};
+
 		class ReplayToggleControlBarCommandClass : public CommandClass
 		{
 		public:
@@ -174,6 +227,8 @@ namespace Commands
 		MakeCommand<ReplaySpeedUpCommandClass>();
 		MakeCommand<ReplaySpeedDownCommandClass>();
 		MakeCommand<ReplayStepFrameCommandClass>();
+		MakeCommand<ReplaySeekBackCommandClass>();
+		MakeCommand<ReplaySeekForwardCommandClass>();
 		MakeCommand<ReplayToggleControlBarCommandClass>();
 		MakeCommand<ReplayToggleViewportLockCommandClass>();
 		MakeCommand<ReplayToggleSelectionCommandClass>();
