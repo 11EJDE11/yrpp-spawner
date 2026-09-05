@@ -57,7 +57,10 @@
     <!-- Replay -->
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayFrameCodec.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayFile.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayFile.Metadata.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayStream.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.Hook.cpp" />
     <!-- Vendored -->
     <ClCompile Include="$(ThisDir)\src\Vendor\miniz\miniz.c">
       <PreprocessorDefinitions>MINIZ_NO_STDIO;MINIZ_NO_TIME;MINIZ_NO_ARCHIVE_APIS;MINIZ_NO_ZLIB_APIS;MINIZ_NO_ZLIB_COMPATIBLE_NAMES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -100,6 +103,8 @@
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFile.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFormat.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayStream.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.Internal.h" />
     <!-- Vendored -->
     <ClInclude Include="$(ThisDir)\src\Vendor\miniz\miniz.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\NetHack.h" />

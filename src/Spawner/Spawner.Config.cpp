@@ -61,6 +61,20 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		AutoSaveCount      = pINI->ReadInteger(pSettingsSection, "AutoSaveCount", AutoSaveCount);
 		AutoSaveInterval   = pINI->ReadInteger(pSettingsSection, "AutoSaveInterval", AutoSaveInterval);
 		NextAutoSaveNumber = pINI->ReadInteger(pSettingsSection, "NextAutoSaveNumber", NextAutoSaveNumber);
+
+		EnableReplayRecording    = pINI->ReadBool(pSettingsSection, "EnableReplayRecording", EnableReplayRecording);
+		/* ReplayFileOut        */ pINI->ReadString(pSettingsSection, "ReplayFileOut", ReplayFileOut, ReplayFileOut, sizeof(ReplayFileOut));
+		/* ReplayFile           */ pINI->ReadString(pSettingsSection, "ReplayFile", ReplayFile, ReplayFile, sizeof(ReplayFile));
+		ReplayShroudEnabled          = pINI->ReadBool(pSettingsSection, "ReplayShroudEnabled", ReplayShroudEnabled);
+		ReplayFreeCamera             = pINI->ReadBool(pSettingsSection, "ReplayFreeCamera", ReplayFreeCamera);
+		ReplayShowSelections         = pINI->ReadBool(pSettingsSection, "ReplayShowSelections", ReplayShowSelections);
+		ReplayPlaybackSpeed          = pINI->ReadInteger(pSettingsSection, "ReplayPlaybackSpeed", ReplayPlaybackSpeed);
+		ReplaySpectator              = pINI->ReadBool(pSettingsSection, "ReplaySpectator", ReplaySpectator);
+		ReplayShowChatAndBeacons     = pINI->ReadBool(pSettingsSection, "ReplayShowChatAndBeacons", ReplayShowChatAndBeacons);
+		ReplayViewPlayer             = pINI->ReadInteger(pSettingsSection, "ReplayViewPlayer", ReplayViewPlayer);
+		ReplayControlBar             = pINI->ReadBool(pSettingsSection, "ReplayControlBar", ReplayControlBar);
+		ReplayKeyframeInterval        = pINI->ReadInteger(pSettingsSection, "ReplayKeyframeInterval", ReplayKeyframeInterval);
+		ReplayKeyframeStorageLimitMB  = pINI->ReadInteger(pSettingsSection, "ReplayKeyframeStorageLimitMB", ReplayKeyframeStorageLimitMB);
 	}
 
 	{ // Scenario Options

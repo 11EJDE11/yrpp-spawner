@@ -18,6 +18,7 @@
 */
 
 #include "Spawner.h"
+#include <Replay/ReplaySystem.h>
 
 #include <CCFileClass.h>
 #include <HouseClass.h>
@@ -30,9 +31,12 @@
 
 bool __forceinline IsStatisticsEnabled()
 {
+	// Never while a replay is playing back: watching a game to its win/lose screen would otherwise
+	// overwrite the real stats.dmp with the recorded game's results.
 	return Spawner::Active
 		&& Spawner::GetConfig()->WriteStatistics
-		&& !SessionClass::IsCampaign();
+		&& !SessionClass::IsCampaign()
+		&& !ReplaySystem::IsPlaybackActive();
 }
 
 // Write stats.dmp
