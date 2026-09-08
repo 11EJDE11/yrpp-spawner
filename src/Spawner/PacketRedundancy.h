@@ -54,6 +54,6 @@ public:
 	static void NoteResend(const ConnectionClass* connection);
 	static int LossGauge(int peer);
 
-	// Logs a failed extra sendto() call for a duplicate copy.
+	// Logs failed duplicate sends at most once per second.
 	static void NoteExtraSend(int sendResult);
 };

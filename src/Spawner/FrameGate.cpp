@@ -25,6 +25,7 @@
 #include <SessionClass.h>
 #include <GeneralDefinitions.h>
 #include <IPXManagerClass.h>
+#include <IPXConnClass.h>
 #include <EventClass.h>
 #include <Utilities/Debug.h>
 
@@ -36,6 +37,10 @@ namespace
 {
 	int  SafeThrough[FrameGate::MaxPeers];
 	bool Inited = false;
+	const IPXConnClass* PeerConnections[FrameGate::MaxPeers] = {};
+	int PeerIDs[FrameGate::MaxPeers] = {};
+	int peerCount = -1;
+	bool topologyChanged = false;
 
 	int  lastMaxAhead = -1;
 	int  lastFSR = -1;
@@ -57,10 +62,51 @@ namespace
 		Inited = true;
 	}
 
+	void CheckTopology()
+	{
+		if (topologyChanged)
+			return;
+
+		int nconn = static_cast<int>(IPXManagerClass::Instance.NumConnections);
+		if (nconn < 0) nconn = 0;
+		if (nconn > FrameGate::MaxPeers) nconn = FrameGate::MaxPeers;
+
+		// Wait for the initial connections. Delete_Connection later compacts
+		// this array; its indices are not stable player identities.
+		if (peerCount < 0)
+		{
+			if (!nconn)
+				return;
+			peerCount = nconn;
+			for (int i = 0; i < nconn; ++i)
+			{
+				const auto* connection = IPXManagerClass::Instance.Connection[i];
+				PeerConnections[i] = connection;
+				PeerIDs[i] = connection ? connection->ID : -1;
+			}
+			return;
+		}
+
+		topologyChanged = nconn != peerCount;
+		for (int i = 0; i < nconn && !topologyChanged; ++i)
+		{
+			const auto* connection = IPXManagerClass::Instance.Connection[i];
+			topologyChanged = connection != PeerConnections[i]
+				|| (connection && connection->ID != PeerIDs[i]);
+		}
+		if (topologyChanged)
+		{
+			// Fail closed for the rest of this match. Never let a surviving
+			// player inherit another player's safe-through watermark.
+			ClearWatermarks();
+			Debug::Log("[FrameGate] connections changed; using vanilla command-count gate until reset\n");
+		}
+	}
+
 	void CheckEpoch(int frame, int ma, int fsr)
 	{
 		bool shrink = (lastMaxAhead >= 0 && ma < lastMaxAhead)
-		           || (lastFSR      >= 0 && fsr < lastFSR);
+			|| (lastFSR >= 0 && fsr < lastFSR);
 		if (shrink)
 		{
 			ClearWatermarks();
@@ -78,6 +124,8 @@ void FrameGate::Reset()
 	InitOnce();
 	ClearWatermarks();
 	lastMaxAhead = -1;
+	peerCount = -1;
+	topologyChanged = false;
 	lastFSR = -1;
 	guardUntilFrame = 0;
 	lateDataLogged = 0;
@@ -102,7 +150,8 @@ bool FrameGate::AllCommandsSatisfied(TheirSync* peers, int* gapIndex)
 	const int fsr   = Game::Network::FrameSendRate;
 
 	CheckEpoch(frame, ma, fsr);
-	const bool relaxOK = Enabled && frame >= guardUntilFrame;
+	CheckTopology();
+	const bool relaxOK = Enabled && !topologyChanged && frame >= guardUntilFrame;
 
 	bool allSat = true;
 
@@ -128,6 +177,9 @@ void FrameGate::OnReceive(unsigned int theirEntry, const unsigned char* evBytes)
 {
 	InitOnce();
 	if (!Enabled || !evBytes)
+		return;
+	CheckTopology();
+	if (topologyChanged)
 		return;
 
 	// Derive the array base from the YRpp binding rather than repeating its

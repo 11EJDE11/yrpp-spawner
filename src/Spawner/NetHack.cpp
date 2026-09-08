@@ -56,8 +56,17 @@ int WINAPI NetHack::SendTo(
 	const int copies = PacketRedundancy::CopiesFor(buf, len, index);
 
 	int ret = Tunnel::SendTo(sockfd, buf, len, flags, &tempDest, addrlen);
+	const int firstError = ret == SOCKET_ERROR ? WSAGetLastError() : 0;
 	for (int i = 1; i < copies; ++i)
-		PacketRedundancy::NoteExtraSend(Tunnel::SendTo(sockfd, buf, len, flags, &tempDest, addrlen));
+	{
+		const int extra = Tunnel::SendTo(sockfd, buf, len, flags, &tempDest, addrlen);
+		PacketRedundancy::NoteExtraSend(extra);
+		if (ret == SOCKET_ERROR && extra != SOCKET_ERROR)
+			ret = extra;
+	}
+	// Preserve the first socket error if every copy failed.
+	if (ret == SOCKET_ERROR)
+		WSASetLastError(firstError);
 	return ret;
 }
 
