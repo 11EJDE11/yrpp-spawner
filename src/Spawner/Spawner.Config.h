@@ -124,6 +124,11 @@ public:
 	int PreCalcMaxAhead;
 	byte MaxLatencyLevel;
 	bool FrameAwareGate;
+	bool FastRetransmit;
+	bool RetransmitBackoff;
+	bool PacketRedundancy;
+	int  RedundancyCopies;
+	bool AdaptiveRedundancy;
 	bool ForceMultiplayer;
 
 	// Tunnel Options
@@ -203,6 +208,11 @@ public:
 		, PreCalcMaxAhead { 0 }
 		, MaxLatencyLevel { 0xFF }
 		, FrameAwareGate { true }
+		, FastRetransmit { true }
+		, RetransmitBackoff { true }
+		, PacketRedundancy { true }
+		, RedundancyCopies { 2 }
+		, AdaptiveRedundancy { true }
 		, ForceMultiplayer { false }
 
 		// Tunnel Options
