@@ -28,9 +28,11 @@
 *  This replaces the count test with the one it was approximating: we may
 *  execute the current frame if, for every peer, all of that peer's commands
 *  stamped for frames <= the current frame are already in hand. We prove that
-*  from the packet stream: a packet stamped F carrying cumulative count C means
-*  "commands 1..C are all stamped <= F"; once our CommandsReceived >= C we hold them, so
-*  every frame <= F is safe with respect to that peer.
+*  from the packet stream: a packet stamped F carries the cumulative count C
+*  from BEFORE its own commands. Once CommandsReceived >= C, earlier commands
+*  are in hand; the packet's own commands may still be missing at F. Thus only
+*  frames through F - 1 are safe (while timing remains in the guarded epoch).
+*  If connections change, fall back to vanilla's count test until Reset().
 *
 */
 
