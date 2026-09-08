@@ -24,7 +24,7 @@
 *  includes ACK delays for retransmitted packets, so loss inflates the estimate
 *  that controls the next retransmit wait. This keeps a clean per-connection RTT
 *  estimator using Karn's rule and only shortens the engine's global timer once
-*  any peer has a clean sample. Because the engine has one RetryDelta for the
+*  every live peer has a clean sample. Because the engine has one RetryDelta for the
 *  whole match, we use the maximum peer RTO.
 * https://en.wikipedia.org/wiki/Karn's_algorithm
 */

@@ -40,6 +40,8 @@ namespace
 
 	int   g_gauge[PacketRedundancy::MaxPeers] = {};
 	DWORD g_lastTick[PacketRedundancy::MaxPeers] = {};
+	DWORD g_lastErrorLogTick = 0;
+	bool g_errorLogged = false;
 
 	bool ValidPeer(int peer)
 	{
@@ -105,6 +107,8 @@ namespace
 
 void PacketRedundancy::Reset()
 {
+	g_lastErrorLogTick = 0;
+	g_errorLogged = false;
 	for (int i = 0; i < MaxPeers; ++i)
 	{
 		g_gauge[i] = 0;
@@ -145,7 +149,15 @@ int PacketRedundancy::LossGauge(int peer)
 void PacketRedundancy::NoteExtraSend(int sendResult)
 {
 	if (sendResult == -1)
-		Debug::Log("[PacketRedundancy] extra sendto() for a duplicate copy failed\n");
+	{
+		const DWORD now = GetTickCount();
+		if (!g_errorLogged || now - g_lastErrorLogTick >= 1000)
+		{
+			g_errorLogged = true;
+			g_lastErrorLogTick = now;
+			Debug::Log("[PacketRedundancy] extra sendto() for a duplicate copy failed\n");
+		}
+	}
 }
 
 // Decides how many times to send this outbound datagram: only reliable

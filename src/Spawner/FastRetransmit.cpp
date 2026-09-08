@@ -61,16 +61,14 @@ namespace
 			return 0;
 
 		int nconn = static_cast<int>(IPXManagerClass::Instance.NumConnections);
+		const int arraySize = sizeof(IPXManagerClass::Instance.Connection) / sizeof(IPXManagerClass::Instance.Connection[0]);
 		if (nconn < 0) nconn = 0;
-		if (nconn > FastRetransmit::MaxPeers) nconn = FastRetransmit::MaxPeers;
+		if (nconn > arraySize) nconn = arraySize;
 		return nconn;
 	}
 
-	// True if connection is still one of the engine's live connections. A
-	// reconnect replaces a peer's ConnectionClass with a new instance, and the
-	// old pointer never comes back - without this check a stale slot's frozen
-	// RTO sample sits in Peers[] forever and can dominate EffectiveRTO()'s max
-	// long after the connection it came from is gone.
+	// Only live private connections participate in the shared retry timer.
+	// Discard departed peers so their frozen RTO cannot dominate the maximum.
 	bool IsLiveConnection(const ConnectionClass* connection)
 	{
 		if (!connection)
@@ -131,11 +129,14 @@ void FastRetransmit::SampleRTT(const ConnectionClass* connection, int delayTicks
 		return;
 
 	// Karn: ignore RTT measurements for retransmitted packets.
-	if (sendCount > 1)
+	if (sendCount != 1)
 		return;
 	if (delayTicks < 0 || delayTicks > MaxTicks)
 		return;
+	if (!IsLiveConnection(connection))
+		return;
 
+	PruneDeadSlots();
 	PeerEstimator* peer = FindSlot(connection);
 	if (!peer)
 		return;
@@ -176,13 +177,17 @@ int FastRetransmit::InitializedPeers()
 	return count;
 }
 
-// Worst (max) RTO among peers sampled so far, or 0 if none have a clean sample yet.
+// The timer applies to every live peer, so keep vanilla timing until all of
+// them have a clean sample. A fast peer must not set an unsampled peer's RTO.
 int FastRetransmit::EffectiveRTO()
 {
-	if (ActiveConnectionCount() <= 0)
+	const int nconn = ActiveConnectionCount();
+	if (nconn <= 0)
 		return 0;
 
 	PruneDeadSlots();
+	if (InitializedPeers() != nconn)
+		return 0;
 
 	int rto = 0;
 	bool any = false;
@@ -265,7 +270,7 @@ DEFINE_HOOK(0x48C4AE, ConnectionClass_ServiceSendQueue_Backoff, 0x5)
 
 	if (!FastRetransmit::Enabled || !FastRetransmit::Backoff)
 	{
-		if (elapsed > retryDelta)
+		if (sendCount > 0 && elapsed > retryDelta)
 			PacketRedundancy::NoteResend(conn);
 		return 0;
 	}
@@ -284,7 +289,9 @@ DEFINE_HOOK(0x48C4AE, ConnectionClass_ServiceSendQueue_Backoff, 0x5)
 		backedOff = 0x7FFFFFFF;
 	int eff = static_cast<int>(backedOff);
 
-	if (elapsed > eff)
+	// LastTime starts at zero, so first sends also pass the elapsed-time test.
+	// Only an entry already sent can be evidence of packet loss.
+	if (sendCount > 0 && elapsed > eff)
 		PacketRedundancy::NoteResend(conn);
 
 	R->EAX(eff);
