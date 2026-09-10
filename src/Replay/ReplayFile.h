@@ -22,6 +22,8 @@
 #include "ReplayFormat.h"
 #include "ReplayStream.h"
 
+#include <string>
+
 class SpawnerConfig;
 
 namespace Replay
@@ -39,6 +41,10 @@ namespace Replay
 	};
 
 	const char* DescribeReplayOpenFailure(ReplayOpenFailure failure);
+
+	// Paths in spawn.ini are UTF-8 like the rest of it. Widen them for the W file APIs rather
+	// than passing them to the A ones, which would read them in the system code page.
+	std::wstring Utf8ToWide(const char* text);
 
 	// Read the uncompressed header without opening a playback stream.
 	bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader);

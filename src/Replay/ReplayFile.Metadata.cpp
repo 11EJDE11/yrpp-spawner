@@ -39,23 +39,22 @@ namespace Replay
 		constexpr const char* DefaultRecordingPath = "replay.yrrp";
 		constexpr const char* SpawnMapFileName = "spawnmap.ini";
 
-		void EnsureParentDirectoryExists(const char* path)
+		void EnsureParentDirectoryExists(const std::wstring& path)
 		{
-			char buffer[MAX_PATH];
-			strncpy_s(buffer, sizeof(buffer), path, _TRUNCATE);
+			std::wstring buffer = path;
 
-			for (char* cursor = buffer; *cursor != '\0'; ++cursor)
+			for (wchar_t* cursor = buffer.data(); *cursor != L'\0'; ++cursor)
 			{
-				if (*cursor != '\\' && *cursor != '/')
+				if (*cursor != L'\\' && *cursor != L'/')
 					continue;
 
 				// Skip a leading separator, a drive root and the second slash of a UNC prefix.
-				if (cursor == buffer || *(cursor - 1) == ':' || *(cursor - 1) == '\\' || *(cursor - 1) == '/')
+				if (cursor == buffer.data() || *(cursor - 1) == L':' || *(cursor - 1) == L'\\' || *(cursor - 1) == L'/')
 					continue;
 
-				const char separator = *cursor;
-				*cursor = '\0';
-				CreateDirectoryA(buffer, nullptr);
+				const wchar_t separator = *cursor;
+				*cursor = L'\0';
+				CreateDirectoryW(buffer.c_str(), nullptr);
 				*cursor = separator;
 			}
 		}
@@ -178,10 +177,11 @@ namespace Replay
 		);
 
 		const char* const outputPath = GetRecordingOutputPath(pConfig);
-		EnsureParentDirectoryExists(outputPath);
+		const std::wstring wideOutputPath = Utf8ToWide(outputPath);
+		EnsureParentDirectoryExists(wideOutputPath);
 
-		HANDLE file = CreateFileA(
-			outputPath,
+		HANDLE file = CreateFileW(
+			wideOutputPath.c_str(),
 			GENERIC_WRITE,
 			FILE_SHARE_READ,
 			nullptr,
