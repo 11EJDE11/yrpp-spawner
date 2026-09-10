@@ -110,10 +110,22 @@ namespace Replay
 		}
 	}
 
+	std::wstring Utf8ToWide(const char* text)
+	{
+		const int length = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+		if (length <= 1)
+			return std::wstring();
+
+		std::wstring wide(static_cast<size_t>(length), L'\0');
+		MultiByteToWideChar(CP_UTF8, 0, text, -1, wide.data(), length);
+		wide.resize(static_cast<size_t>(length) - 1);
+		return wide;
+	}
+
 	bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader)
 	{
-		HANDLE file = CreateFileA(
-			replayPath,
+		HANDLE file = CreateFileW(
+			Utf8ToWide(replayPath).c_str(),
 			GENERIC_READ,
 			FILE_SHARE_READ,
 			nullptr,
@@ -154,8 +166,8 @@ namespace Replay
 	{
 		this->Close();
 
-		this->Handle = CreateFileA(
-			outputPath,
+		this->Handle = CreateFileW(
+			Utf8ToWide(outputPath).c_str(),
 			GENERIC_WRITE,
 			FILE_SHARE_READ,
 			nullptr,
@@ -191,8 +203,8 @@ namespace Replay
 		this->Close();
 		outFailure = ReplayOpenFailure::None;
 
-		this->Handle = CreateFileA(
-			replayPath,
+		this->Handle = CreateFileW(
+			Utf8ToWide(replayPath).c_str(),
 			GENERIC_READ,
 			FILE_SHARE_READ,
 			nullptr,
