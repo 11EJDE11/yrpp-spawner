@@ -134,6 +134,11 @@ DEFINE_HOOK(0x685659, ScenarioClass_Start_ReplayInit, 0xA)
 	if (ReplaySystem::Seek::IsLoadInProgress())
 		return 0;
 
+	// Once the viewer has taken over, a scenario started after it - a saved game loaded from the
+	// menu - is theirs to play, so the replay is not reopened over it.
+	if (ReplayState.TakenOver)
+		return 0;
+
 	if (ReplaySystem::IsPlaybackRequested())
 	{
 		ApplyPlaybackInitialState();
@@ -170,6 +175,10 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 
 	ReplaySystem::Controls::ServiceFrameStart();
 	ReplaySystem::Seek::ServiceFrameStart();
+
+	// Ahead of the frame's record being read, so nothing of a frame after the take over comes out
+	// of the replay.
+	ServiceTakeOver();
 
 	if (ReplayState.Playback && !ReplaySystem::Controls::IsPlaybackPaused())
 		RestoreFrameState();
@@ -287,17 +296,21 @@ DEFINE_HOOK(0x55E160, SyncDelay_PaceReplayPlayback, 0x6)
 	return 0;
 }
 
-// Main_Loop's network pump. Playback has no live session to service.
+// The hooks that stand in for the network are keyed on ReplayFile, not on playback running: a launch
+// made to watch a replay never opens a session, and a multiplayer recording that has been taken over
+// keeps running as a session with no peers.
+
+// Main_Loop's network pump. There is no live session to service.
 DEFINE_HOOK(0x55D8E3, MainLoop_SkipIPXPumpDuringReplayPlayback, 0x5)
 {
-	return ReplayState.Playback ? 0x55D8E8 : 0;
+	return ReplaySystem::IsPlaybackRequested() ? 0x55D8E8 : 0;
 }
 
 DEFINE_HOOK(0x64806E, Queue_AI_Multiplayer_ReplaySkipWaitForPlayers, 0x8)
 {
 	enum { WaitSucceeded = 0x64820E, WaitFailed = 0x648076 };
 
-	if (ReplayState.Playback)
+	if (ReplaySystem::IsPlaybackRequested())
 		return WaitSucceeded;
 
 	return R->ESI<int>() == R->EBX<int>() ? WaitSucceeded : WaitFailed;
@@ -462,11 +475,11 @@ DEFINE_HOOK(0x6924FC, ScrollClass_ClickInfo_ReplayClickThroughShroud, 0x12)
 
 #pragma endregion Viewer map reveal
 
-// Queue_AI_Multiplayer, just past where it starts its own skip-CRC timer. Playback is not being
-// compared against anyone, so let that timer never run out.
+// Queue_AI_Multiplayer, just past where it starts its own skip-CRC timer. A replay launch is not
+// compared against anyone, taken over or not, so let that timer never run out.
 DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 {
-	if (ReplayState.Playback)
+	if (ReplaySystem::IsPlaybackRequested())
 		Unsorted::QueueAIMultiplayerSkipCRC.TimeLeft = std::numeric_limits<int>::max();
 
 	return 0;
@@ -475,7 +488,7 @@ DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 
 DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 {
-	if (ReplayState.Playback)
+	if (ReplaySystem::IsPlaybackRequested())
 	{
 		// Scenario_Load_Wait (0x684370) holds the load until every slot reads complete, and a replay
 		// has no peers to report in, so the peers are declared finished here.

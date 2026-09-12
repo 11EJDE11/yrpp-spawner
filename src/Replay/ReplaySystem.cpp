@@ -41,6 +41,8 @@
 #include <ObjectClass.h>
 #include <SessionClass.h>
 #include <MouseClass.h>
+#include <RadarClass.h>
+#include <StringTable.h>
 #include <TagClass.h>
 #include <TechnoClass.h>
 #include <TacticalClass.h>
@@ -86,6 +88,7 @@ namespace ReplaySystem
 			ReplayState.Recording = false;
 			ReplayState.Playback = false;
 			ReplayState.SpectatorView = false;
+			ReplayState.TakeOverPending = false;
 			Controls::OnPlaybackStopped();
 			ReplayState.ExpectedEventsThisFrame = 0;
 			ReplayState.LastSyncFlushFrame = 0;
@@ -272,11 +275,10 @@ namespace ReplaySystem
 			}
 		}
 
-		template <typename Predicate>
-		void RemoveDoListEvents(Predicate shouldRemove)
+		template <typename Queue, typename Predicate>
+		void RemoveQueuedEvents(Queue& queue, Predicate shouldRemove)
 		{
-			auto& doList = EventClass::DoList;
-			const int originalCount = doList.Count;
+			const int originalCount = queue.Count;
 			if (originalCount <= 0)
 				return;
 
@@ -285,7 +287,7 @@ namespace ReplaySystem
 			bool removedAny = false;
 			for (int i = 0; i < originalCount; ++i)
 			{
-				if (shouldRemove(doList[i]))
+				if (shouldRemove(queue[i]))
 				{
 					removedAny = true;
 					break;
@@ -302,15 +304,15 @@ namespace ReplaySystem
 
 			for (int i = 0; i < originalCount; ++i)
 			{
-				const auto& event = doList[i];
+				const auto& event = queue[i];
 				if (!shouldRemove(event))
 					preservedEvents.push_back(event);
 			}
 
-			doList.Init();
+			queue.Init();
 			for (const auto& event : preservedEvents)
 			{
-				doList.Add(event);
+				queue.Add(event);
 			}
 		}
 
@@ -332,12 +334,92 @@ namespace ReplaySystem
 				}
 			}
 
-			RemoveDoListEvents([](const EventClass& event)
+			RemoveQueuedEvents(EventClass::DoList, [](const EventClass& event)
 			{
 				return event.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame)
 					&& IsReplayableGameplayEvent(event)
 					&& !IsLocalPlaybackControlEvent(event);
 			});
+		}
+
+		// An order the viewer gave while watching that has not run. Playback strips these on their own
+		// frame, but one queued for a later frame is still waiting when control passes.
+		bool IsUnrunViewerOrder(const EventClass& event)
+		{
+			return !event.IsExecuted
+				&& IsReplayableGameplayEvent(event)
+				&& !IsLocalPlaybackControlEvent(event);
+		}
+
+		// Why the house on screen cannot be handed over right now, or null when it can.
+		const wchar_t* DescribeTakeOverRefusal()
+		{
+			if (Seek::IsSeeking())
+				return L"Wait for the seek to finish before taking over.";
+
+			// The spectator seat is the recording player's own house made the observer and hidden from
+			// the simulation only while each frame runs, so there is no ordinary house to hand over.
+			if (ReplayState.SpectatorView)
+				return L"Taking over is not available while watching as a spectator.";
+
+			const HouseClass* const pPlayer = HouseClass::CurrentPlayer;
+			if (!pPlayer || Game::ObserverMode || pPlayer->IsObserver())
+				return L"There is no player to take over from this view.";
+
+			if (pPlayer->Defeated)
+				return L"The player being watched has been defeated.";
+
+			return nullptr;
+		}
+
+		// Playback drew the map revealed. The radar keeps its pixels until a cell changes, so every one
+		// is recomputed from the cells, as Load_Game does after a load (0x67E6BD); the tactical view is
+		// flagged for a complete redraw, as Reveal_All_Map does (0x6E1330).
+		void RedrawAfterPlaybackReveal()
+		{
+			using RadarUpdateMap = void(__thiscall*)(RadarClass*);
+			reinterpret_cast<RadarUpdateMap>(0x657CE0)(&RadarClass::Instance);
+
+			MapClass::Instance.MarkNeedsRedraw(1);
+		}
+
+		void ServiceTakeOver()
+		{
+			if (!ReplayState.TakeOverPending)
+				return;
+
+			ReplayState.TakeOverPending = false;
+
+			if (!ReplayState.Playback)
+				return;
+
+			// Asked again: a seek or a defeat can land between the key press and this frame.
+			if (const wchar_t* pRefusal = DescribeTakeOverRefusal())
+			{
+				Controls::PrintControlMessage(pRefusal);
+				return;
+			}
+
+			const HouseClass* const pPlayer = HouseClass::CurrentPlayer;
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+
+			RemoveQueuedEvents(EventClass::OutList, IsUnrunViewerOrder);
+			RemoveQueuedEvents(EventClass::DoList, IsUnrunViewerOrder);
+
+			// The panel goes with playback, so a press or drag begun on it means nothing now.
+			Overlay::CancelInteraction();
+
+			// Everything playback owns: the stream, keyframes, pacing, pause and the viewer toggles.
+			// The hooks standing in for the network the launch never opened are keyed on ReplayFile
+			// instead, so they carry on.
+			StopReplaySystem();
+			ReplayState.TakenOver = true;
+
+			RedrawAfterPlaybackReveal();
+
+			Debug::Log("[Replay] Taken over as %ls at frame %d.\n", pPlayer->UIName, frame);
+			Controls::PrintControlMessage(StringTable::TryFetchString("TXT_REPLAY_TAKEN_OVER",
+				L"You have taken over. Replay playback has ended."));
 		}
 
 		// Fills rather than returns, so the caller's buffer is reused: this runs on every main loop
@@ -1141,10 +1223,25 @@ void ReplaySystem::ReapplyPlaybackSpectator()
 		Debug::Log("[Replay] The observer seat could not be taken again after the keyframe load.\n");
 }
 
+void ReplaySystem::RequestTakeOver()
+{
+	if (!ReplayState.Playback)
+		return;
+
+	if (const wchar_t* pRefusal = DescribeTakeOverRefusal())
+	{
+		Controls::PrintControlMessage(pRefusal);
+		return;
+	}
+
+	ReplayState.TakeOverPending = true;
+}
+
 void ReplaySystem::OnGameStartReset()
 {
 	StopReplaySystem();
 	ReplayState.InitRandomHandled = false;
 	ReplayState.RecordingFinishedForSession = false;
+	ReplayState.TakenOver = false;
 	ReplayState.PlaybackPath[0] = '\0';
 }

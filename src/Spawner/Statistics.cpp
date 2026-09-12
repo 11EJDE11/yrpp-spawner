@@ -31,12 +31,12 @@
 
 bool __forceinline IsStatisticsEnabled()
 {
-	// Never while a replay is playing back: watching a game to its win/lose screen would otherwise
-	// overwrite the real stats.dmp with the recorded game's results.
+	// Never in a launch made to watch a replay: watching a game to its win/lose screen, or finishing
+	// one taken over from playback, would otherwise overwrite the real stats.dmp.
 	return Spawner::Active
 		&& Spawner::GetConfig()->WriteStatistics
 		&& !SessionClass::IsCampaign()
-		&& !ReplaySystem::IsPlaybackActive();
+		&& !ReplaySystem::IsPlaybackRequested();
 }
 
 // Write stats.dmp

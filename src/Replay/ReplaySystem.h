@@ -35,6 +35,11 @@ namespace ReplaySystem
 	// savegame carries and the load rebuilds every house, so a seek leaves it on a dead one.
 	void ReapplyPlaybackSpectator();
 
+	// Hands the viewer the house being watched at the start of the next frame: playback stops and
+	// the game carries on as an ordinary one, still with no network. Refused with a notice while
+	// seeking, from a spectator or observer seat, or once that house has been defeated.
+	void RequestTakeOver();
+
 	// Recording taps for chat, beacons and taunts, which bypass EventClass::DoList. Safe to call
 	// when not recording.
 	void RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex);
