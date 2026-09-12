@@ -20,15 +20,19 @@ without the magic number - would look to the player like the update had deleted 
 ## Layout
 
 ```
-[ReplayHeader]        HeaderSize bytes (1072 today), #pragma pack(1)
+[ReplayHeader]        HeaderSize bytes (1084 today), #pragma pack(1)
 [spawn.ini]           SpawnIniSize bytes, verbatim text
 [spawnmap.ini]        SpawnMapSize bytes, verbatim text
 --- start of the raw deflate frame stream ---
 [frame records]       repeated, one per simulated frame, monotonic
 [end-of-stream]       FrameRecordHeader with FrameNumber == -1
 --- end of the raw deflate frame stream ---
-[checkpoint archive] optional; independent compressed saves and sidecars
+[checkpoint archive]  optional; independent compressed saves and sidecars
+[statistics section]  optional; type table, end-of-game house records, the game's statistics packet
 ```
+
+Both trailing sections are located by their header offset and size, never by position: each is
+stamped into the header only once all of it is on disk, and either can be absent.
 
 The header and the two embedded INIs are never compressed, so a reader can pull them out with a
 plain seek and read. That is what the client does, and why it needs no decompressor.
@@ -88,7 +92,9 @@ the two questions are answered separately and independently.
 | 1052 | 4 | `TotalFrames` | last frame that carried a record |
 | 1056 | 4 | `Flags` | bit 0 = `CleanShutdown`; see below |
 | 1060 | 8 | `CheckpointArchiveOffset` | absolute offset of the [checkpoint archive](#optional-checkpoint-archive); 0 when there is none |
-| 1068 | 4 | `CheckpointArchiveSize` | archive bytes, running to EOF; 0 when there is none |
+| 1068 | 4 | `CheckpointArchiveSize` | archive bytes; 0 when there is none |
+| 1072 | 8 | `StatisticsOffset` | absolute offset of the [statistics section](#statistics); 0 when there is none |
+| 1080 | 4 | `StatisticsSize` | section bytes; 0 when there is none |
 
 The map name and the game client version are deliberately not header fields: the client already
 writes both into the embedded spawn.ini (`UIMapName`, `GameClientVersion`) and reads them back from
@@ -113,8 +119,10 @@ before seeking. Version compatibility belongs to the client; there is no checksu
 `ClassifyReplayHeader` retains distinct errors for unreadable input, a non-replay file, and malformed
 headers. Playback failure is fatal because `StartScenario` has already skipped `CreateConnections`.
 
-`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1072`, `sizeof(FrameRecordHeader) == 12`
-and `sizeof(SideChannelRecord) == 329`, **and** the individual `offsetof` of every header field the
+`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1084`, `sizeof(FrameRecordHeader) == 12`,
+`sizeof(SideChannelRecord) == 329`, `sizeof(HouseStatsSample) == 84`, `sizeof(MoneyInRecord) == 12`,
+`sizeof(StatisticsHouseRecord) == 282` and `sizeof(StatisticsGameRecord) == 20`, **and** the
+individual `offsetof` of every header field the
 client hardcodes. Size alone does not pin a layout: swapping two fields of the same width, or
 shortening one array while lengthening another, leaves `sizeof` untouched and mis-parses everything
 from the point of divergence onward. The per-field asserts are what catch that. None of them can
@@ -235,6 +243,14 @@ Then, in order, whichever blocks the flags select:
 - **SideChannel** — `int32 count` (max 64), then that many `SideChannelRecord` (329 bytes each).
 - **GameCRC** — `uint32`, the engine's own state hash for the frame. See
   [Desync detection](#desync-detection).
+- **HouseStats** (bit 9, `FrameRecordFlag_HouseStats`) — `int32 count` (1-32), then that many
+  `HouseStatsSample` (84 bytes each). Written every `HouseStatsIntervalFrames` (60) frames. It sits
+  after `SelectionTriggers` in the written order below; playback skips it.
+  See [Statistics](#statistics).
+- **MoneyIn** (bit 10, `FrameRecordFlag_MoneyIn`) — `int32 count` (1-1024), then that many
+  `MoneyInRecord` (12 bytes: `uint8 House`, 3 reserved bytes, `uint32 Caller`, `int32 Amount`): every
+  payment through `HouseClass::Refund_Money` this frame, summed per house and caller. After
+  HouseStats, before Extensions; playback skips it. See [Income by source](#income-by-source).
 - **Extensions** — `uint32 length` (max 1 MiB), then that many opaque bytes. Nothing writes one
   yet; see below.
 - **Events** — `EventCountThisFrame` × `sizeof(EventClass)` (111 bytes, static-asserted in
@@ -406,6 +422,148 @@ that writes house state must be checked against `HouseClass+0x241` specifically.
 A hash costs 4 bytes plus, on frames that would otherwise have gone unrecorded, a 12-byte frame
 header. The hashes themselves do not compress; the headers do.
 
+## Statistics
+
+A recording carries the game's statistics in two places, both written by
+`src/Replay/ReplayStatistics.cpp`: a per-house sample in the frame stream every
+`HouseStatsIntervalFrames` frames, which is what an end-of-game timeline is drawn from, and a
+statistics section after the frame stream with the end-of-game counts. Unlike `stats.dmp` they are
+recorded in every mode a recording covers - multiplayer, skirmish and campaign - whether or not the
+spawner writes `stats.dmp`, which only the Quick Match client asks for (`WriteStatistics`).
+
+Everything is a plain read of engine state. Nothing calls into the simulation, so recording
+statistics cannot change what a game does. The sample is taken at the frame's hash site
+(`Queue_AI_Multiplayer_ReplayGameCRC`, 0x647689, and the single-player equivalent), for the same
+reason the hash is: that site is reached on every frame, after `LogicClass::AI`.
+
+### HouseStatsSample
+
+Every house whose `HouseTypeClass::MultiplayPassive` is clear - so not Special, Neutral or the
+civilians - up to 32. 21 little-endian `int32`s:
+
+| Field | Source |
+|---|---|
+| `HouseIndex` | `HouseClass::ArrayIndex` |
+| `Credits` | `Balance` (0x30C) |
+| `StoredOreValue` | `OwnedTiberium.GetTotalValue()` (0x6C9600): ore waiting in refineries and silos |
+| `CreditsSpent` | `CreditsSpent` (0x2DC) |
+| `HarvestedCredits` | `HarvestedCredits` (0x2E0) |
+| `PowerOutput`, `PowerDrain` | 0x53A4, 0x53A8 |
+| `Units`, `Infantry`, `Aircraft`, `Buildings` | `OwnedUnits` (ships included), `OwnedInfantry`, `OwnedAircraft`, `OwnedBuildings` |
+| `ArmyValue`, `BuildingValue` | summed `TechnoTypeClass::Cost` over `TechnoClass::Array` for the house: alive, and out of limbo unless inside a transport - a factory holds what it is building as a limbo object |
+| `UnitsKilled`, `BuildingsKilled` | sums of `KilledUnitsOfHouses[20]` / `KilledBuildingsOfHouses[20]` |
+| `UnitsLost`, `BuildingsLost` | the fields YRpp calls `TotalKilledUnits` / `TotalKilledBuildings` - see below |
+| `UnitsBuilt`, `BuildingsBuilt` | sums of the `Built*Types` trackers |
+| `Score` | `PointTotal` (0x54E8) |
+| `Flags` | `HouseStatsFlags`: defeated, winner, loser, observer, human, lost connection, resigned, recording player |
+
+Total income is deliberately not a field. `HouseClass::Spend_Money` (0x4F9790) adds everything it
+takes, cash or stored ore, to `CreditsSpent`, and every other way money arrives goes through
+`Refund_Money` (0x4F9950), which only adds to `Balance`. So the change in money on hand plus the
+change in credits spent is exactly the money gained from any source. A reader works it out.
+
+### Income by source
+
+`HarvestedCredits` is useless in YR: the only instruction that writes it is the `HouseClass`
+constructor, so the packet's `HRV` is always 0. Since all income passes through `Refund_Money`,
+`HouseClass_RefundMoney_ReplayIncome` (0x4F9950, stealing `mov eax, [esp+4]; mov edx, [ecx+30Ch]`)
+records each payment with the address it returns to, as a `MoneyIn` record.
+
+The recorder records the raw caller and **never** decides what it was. Most of the income that
+matters does not come from gamemd's own call sites: Ares takes over harvester and slave unloading
+(0x73E4A2, 0x522D75 into its `DepositTiberium`) and oil derricks and capture bonuses (0x43FD2C,
+0x4482BD into `TransactMoney`), and pays through its `GiveMoney` stub; Phobos does the same for
+selling units, warhead `TransactMoney` and passenger-deletion refunds. Those call sites move with
+every Ares or Phobos build, so classifying them in the recorder would tie the replay format to one
+build of each. Instead the statistics section carries a module table (`MODS`, below), and a reader
+resolves each caller to a module and offset and looks it up in a table of its own - the analyser's
+`IncomeClassifier`, which a user can extend with an `income-callers.json` next to it without
+touching the recorder. The `GiveMoney` stubs in both DLLs restore the stack before jumping to
+`Refund_Money`, so a DLL caller is the DLL's own call site + 5, not an address inside the stub.
+
+The gamemd callers, for reference (return address = call + 5): `FactoryClass::Abandon` 0x4CA046 and
+`BuildingClass::Grand_Opening` 0x446E8F/0x446EDD are refunds of cancelled or unplaceable production;
+the `Per_Cell_Process` sites 0x73A0B7, 0x73A0FB, 0x73A125, 0x73A157 and 0x51987B are grinders, not
+harvesting; `Mission_Deconstruction` and `Sell_Back` are selling; `Goodie_Check` 0x4824D4 is a money
+crate; `BuildingClass_Infiltrate` 0x45745B and the money drain 0x6FA1C0 are stealing.
+
+A refund is money that was spent and came back, so a reader should take it off `CreditsSpent` and
+leave it out of income. Any income that never passed through `Refund_Money` - vanilla
+`Harvested_Ore` (0x4F9610) without Ares, or ore held in storage - shows up as the difference between
+the derived income and the recorded payments. A human's starting credits are set directly, not
+paid. An AI house also gets a bonus on frame 0, paid through `Refund_Money` by `Read_Scenario_INI`
+(return address 0x686A78): its starting credits × `MultiplayerAICM` (Rules +0x1308) for its
+`AIDifficulty` (+0x184), as a percentage - 400,000 on top of 100,000 for a Brutal AI. A reader
+should count that as starting money, not income.
+
+### Losses by type
+
+The engine keeps only `UnitsLost`/`BuildingsLost` totals. Both functions that increment them -
+`TechnoClass::Record_The_Kill_Object` (0x702D40) and `Record_The_Kill_House` (0x703230) - are hooked
+on their first six bytes (`push ecx; push ebp; push esi; mov esi, ecx; push edi`), and count the
+object by type on the engine's own condition: any vehicle, infantry or aircraft; a building only
+when it is not `Insignificant` and its `OwnerCountryIndex` (+0x53C) is not -1; and, for
+`Record_The_Kill_Object`, whose whole tally sits inside the test, only a type without `DontScore`.
+
+### The statistics section
+
+Written by `StopReplaySystem` after the checkpoint archive. A list of chunks, each `uint32 tag`,
+`uint32 length`, then that many bytes; tags are four ASCII characters with the first in the low
+byte (`MakeChunkTag`). A reader skips tags it does not know.
+
+- **`TYPE`** - `uint32 listCount`, then per list `uint32 AbstractType` (BuildingType, InfantryType,
+  UnitType, AircraftType), `uint32 count`, and per type: `char ID[24]`, `char Cameo[25]` (art
+  `CameoFile`), `uint16 nameLength` and that many UTF-16 characters of `UIName` (the string table
+  entry, as the game showed it), `int32 Cost`, `uint32 flags` (naval, `DontScore`, `Insignificant`).
+  This is the exact type order every heap index in the file refers to - the events' Produce/Place
+  indices as well as the counts below - so a reader needs no rules file. Captured at the first
+  sample, after the map has appended its own types.
+- **`HOUS`** - `uint32 houseCount`, then per house a `StatisticsHouseRecord` (282 bytes: index,
+  `UIName`, country ID, colour scheme, spawn position, allies, flags, money, power, units and
+  buildings lost, score, `KilledUnitsOfHouses`/`KilledBuildingsOfHouses`),
+  then `uint32 arrayCount` and per array `uint32 n` and `n` `int32`s, trailing zeros trimmed, in
+  `StatisticsHouseArray` order: built aircraft/infantry/units/buildings, killed
+  aircraft/infantry/units/buildings, captured buildings, collected crates (indexed by `Powerup`),
+  what is left at the end of aircraft/infantry/units/buildings, and the recorder's lost
+  aircraft/infantry/units/buildings.
+- **`GAME`** - a `StatisticsGameRecord` (20 bytes): `time()` at close (with the header's
+  `RecordedUnixTime`, the wall-clock length, and so the average frame rate), the last frame, the
+  first frame the game's own `OutOfSync` flag (0xA8B8C2, the packet's `OOSY`) was seen set, and
+  `OutOfSync` and `SawCompletion` (0xA8B8C1, the packet's `FINI`) at close.
+- **`MODS`** - `uint32 count`, then per loaded module `uint32 Base`, `uint32 Size`, `uint32
+  TimeDateStamp` (from its PE header: which build it is), `uint16 nameLength` and that many UTF-16
+  characters of the file name. Taken with a Toolhelp32 snapshot at close. This is what turns a
+  `MoneyIn` caller back into a module and offset, since Ares.dll and Phobos.dll are relocated.
+- **`STAT`** - the game's own statistics packet, byte for byte what `stats.dmp` holds, when the game
+  built one. Captured in `SendStatisticsPacket_WriteStatisticsDump` (0x6C856C) whether or not
+  `stats.dmp` is written.
+
+### What the engine's counters actually mean
+
+Verified in the binary; worth writing down because the names mislead.
+
+- **Built** is every object that joins the house: `HouseClass::Tracking_Add` (0x4FF700) increments
+  the `Built*Types` trackers for anything produced, deployed, captured, mind controlled or placed at
+  the start. No game mode check.
+- **Killed** is credited to the killer by `TechnoClass::Record_The_Kill_Object` (0x702D40): the
+  `Killed*Types` tracker by type, and `KilledUnitsOfHouses[victim]` / `KilledBuildingsOfHouses[victim]`
+  by the victim's house. No game mode check.
+- **Lost** is the same function incrementing, on the *victim's* house, the fields at 0x5434 and 0x5488
+  that YRpp names `TotalKilledUnits` and `TotalKilledBuildings`. They are losses, not kills.
+- **UNL/INL/PLL/BLL in `stats.dmp` are what was *left*, not what was lost.** `Send_Statistics_Packet`
+  (0x6C6F50) clears the four built trackers and refills them from the house's current objects
+  (0x6C7D98-0x6C7EA8) before packing them under those tags - which is why `BLL` includes captured
+  buildings. There is no per-type loss count anywhere in the engine.
+- That refill destroys the built counts, and `To_Network_Format` (0x749100) leaves the trackers
+  byte-swapped. So `SendStatisticsPacket_ReplayFinalSnapshot` (0x6C6F50, the function's first
+  instruction, `mov eax, 8394h`) takes the recording's end-of-game snapshot first and freezes it, and
+  every tracker read goes through the tracker's `InNetworkFormat` flag.
+- **Captured buildings and crates** are only counted in an Internet game: `cmp Session, 4` at
+  0x448524 (`BuildingClass::Captured`) and 0x481D6B (`CellClass::Goodie_Check`). `Statistics.cpp`
+  already opened the first for `WriteStatistics`; both now also count while a replay is recording,
+  so LAN, skirmish and campaign recordings have them. The trackers are score keeping only -
+  `Send_Statistics_Packet` is their one reader - so counting them changes nothing a game does.
+
 ## Relevant spawn.ini keys
 
 All in `[Settings]`. Recording and playback are mutually exclusive — a non-empty `ReplayFile` wins.
@@ -501,9 +659,10 @@ still needed to verify the engine's reconstructed state across real matches and 
 ### Optional checkpoint archive
 
 The header's `CheckpointArchiveOffset` is the absolute offset just past the finished frame deflate
-stream, and `CheckpointArchiveSize` is the archive's length; the archive runs to EOF. Both are
-stamped only after the entire archive has been appended, and stay zero when no saves were captured
-or recording was interrupted before finalization. There is one checkpoint format, with no legacy
+stream, and `CheckpointArchiveSize` is the archive's length. The statistics section may follow the
+archive, so a reader checks that the archive fits in the file rather than that it runs to EOF. Both
+fields are stamped only after the entire archive has been appended, and stay zero when no saves were
+captured or recording was interrupted before finalization. There is one checkpoint format, with no legacy
 format detection or per-block version tags. The client does not read either field.
 
 All archive integers are little-endian. The archive begins with `uint32 checkpointCount`.

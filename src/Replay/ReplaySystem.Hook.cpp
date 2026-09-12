@@ -358,6 +358,48 @@ DEFINE_HOOK(0x685670, DoWin_FinishReplayRecording, 0x5)
 
 #pragma endregion Closing the replay file
 
+#pragma region Statistics
+
+// Send_Statistics_Packet clears every house's built counts and refills them with what the house still
+// owns before it packs them, so the replay's end-of-game snapshot is taken on its first instruction.
+// That is mov eax, 8394h - position independent, so returning 0 re-executes it safely.
+DEFINE_HOOK(0x6C6F50, SendStatisticsPacket_ReplayFinalSnapshot, 0x5)
+{
+	ReplaySystem::OnStatisticsPacketStarting();
+	return 0;
+}
+
+// HouseClass::Refund_Money is the one function every kind of income reaches the balance through,
+// so the call site it will return to says where the money came from. The stolen bytes are
+// mov eax, [esp+4] and mov edx, [ecx+30Ch], both position independent; nothing here writes.
+DEFINE_HOOK(0x4F9950, HouseClass_RefundMoney_ReplayIncome, 0xA)
+{
+	GET(HouseClass*, pHouse, ECX);
+	GET_STACK(uintptr_t, returnAddress, 0x0);
+	GET_STACK(int, amount, 0x4);
+
+	ReplaySystem::RecordIncome(pHouse, amount, returnAddress);
+	return 0;
+}
+
+// Both functions that count HouseClass's units/buildings-lost totals. They open with
+// push ecx; push ebp; push esi; mov esi, ecx; push edi - position independent.
+DEFINE_HOOK(0x702D40, TechnoClass_RecordTheKillObject_ReplayLosses, 0x6)
+{
+	GET(TechnoClass*, pTechno, ECX);
+	ReplaySystem::RecordObjectLost(pTechno, true);
+	return 0;
+}
+
+DEFINE_HOOK(0x703230, TechnoClass_RecordTheKillHouse_ReplayLosses, 0x6)
+{
+	GET(TechnoClass*, pTechno, ECX);
+	ReplaySystem::RecordObjectLost(pTechno, false);
+	return 0;
+}
+
+#pragma endregion Statistics
+
 #pragma region Ending playback when the mission ends
 
 

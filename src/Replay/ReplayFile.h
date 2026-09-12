@@ -84,10 +84,18 @@ namespace Replay
 		bool WriteCheckpointArchive(const std::vector<unsigned char>& bytes);
 		bool ReadCheckpointArchive(std::vector<unsigned char>& bytes);
 
+		// Optional statistics section, appended after the checkpoint archive. Nothing in the game
+		// reads it back; it is for readers outside the game.
+		bool WriteStatisticsSection(const std::vector<unsigned char>& bytes);
+
 		// Call only after writing the end marker and finishing compression successfully.
 		bool StampCleanShutdown(int lastWrittenFrame);
 
 	private:
+		// Appends a section at EOF, then stamps its offset and size into the header fields at
+		// offsetField (uint64) and offsetField + 8 (uint32) - only once all of it is on disk.
+		bool AppendSection(const std::vector<unsigned char>& bytes, uint32_t maxBytes, LONGLONG offsetField);
+
 		HANDLE Handle = INVALID_HANDLE_VALUE;
 		DeflateWriter Writer;
 		InflateReader Reader;

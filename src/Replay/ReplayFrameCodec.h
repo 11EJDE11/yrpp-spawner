@@ -60,6 +60,11 @@ namespace Replay
 		bool HasGameCRC = false;
 		int32_t GameSpeed = 0;
 		bool HasGameSpeed = false;
+		// Every HouseStatsIntervalFrames, taken at the same point in the frame as GameCRC.
+		std::vector<HouseStatsSample> HouseStats;
+		bool HasHouseStats = false;
+		// Refund_Money payments made during the frame, summed per house and caller.
+		std::vector<MoneyInRecord> MoneyIn;
 	};
 
 	// Tracks the last serialized values so unchanged viewer state can be omitted.

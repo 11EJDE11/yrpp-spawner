@@ -23,6 +23,7 @@
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplaySideChannels.h"
+#include "ReplayStatistics.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
 
@@ -101,7 +102,9 @@ namespace ReplaySystem
 			ReplayState.FirstMismatchFrame = -1;
 			ReplayState.LastMismatchFrame = -1;
 			ReplayState.PendingFrameStates.clear();
+			ReplayState.CarriedMoneyIn.clear();
 			SideChannels::Reset();
+			Statistics::Reset();
 			ReplayState.CapturedFrameEventsFrame = -1;
 			ReplayState.CapturedFrameEvents.clear();
 			ReplayState.HasPlaybackHeader = false;
@@ -495,6 +498,7 @@ namespace ReplaySystem
 			{
 				ReplayState.PendingFrameStates.emplace_back();
 				ReplayState.PendingFrameStates.back().FrameNumber = frameNumber;
+				ReplayState.PendingFrameStates.back().MoneyIn.swap(ReplayState.CarriedMoneyIn);
 			}
 
 			RecordedFrameCapture& capture = ReplayState.PendingFrameStates.back();
@@ -712,6 +716,16 @@ namespace ReplaySystem
 					auto& capture = ReplayState.PendingFrameStates.back();
 					capture.GameCRC = gameCRC;
 					capture.HasGameCRC = true;
+
+					Statistics::OnFrame(frameNumber);
+
+					// Sampled here for the same reason as the hash: this site is reached on every
+					// frame, after LogicClass::AI. The sample only reads engine state.
+					if (frameNumber % HouseStatsIntervalFrames == 0 && !capture.HasHouseStats)
+					{
+						Statistics::FillHouseStats(capture.HouseStats);
+						capture.HasHouseStats = !capture.HouseStats.empty();
+					}
 				}
 				return;
 			}
@@ -745,6 +759,38 @@ namespace ReplaySystem
 					ColorScheme::White, true);
 			}
 		}
+		// Attached to the capture for the frame being simulated, or carried into the next capture when
+		// that one has already been written.
+		void RecordMoneyIn(int houseIndex, uintptr_t caller, int amount)
+		{
+			if (!ReplayState.Recording || houseIndex < 0 || houseIndex > 0xFF || amount == 0)
+				return;
+
+			const int frameNumber = Unsorted::CurrentFrame;
+			auto& records = !ReplayState.PendingFrameStates.empty()
+				&& ReplayState.PendingFrameStates.back().FrameNumber == frameNumber
+				? ReplayState.PendingFrameStates.back().MoneyIn
+				: ReplayState.CarriedMoneyIn;
+
+			for (auto& record : records)
+			{
+				if (record.House == houseIndex && record.Caller == static_cast<uint32_t>(caller))
+				{
+					record.Amount += amount;
+					return;
+				}
+			}
+
+			if (records.size() < static_cast<size_t>(MaxMoneyInPerFrame))
+			{
+				MoneyInRecord record {};
+				record.House = static_cast<uint8_t>(houseIndex);
+				record.Caller = static_cast<uint32_t>(caller);
+				record.Amount = amount;
+				records.push_back(record);
+			}
+		}
+
 		void ComputeAndCaptureGameCRCForCurrentFrame()
 		{
 			if (!ReplayState.Recording && !ReplayState.Playback)
@@ -792,7 +838,10 @@ namespace ReplaySystem
 						Debug::Log("[Replay] Failed to finish the compressed replay stream.\n");
 
 					if (wroteEnd && finishedStream)
+					{
 						Seek::FinishRecordingCheckpoints();
+						Statistics::WriteSection(ReplayState.File);
+					}
 
 					if (wroteEnd && finishedStream && !ReplayState.File.StampCleanShutdown(ReplayState.FrameWriter.LastFrameNumber()))
 						Debug::Log("[Replay] Failed to mark the replay as complete.\n");
@@ -1164,6 +1213,12 @@ bool ReplaySystem::IsPlaybackRequested()
 bool ReplaySystem::IsRecordingActive()
 {
 	return ReplayState.Recording;
+}
+
+void ReplaySystem::RecordIncome(HouseClass* pHouse, int amount, uintptr_t returnAddress)
+{
+	if (pHouse)
+		RecordMoneyIn(pHouse->ArrayIndex, returnAddress, amount);
 }
 
 bool ReplaySystem::IsPlaybackActive()

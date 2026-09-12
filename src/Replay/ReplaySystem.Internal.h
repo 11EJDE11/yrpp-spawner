@@ -108,6 +108,9 @@ namespace ReplaySystem
 
 			// Scratch buffers reused every frame so recording does not allocate on the game thread.
 			std::vector<EventClass> PreservedEventsScratch;
+
+			// Payments made after the current frame's capture was written; they go into the next one.
+			std::vector<MoneyInRecord> CarriedMoneyIn;
 		};
 
 		extern ReplayRuntimeState ReplayState;
@@ -126,6 +129,7 @@ namespace ReplaySystem
 		void RestoreFrameState();
 		bool RepositionPlaybackStreamToFrame(int targetFrame);
 		void CaptureGameCRCForCurrentFrame();
+		void RecordMoneyIn(int houseIndex, uintptr_t caller, int amount);
 		// Applies the latest sticky viewer state immediately after its live toggle is enabled.
 		void ApplyLockedViewport();
 		void ApplyCurrentPlaybackSelection();

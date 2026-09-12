@@ -319,34 +319,48 @@ namespace Replay
 		return !this->Writer.IsActive() || this->Writer.Finish();
 	}
 
-	bool File::WriteCheckpointArchive(const std::vector<unsigned char>& bytes)
+	bool File::AppendSection(const std::vector<unsigned char>& bytes, uint32_t maxBytes, LONGLONG offsetField)
 	{
-		if (bytes.empty() || bytes.size() > MaxCheckpointArchiveBytes)
+		if (bytes.empty() || bytes.size() > maxBytes)
 			return false;
 
-		LARGE_INTEGER zero {}, archiveStart {};
-		if (!SetFilePointerEx(this->Handle, zero, &archiveStart, FILE_END)
+		LARGE_INTEGER zero {}, sectionStart {};
+		if (!SetFilePointerEx(this->Handle, zero, &sectionStart, FILE_END)
 			|| !WriteRawToHandle(this->Handle, bytes.data(), bytes.size()))
 		{
 			return false;
 		}
 
+		// Point the header at the section only once all of it is on disk.
+		const uint64_t sectionOffset = static_cast<uint64_t>(sectionStart.QuadPart);
+		const uint32_t sectionSize = static_cast<uint32_t>(bytes.size());
+
+		LARGE_INTEGER fieldOffset {};
+		fieldOffset.QuadPart = offsetField;
+		const bool ok = SetFilePointerEx(this->Handle, fieldOffset, nullptr, FILE_BEGIN)
+			&& WriteRawToHandle(this->Handle, &sectionOffset, sizeof(sectionOffset))
+			&& WriteRawToHandle(this->Handle, &sectionSize, sizeof(sectionSize));
+
+		SetFilePointerEx(this->Handle, zero, nullptr, FILE_END);
+		return ok;
+	}
+
+	bool File::WriteCheckpointArchive(const std::vector<unsigned char>& bytes)
+	{
 		static_assert(offsetof(ReplayHeader, CheckpointArchiveSize)
 			== offsetof(ReplayHeader, CheckpointArchiveOffset) + sizeof(uint64_t),
 			"The checkpoint archive fields are stamped back to back and have to stay adjacent");
 
-		// Point the header at the archive only once all of it is on disk.
-		const uint64_t archiveOffset = static_cast<uint64_t>(archiveStart.QuadPart);
-		const uint32_t archiveSize = static_cast<uint32_t>(bytes.size());
+		return this->AppendSection(bytes, MaxCheckpointArchiveBytes, offsetof(ReplayHeader, CheckpointArchiveOffset));
+	}
 
-		LARGE_INTEGER fieldOffset {};
-		fieldOffset.QuadPart = offsetof(ReplayHeader, CheckpointArchiveOffset);
-		const bool ok = SetFilePointerEx(this->Handle, fieldOffset, nullptr, FILE_BEGIN)
-			&& WriteRawToHandle(this->Handle, &archiveOffset, sizeof(archiveOffset))
-			&& WriteRawToHandle(this->Handle, &archiveSize, sizeof(archiveSize));
+	bool File::WriteStatisticsSection(const std::vector<unsigned char>& bytes)
+	{
+		static_assert(offsetof(ReplayHeader, StatisticsSize)
+			== offsetof(ReplayHeader, StatisticsOffset) + sizeof(uint64_t),
+			"The statistics fields are stamped back to back and have to stay adjacent");
 
-		SetFilePointerEx(this->Handle, zero, nullptr, FILE_END);
-		return ok;
+		return this->AppendSection(bytes, MaxStatisticsSectionBytes, offsetof(ReplayHeader, StatisticsOffset));
 	}
 
 	bool File::ReadCheckpointArchive(std::vector<unsigned char>& bytes)
@@ -357,14 +371,15 @@ namespace Replay
 		if (this->CheckpointArchiveOffset == 0 && this->CheckpointArchiveSize == 0)
 			return true;
 
-		// The archive runs from the end of the frame stream to EOF.
+		// The archive starts after the frame stream. It no longer runs to EOF: the statistics section
+		// may follow it.
 		const uint64_t offset = this->CheckpointArchiveOffset;
 		const uint32_t size = this->CheckpointArchiveSize;
 		LARGE_INTEGER fileSize {};
 		if (size == 0 || size > MaxCheckpointArchiveBytes || offset <= this->PlaybackStreamOffset
 			|| !GetFileSizeEx(this->Handle, &fileSize)
 			|| offset > static_cast<uint64_t>(fileSize.QuadPart)
-			|| size != static_cast<uint64_t>(fileSize.QuadPart) - offset)
+			|| size > static_cast<uint64_t>(fileSize.QuadPart) - offset)
 		{
 			return false;
 		}

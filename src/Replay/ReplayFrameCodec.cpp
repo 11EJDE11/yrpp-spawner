@@ -70,9 +70,11 @@ namespace Replay
 		const bool hasGameCRC = capture.HasGameCRC;
 
 		const bool hasSelectionTriggers = !capture.SelectionTriggerObjectIDs.empty();
+		const bool hasHouseStats = capture.HasHouseStats && !capture.HouseStats.empty();
+		const bool hasMoneyIn = !capture.MoneyIn.empty();
 
 		if (eventsThisFrame == 0 && !tacticalPosChanged && !selectionChanged && !hasSideChannelEvents
-			&& !hasGameCRC && !capture.HasGameSpeed && !hasSelectionTriggers)
+			&& !hasGameCRC && !capture.HasGameSpeed && !hasSelectionTriggers && !hasHouseStats && !hasMoneyIn)
 		{
 			return true;
 		}
@@ -93,6 +95,10 @@ namespace Replay
 			header.Flags |= FrameRecordFlag_GameSpeed;
 		if (hasSelectionTriggers)
 			header.Flags |= FrameRecordFlag_SelectionTriggers;
+		if (hasHouseStats)
+			header.Flags |= FrameRecordFlag_HouseStats;
+		if (hasMoneyIn)
+			header.Flags |= FrameRecordFlag_MoneyIn;
 
 		if (!file.Write(&header, sizeof(header)))
 			return false;
@@ -148,6 +154,26 @@ namespace Replay
 			if (!file.Write(&count, sizeof(count))
 				|| !file.Write(capture.SelectionTriggerObjectIDs.data(),
 					capture.SelectionTriggerObjectIDs.size() * sizeof(uint32_t)))
+			{
+				return false;
+			}
+		}
+
+		if (hasHouseStats)
+		{
+			const auto count = static_cast<int32_t>(capture.HouseStats.size());
+			if (!file.Write(&count, sizeof(count))
+				|| !file.Write(capture.HouseStats.data(), capture.HouseStats.size() * sizeof(HouseStatsSample)))
+			{
+				return false;
+			}
+		}
+
+		if (hasMoneyIn)
+		{
+			const auto count = static_cast<int32_t>(std::min<size_t>(capture.MoneyIn.size(), MaxMoneyInPerFrame));
+			if (!file.Write(&count, sizeof(count))
+				|| !file.Write(capture.MoneyIn.data(), static_cast<size_t>(count) * sizeof(MoneyInRecord)))
 			{
 				return false;
 			}
@@ -297,6 +323,33 @@ namespace Replay
 			{
 				return false;
 			}
+		}
+
+		if ((record.Flags & FrameRecordFlag_HouseStats) != 0u)
+		{
+			int32_t houseCount = 0;
+			if (!file.Read(&houseCount, sizeof(houseCount)))
+				return false;
+
+			if (houseCount <= 0 || houseCount > MaxHouseStatsPerFrame)
+				return false;
+
+			// Playback has no use for the samples; they are there for readers outside the game.
+			if (!SkipBytes(file, static_cast<size_t>(houseCount) * sizeof(HouseStatsSample)))
+				return false;
+		}
+
+		if ((record.Flags & FrameRecordFlag_MoneyIn) != 0u)
+		{
+			int32_t moneyCount = 0;
+			if (!file.Read(&moneyCount, sizeof(moneyCount)))
+				return false;
+
+			if (moneyCount <= 0 || moneyCount > MaxMoneyInPerFrame)
+				return false;
+
+			if (!SkipBytes(file, static_cast<size_t>(moneyCount) * sizeof(MoneyInRecord)))
+				return false;
 		}
 
 		if ((record.Flags & FrameRecordFlag_Extensions) != 0u)

@@ -21,6 +21,11 @@
 
 #include <GeneralStructures.h>
 
+#include <cstdint>
+
+class HouseClass;
+class TechnoClass;
+
 namespace ReplaySystem
 {
 	bool IsPlaybackRequested();
@@ -47,4 +52,16 @@ namespace ReplaySystem
 	void RecordBeaconPlace(int houseIndex, const CoordStruct& coord, int beaconSlot);
 	void RecordBeaconDelete(int houseIndex, int beaconSlot);
 	void RecordBeaconText(int houseIndex, int beaconSlot, const wchar_t* text);
+
+	// Statistics taps, both safe when not recording. Send_Statistics_Packet rewrites the houses'
+	// built counts, so the recording's end-of-game snapshot is taken as it starts; the packet it
+	// builds - what stats.dmp holds - is kept in the replay whether or not stats.dmp is written.
+	void OnStatisticsPacketStarting();
+	void RecordStatisticsPacket(const void* data, int length);
+
+	// HouseClass::Refund_Money, told apart by the call site it returns to.
+	void RecordIncome(HouseClass* pHouse, int amount, uintptr_t returnAddress);
+	// TechnoClass::Record_The_Kill_Object / Record_The_Kill_House: the object is being lost.
+	// The first only counts a loss for a type that scores; the second counts it regardless.
+	void RecordObjectLost(TechnoClass* pTechno, bool scoringTypesOnly);
 }

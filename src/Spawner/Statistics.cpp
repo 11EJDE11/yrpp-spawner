@@ -42,11 +42,14 @@ bool __forceinline IsStatisticsEnabled()
 // Write stats.dmp
 DEFINE_HOOK(0x6C856C, SendStatisticsPacket_WriteStatisticsDump, 0x5)
 {
+	GET(void*, buf, EAX);
+	const int lengthOfPacket = *reinterpret_cast<int*>(0xB0BD90);
+
+	// A recording keeps the packet whether or not stats.dmp is written.
+	ReplaySystem::RecordStatisticsPacket(buf, lengthOfPacket);
+
 	if (IsStatisticsEnabled())
 	{
-		GET(void*, buf, EAX);
-		int lengthOfPacket = *reinterpret_cast<int*>(0xB0BD90);
-
 		CCFileClass statsFile = CCFileClass("stats.dmp");
 		if (statsFile.Open(FileAccessMode::Write))
 		{
@@ -161,13 +164,33 @@ DEFINE_HOOK(0x6C882A, RegisterGameEndTime_CorrectDuration, 0x6)
 	return 0;
 }
 
+// The captured-building and collected-crate counts are only kept in an Internet game. A recording
+// counts them too, so its statistics show them for LAN, skirmish and campaign games as well. The
+// counts are score tracking only - Send_Statistics_Packet is their one reader.
+bool __forceinline ShouldCountForStatistics()
+{
+	return IsStatisticsEnabled()
+		|| SessionClass::Instance.GameMode == GameMode::Internet
+		|| ReplaySystem::IsRecordingActive();
+}
+
 DEFINE_HOOK(0x448524, BuildingClass_Captured_SendStatistics, 0x7)
 {
 	enum { Send = 0x44852D, DontSend = 0x448559 };
 
-	return IsStatisticsEnabled() || (SessionClass::Instance.GameMode == GameMode::Internet)
+	return ShouldCountForStatistics()
 		? Send
 		: DontSend;
+}
+
+// cmp Session, 4 ahead of CollectedCrates.Increment_Unit_Total in CellClass::Goodie_Check.
+DEFINE_HOOK(0x481D6B, CellClass_GoodieCheck_CountCrate, 0x7)
+{
+	enum { Count = 0x481D74, DontCount = 0x481D86 };
+
+	return ShouldCountForStatistics()
+		? Count
+		: DontCount;
 }
 
 DEFINE_HOOK(0x55D0FB, AuxLoop_SendStatistics_1, 0x5)
