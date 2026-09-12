@@ -23,6 +23,7 @@
 #include "ReplayStream.h"
 
 #include <string>
+#include <vector>
 
 class SpawnerConfig;
 
@@ -55,6 +56,7 @@ namespace Replay
 
 	// Owns the file handle and compression state. The header and embedded files are
 	// uncompressed; frame bytes use one deflate stream beginning just after them.
+	// An optional checkpoint archive follows the completed deflate stream.
 	class File
 	{
 	public:
@@ -78,6 +80,10 @@ namespace Replay
 		bool SyncFlush();
 		bool FinishRecording();
 
+		// Optional independent checkpoint archive after the finished frame deflate stream.
+		bool WriteCheckpointArchive(const std::vector<unsigned char>& bytes);
+		bool ReadCheckpointArchive(std::vector<unsigned char>& bytes);
+
 		// Call only after writing the end marker and finishing compression successfully.
 		bool StampCleanShutdown(int lastWrittenFrame);
 
@@ -86,6 +92,9 @@ namespace Replay
 		DeflateWriter Writer;
 		InflateReader Reader;
 		uint64_t PlaybackStreamOffset = 0;
+		// Copied from the header by OpenPlayback.
+		uint64_t CheckpointArchiveOffset = 0;
+		uint32_t CheckpointArchiveSize = 0;
 		uint64_t BytesAtLastDiskFlush = 0;
 	};
 }

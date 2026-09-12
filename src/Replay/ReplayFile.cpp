@@ -152,6 +152,8 @@ namespace Replay
 		this->Writer.Reset();
 		this->Reader.Reset();
 		this->PlaybackStreamOffset = 0;
+		this->CheckpointArchiveOffset = 0;
+		this->CheckpointArchiveSize = 0;
 		this->BytesAtLastDiskFlush = 0;
 
 		if (this->Handle != INVALID_HANDLE_VALUE)
@@ -186,7 +188,7 @@ namespace Replay
 
 		SetFilePointer(this->Handle, 0, nullptr, FILE_END);
 
-		// Everything from here on - and nothing before it - is deflated.
+		// Start the frame deflate stream; optional checkpoints follow after FinishRecording.
 		if (!this->Writer.Start(this->Handle))
 		{
 			Debug::Log("[Replay] Failed to start the compressed replay stream.\n");
@@ -261,6 +263,8 @@ namespace Replay
 
 		// Kept so a seek can restart the decompressor here. See ReplaySeek.h.
 		this->PlaybackStreamOffset = streamOffset;
+		this->CheckpointArchiveOffset = header.CheckpointArchiveOffset;
+		this->CheckpointArchiveSize = header.CheckpointArchiveSize;
 		return true;
 	}
 
@@ -313,6 +317,74 @@ namespace Replay
 	bool File::FinishRecording()
 	{
 		return !this->Writer.IsActive() || this->Writer.Finish();
+	}
+
+	bool File::WriteCheckpointArchive(const std::vector<unsigned char>& bytes)
+	{
+		if (bytes.empty() || bytes.size() > MaxCheckpointArchiveBytes)
+			return false;
+
+		LARGE_INTEGER zero {}, archiveStart {};
+		if (!SetFilePointerEx(this->Handle, zero, &archiveStart, FILE_END)
+			|| !WriteRawToHandle(this->Handle, bytes.data(), bytes.size()))
+		{
+			return false;
+		}
+
+		static_assert(offsetof(ReplayHeader, CheckpointArchiveSize)
+			== offsetof(ReplayHeader, CheckpointArchiveOffset) + sizeof(uint64_t),
+			"The checkpoint archive fields are stamped back to back and have to stay adjacent");
+
+		// Point the header at the archive only once all of it is on disk.
+		const uint64_t archiveOffset = static_cast<uint64_t>(archiveStart.QuadPart);
+		const uint32_t archiveSize = static_cast<uint32_t>(bytes.size());
+
+		LARGE_INTEGER fieldOffset {};
+		fieldOffset.QuadPart = offsetof(ReplayHeader, CheckpointArchiveOffset);
+		const bool ok = SetFilePointerEx(this->Handle, fieldOffset, nullptr, FILE_BEGIN)
+			&& WriteRawToHandle(this->Handle, &archiveOffset, sizeof(archiveOffset))
+			&& WriteRawToHandle(this->Handle, &archiveSize, sizeof(archiveSize));
+
+		SetFilePointerEx(this->Handle, zero, nullptr, FILE_END);
+		return ok;
+	}
+
+	bool File::ReadCheckpointArchive(std::vector<unsigned char>& bytes)
+	{
+		bytes.clear();
+
+		// No saves were captured, or the recording never finalized.
+		if (this->CheckpointArchiveOffset == 0 && this->CheckpointArchiveSize == 0)
+			return true;
+
+		// The archive runs from the end of the frame stream to EOF.
+		const uint64_t offset = this->CheckpointArchiveOffset;
+		const uint32_t size = this->CheckpointArchiveSize;
+		LARGE_INTEGER fileSize {};
+		if (size == 0 || size > MaxCheckpointArchiveBytes || offset <= this->PlaybackStreamOffset
+			|| !GetFileSizeEx(this->Handle, &fileSize)
+			|| offset > static_cast<uint64_t>(fileSize.QuadPart)
+			|| size != static_cast<uint64_t>(fileSize.QuadPart) - offset)
+		{
+			return false;
+		}
+
+		// The frame decompressor carries on from wherever it left the handle.
+		LARGE_INTEGER zero {}, original {};
+		if (!SetFilePointerEx(this->Handle, zero, &original, FILE_CURRENT))
+			return false;
+
+		LARGE_INTEGER archiveStart {};
+		archiveStart.QuadPart = static_cast<LONGLONG>(offset);
+		bytes.resize(size);
+		const bool ok = SetFilePointerEx(this->Handle, archiveStart, nullptr, FILE_BEGIN)
+			&& ReadRawFromHandle(this->Handle, bytes.data(), bytes.size());
+
+		const bool restored = SetFilePointerEx(this->Handle, original, nullptr, FILE_BEGIN) != FALSE;
+		if (!ok || !restored)
+			bytes.clear();
+
+		return ok && restored;
 	}
 
 	bool File::StampCleanShutdown(int lastWrittenFrame)

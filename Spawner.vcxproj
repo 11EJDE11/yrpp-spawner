@@ -57,6 +57,7 @@
     <ClCompile Include="$(ThisDir)\src\Misc\SkipScoreScreen.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\VideoMode.cpp" />
     <!-- Replay -->
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Serialization.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayControls.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayFrameCodec.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayFile.cpp" />
@@ -123,6 +124,8 @@
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Internal.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySideChannels.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySeek.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplayCheckpointCodec.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplayRecordedCheckpoint.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySystem.Internal.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayStream.h" />

@@ -280,8 +280,19 @@ namespace ReplaySystem::KeyframeState::Detail
 		uint32_t MovementZones = 0;
 	};
 
+	// Beacon state is outside the engine savegame and persists across replay frames.
+	struct BeaconSnapshot
+	{
+		bool Present = false;
+		int32_t X = 0;
+		int32_t Y = 0;
+		int32_t Z = 0;
+		std::array<wchar_t, 128> Text {};
+	};
+
 	struct SnapshotData
 	{
+		std::array<std::array<BeaconSnapshot, 3>, 8> Beacons;
 		int ScenarioUniqueID = 0;
 		std::array<unsigned char, sizeof(Randomizer)> Random {};
 		std::vector<TechnoSnapshot> Technos;

@@ -709,6 +709,9 @@ namespace ReplaySystem
 					if (!finishedStream)
 						Debug::Log("[Replay] Failed to finish the compressed replay stream.\n");
 
+					if (wroteEnd && finishedStream)
+						Seek::FinishRecordingCheckpoints();
+
 					if (wroteEnd && finishedStream && !ReplayState.File.StampCleanShutdown(ReplayState.FrameWriter.LastFrameNumber()))
 						Debug::Log("[Replay] Failed to mark the replay as complete.\n");
 				}
@@ -1050,7 +1053,6 @@ namespace ReplaySystem
 
 			strncpy_s(ReplayState.PlaybackPath, sizeof(ReplayState.PlaybackPath), replayPath, _TRUNCATE);
 
-			ReplaySystem::Seek::OnPlaybackStarted();
 
 			ReplayOpenFailure failure = ReplayOpenFailure::None;
 			if (!ReplayState.File.OpenPlayback(ReplayState.PlaybackPath, failure))
@@ -1062,6 +1064,8 @@ namespace ReplaySystem
 				Debug::FatalErrorAndExit("[Replay] Cannot play %s: %s.",
 					ReplayState.PlaybackPath, Replay::DescribeReplayOpenFailure(failure));
 			}
+
+			ReplaySystem::Seek::OnPlaybackStarted();
 		}
 	}
 }

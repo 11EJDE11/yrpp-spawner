@@ -20,6 +20,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 namespace ReplaySystem::KeyframeState
 {
@@ -30,7 +31,7 @@ namespace ReplaySystem::KeyframeState
 	}
 
 	// Sidecar for state the engine savegame omits or changes while loading. It stays
-	// in memory for this playback; moving a keyframe transfers it, and eviction frees it.
+	// in memory during playback and can be serialized alongside a recorded save.
 	// Object references are captured as IDs and resolved against the loaded world.
 	// This supplements the general save/load fixes with the exact keyframe values.
 	class Snapshot
@@ -43,6 +44,9 @@ namespace ReplaySystem::KeyframeState
 		Snapshot(const Snapshot&) = delete;
 		Snapshot& operator=(const Snapshot&) = delete;
 
+		bool Serialize(std::vector<unsigned char>& bytes) const;
+		bool Deserialize(const std::vector<unsigned char>& bytes);
+
 		// SaveGame must have completed before this is called.
 		bool CaptureAfterSave();
 
@@ -51,7 +55,7 @@ namespace ReplaySystem::KeyframeState
 		bool RestoreBeforeResume(int keyframeFrame) const;
 
 		// Run after Session::Resume and replay spectator setup.
-		void RestoreAfterResume(int keyframeFrame) const;
+		void RestoreAfterResume(int keyframeFrame, bool showBeacons) const;
 
 	private:
 		std::unique_ptr<Detail::SnapshotData> Data;

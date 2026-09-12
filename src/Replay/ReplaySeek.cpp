@@ -18,6 +18,8 @@
 */
 
 #include "ReplaySeek.h"
+#include "ReplayCheckpointCodec.h"
+#include "ReplayRecordedCheckpoint.h"
 #include "ReplayKeyframeState.h"
 #include "ReplayControls.h"
 #include "ReplayOverlay.h"
@@ -26,6 +28,7 @@
 
 #include <Spawner/Spawner.h>
 #include <Utilities/Debug.h>
+#include <Vendor/miniz/miniz.h>
 
 #include <EventClass.h>
 #include <GameModeOptionsClass.h>
@@ -44,6 +47,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <utility>
 #include <vector>
 
@@ -63,8 +67,8 @@ namespace ReplaySystem
 			// starts. Frame 0 is the state before the first frame ran.
 			constexpr int FirstKeyframeFrame = 0;
 
-			// A rewind point pairs a temporary savegame on disk with its in-memory sidecar.
-			// Both belong to this playback session; neither is added to the .yrrp file.
+			// A rewind point pairs a temporary savegame with its simulation sidecar.
+			// It is either captured during playback or extracted from the recording.
 			struct Keyframe
 			{
 				int Frame = 0;
@@ -95,6 +99,11 @@ namespace ReplaySystem
 
 			SeekState State;
 
+			using Replay::RecordedCheckpoint;
+			using Replay::MaxRecordedCheckpoints;
+			using Replay::MaxRecordedCheckpointBytes;
+			std::vector<RecordedCheckpoint> RecordedCheckpoints;
+			bool RecordingSimulationInProgress = false;
 
 			std::filesystem::path KeyframeDirectory()
 			{
@@ -235,6 +244,63 @@ namespace ReplaySystem
 				return true;
 			}
 
+			void ImportRecordedCheckpoints()
+			{
+				std::vector<unsigned char> archive;
+				if (!ReplayState.File.ReadCheckpointArchive(archive))
+				{
+					Debug::Log("[Replay] Ignoring an unreadable checkpoint archive.\n");
+					return;
+				}
+				if (archive.empty()) return;
+				Replay::CheckpointCodec::Reader reader { archive };
+				uint32_t count = 0;
+				reader.Scalar(count);
+				if (!reader.Good || count > MaxRecordedCheckpoints) return;
+				// Validate the complete envelope before publishing any seek points.
+				std::vector<RecordedCheckpoint> records(count);
+				int previousFrame = -1;
+				for (auto& record : records)
+				{
+					Replay::CheckpointCodec::Fields(reader, record.Frame, record.RawSize,
+						record.CRC, record.Compressed);
+					if (!reader.Good || record.Frame <= previousFrame || record.Frame > TotalFrames()
+						|| record.RawSize == 0 || record.RawSize > Replay::CheckpointCodec::MaxBytes
+						|| record.Compressed.empty()) return;
+					previousFrame = record.Frame;
+				}
+				if (reader.Position != archive.size()) return;
+				for (const auto& record : records)
+				{
+					std::vector<unsigned char> raw(record.RawSize);
+					if (tinfl_decompress_mem_to_mem(raw.data(), raw.size(), record.Compressed.data(),
+						record.Compressed.size(), 0) != raw.size()
+						|| mz_crc32(0, raw.data(), raw.size()) != record.CRC) continue;
+					Replay::CheckpointCodec::Reader payload { raw };
+					std::vector<unsigned char> save, sidecar;
+					Replay::CheckpointCodec::Fields(payload, save, sidecar);
+					Keyframe keyframe;
+					keyframe.Frame = record.Frame;
+					if (!payload.Good || payload.Position != raw.size() || save.empty()
+						|| !keyframe.Snapshot.Deserialize(sidecar)) continue;
+					const auto path = KeyframePath(record.Frame);
+					std::ofstream output(path, std::ios::binary | std::ios::trunc);
+					output.write(reinterpret_cast<const char*>(save.data()), save.size());
+					output.close();
+					if (!output)
+					{
+						std::error_code error; std::filesystem::remove(path, error);
+						continue;
+					}
+					keyframe.FileBytes = save.size();
+					State.KeyframeBytes += keyframe.FileBytes;
+					State.Keyframes.push_back(std::move(keyframe));
+				}
+				EvictOldKeyframes();
+				Debug::Log("[Replay] Loaded %u of %u recorded seek checkpoints.\n",
+					static_cast<unsigned int>(State.Keyframes.size()), count);
+			}
+
 			// LoadMission tears down the in-game session. A seek bypasses the load screen
 			// that would normally restore its input, audio, and in-game flag.
 			void ResumeInGameSessionAfterLoad()
@@ -294,7 +360,7 @@ namespace ReplaySystem
 				RepointTempSurfaceAfterLoad();
 				ResumeInGameSessionAfterLoad();
 				ReplaySystem::ReapplyPlaybackSpectator();
-				keyframe.Snapshot.RestoreAfterResume(keyframeFrame);
+				keyframe.Snapshot.RestoreAfterResume(keyframeFrame, ReplayState.ShowChatAndBeacons);
 
 				if (ReplayState.HasPlaybackHeader)
 				{
@@ -416,6 +482,69 @@ namespace ReplaySystem
 			}
 		}
 
+		void SetRecordingSimulationInProgress(bool inProgress)
+		{
+			RecordingSimulationInProgress = inProgress;
+		}
+
+		void OnGameSaved(const wchar_t* path)
+		{
+			if (!ReplayState.Recording || RecordingSimulationInProgress || !path) return;
+			const int frame = static_cast<int>(Unsorted::CurrentFrame);
+			if (frame < 0 || (!RecordedCheckpoints.empty() && frame <= RecordedCheckpoints.back().Frame)) return;
+			std::ifstream input(std::filesystem::path(path), std::ios::binary | std::ios::ate);
+			const auto size = input.tellg();
+			if (!input || size <= 0 || size > Replay::CheckpointCodec::MaxBytes) return;
+			std::vector<unsigned char> save(static_cast<size_t>(size));
+			input.seekg(0);
+			if (!input.read(reinterpret_cast<char*>(save.data()), save.size())) return;
+			KeyframeState::Snapshot snapshot;
+			std::vector<unsigned char> sidecar;
+			if (!snapshot.CaptureAfterSave() || !snapshot.Serialize(sidecar))
+			{
+				Debug::Log("[Replay] Save at frame %d could not capture a checkpoint sidecar.\n", frame);
+				return;
+			}
+			Replay::CheckpointCodec::Writer payload;
+			Replay::CheckpointCodec::Fields(payload, save, sidecar);
+			if (!payload.Good) return;
+			RecordedCheckpoint record;
+			record.Frame = frame;
+			record.RawSize = static_cast<uint32_t>(payload.Bytes.size());
+			record.CRC = static_cast<uint32_t>(mz_crc32(0, payload.Bytes.data(), payload.Bytes.size()));
+			size_t compressedSize = 0;
+			void* compressed = tdefl_compress_mem_to_heap(payload.Bytes.data(), payload.Bytes.size(),
+				&compressedSize, 128);
+			if (!compressed) return;
+			if (compressedSize <= MaxRecordedCheckpointBytes)
+			{
+				const auto* bytes = static_cast<unsigned char*>(compressed);
+				record.Compressed.assign(bytes, bytes + compressedSize);
+			}
+			mz_free(compressed);
+			if (record.Compressed.empty()) return;
+			RecordedCheckpoints.push_back(std::move(record));
+			Replay::TrimRecordedCheckpoints(RecordedCheckpoints);
+			Debug::Log("[Replay] Captured existing save at frame %d (%u compressed bytes; %u retained).\n",
+				frame, static_cast<unsigned int>(compressedSize), static_cast<unsigned int>(RecordedCheckpoints.size()));
+		}
+
+		void FinishRecordingCheckpoints()
+		{
+			if (RecordedCheckpoints.empty()) return;
+			Replay::CheckpointCodec::Writer writer;
+			// A save at shutdown may precede a frame that was never recorded.
+			const int lastFrame = ReplayState.FrameWriter.LastFrameNumber();
+			std::erase_if(RecordedCheckpoints, [lastFrame](const auto& item) { return item.Frame > lastFrame; });
+			uint32_t count = static_cast<uint32_t>(RecordedCheckpoints.size());
+			if (count == 0) return;
+			writer.Scalar(count);
+			for (auto& record : RecordedCheckpoints)
+				Replay::CheckpointCodec::Fields(writer, record.Frame, record.RawSize, record.CRC, record.Compressed);
+			if (!writer.Good || !ReplayState.File.WriteCheckpointArchive(writer.Bytes))
+				Debug::Log("[Replay] Could not append recorded checkpoints; event playback remains available.\n");
+		}
+
 		int KeyframeInterval()
 		{
 			return State.Interval;
@@ -437,20 +566,17 @@ namespace ReplaySystem
 				: 512;
 			State.StorageLimitBytes = static_cast<uint64_t>(storageLimitMB) * 1024u * 1024u;
 
-			if (State.Interval <= 0)
-			{
-				Debug::Log("[Replay] Keyframes are off; seeking backwards is not available.\n");
-				return;
-			}
-
 			// A previous playback that died without cleaning up would otherwise leave its keyframes
 			// to be mistaken for this one's.
 			RemoveKeyframeFiles();
 			State.StoreReady = EnsureKeyframeDirectory();
+			if (State.StoreReady) ImportRecordedCheckpoints();
 		}
 
 		void OnPlaybackStopped()
 		{
+			RecordedCheckpoints.clear();
+			RecordingSimulationInProgress = false;
 			if (State.StoreReady)
 				RemoveKeyframeFiles();
 
@@ -565,8 +691,8 @@ namespace ReplaySystem
 			if (State.Keyframes.empty())
 				return static_cast<int>(Unsorted::CurrentFrame);
 
-			return std::min_element(State.Keyframes.begin(), State.Keyframes.end(),
-				[](const Keyframe& lhs, const Keyframe& rhs) { return lhs.Frame < rhs.Frame; })->Frame;
+			return std::min(CurrentFrame(), std::min_element(State.Keyframes.begin(), State.Keyframes.end(),
+				[](const Keyframe& lhs, const Keyframe& rhs) { return lhs.Frame < rhs.Frame; })->Frame);
 		}
 
 		int CollectKeyframeFrames(int* outFrames, int maxFrames)

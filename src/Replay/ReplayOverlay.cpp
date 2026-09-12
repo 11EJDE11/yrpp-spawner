@@ -559,7 +559,7 @@ namespace ReplaySystem
 			FillRectTranslucent(layout.Panel, PanelFill(), 78);
 			DrawRect(layout.Panel, ColorPanelEdge());
 
-			const bool canRewind = Seek::KeyframeInterval() > 0;
+			const bool canRewind = Seek::EarliestSeekableFrame() < Seek::CurrentFrame();
 			for (int i = 0; i < ButtonCount; ++i)
 			{
 				const bool needsRewind = (i == Button_JumpStart || i == Button_StepBack);

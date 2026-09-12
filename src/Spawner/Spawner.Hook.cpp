@@ -19,6 +19,7 @@
 
 #include "Spawner.h"
 #include "NetHack.h"
+#include <Replay/ReplaySeek.h>
 #include <Replay/ReplaySystem.h>
 
 #include <HouseClass.h>
@@ -216,6 +217,7 @@ DEFINE_HOOK(0x48CE8A, SomeFunc_InterceptMainLoop, 0x5)
 	 *  Main loop.
 	 */
 	Game::MainLoop();
+	ReplaySystem::Seek::SetRecordingSimulationInProgress(false);
 
 	/**
 	 *  After loop.

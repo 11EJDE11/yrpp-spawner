@@ -30,6 +30,7 @@ namespace Replay
 {
 	constexpr uint32_t ReplayMagic = 0x50525259u; // 'YRRP'
 	constexpr uint32_t ReplayVersion = 1;
+	constexpr uint32_t MaxCheckpointArchiveBytes = 32u * 1024u * 1024u;
 	constexpr int MaxGameSpeedIndex = 6;
 
 	enum ReplayHeaderFlags : uint32_t
@@ -124,7 +125,10 @@ namespace Replay
 		uint64_t RecordedUnixTime;
 		uint32_t TotalFrames;
 		uint32_t Flags;
-		uint32_t Reserved[16];
+		// Absolute file offset and size of the checkpoint archive after the frame stream. Both stay
+		// zero when the recording captured no saves or never finalized.
+		uint64_t CheckpointArchiveOffset;
+		uint32_t CheckpointArchiveSize;
 	};
 
 	// The randomiser's two table cursors. Enough to tell a drifted randomiser from a drifted
@@ -150,7 +154,7 @@ namespace Replay
 
 #pragma pack(pop)
 
-	static_assert(sizeof(ReplayHeader) == 1124, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(sizeof(ReplayHeader) == 1072, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameObjectCensus) == 8, "FrameObjectCensus layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameRandomState) == 8, "FrameRandomState layout changed; update docs/replay-format.md");
@@ -165,7 +169,8 @@ namespace Replay
 	static_assert(offsetof(ReplayHeader, RecordedUnixTime) == 1044, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(offsetof(ReplayHeader, TotalFrames) == 1052, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 	static_assert(offsetof(ReplayHeader, Flags) == 1056, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, Reserved) == 1060, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, CheckpointArchiveOffset) == 1060, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, CheckpointArchiveSize) == 1068, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
 
 	static_assert(offsetof(FrameRecordHeader, FrameNumber) == 0, "FrameRecordHeader layout changed; update docs/replay-format.md");
 	static_assert(offsetof(FrameRecordHeader, EventCountThisFrame) == 4, "FrameRecordHeader layout changed; update docs/replay-format.md");
