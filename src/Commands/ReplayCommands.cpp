@@ -219,6 +219,25 @@ namespace Commands
 
 			virtual void Execute(WWKey) const override { ReplaySystem::Controls::ToggleRecordedSelection(); }
 		};
+
+		class ReplayTakeOverCommandClass : public CommandClass
+		{
+		public:
+			virtual const char* GetName() const override { return "ReplayTakeOver"; }
+
+			virtual const wchar_t* GetUIName() const override
+				{ return StringTable::TryFetchString("TXT_REPLAY_TAKE_OVER", L"Replay: Take Over"); }
+
+			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
+
+			virtual const wchar_t* GetUIDescription() const override
+			{
+				return StringTable::TryFetchString("TXT_REPLAY_TAKE_OVER_DESC",
+					L"Ends playback and gives you control of the player you are watching, from this moment on.");
+			}
+
+			virtual void Execute(WWKey) const override { ReplaySystem::RequestTakeOver(); }
+		};
 	}
 
 	void RegisterReplayCommands()
@@ -232,5 +251,6 @@ namespace Commands
 		MakeCommand<ReplayToggleControlBarCommandClass>();
 		MakeCommand<ReplayToggleViewportLockCommandClass>();
 		MakeCommand<ReplayToggleSelectionCommandClass>();
+		MakeCommand<ReplayTakeOverCommandClass>();
 	}
 }

@@ -51,6 +51,12 @@ namespace ReplaySystem
 			bool Playback = false;
 			bool InitRandomHandled = false;
 			bool RecordingFinishedForSession = false;
+			// Set by the take over command and acted on at the next frame start, so the frame that
+			// was running when the key was pressed finishes as playback.
+			bool TakeOverPending = false;
+			// Latched for the rest of the launch once the viewer has taken over: a scenario started
+			// after that, such as a saved game loaded from the menu, must not reopen the replay.
+			bool TakenOver = false;
 
 			bool ShroudEnabled = false;
 			bool LockViewport = true;
@@ -131,6 +137,8 @@ namespace ReplaySystem
 		void RecordCapturedEventsForCurrentFrame();
 		void RemoveReplayGameplayEventsFromDoList();
 		void PlaybackFrameEvents();
+		// Hands control to the viewer if the take over command asked for it. Runs at frame start.
+		void ServiceTakeOver();
 
 		bool PlaybackWantsFullMapReveal();
 	}

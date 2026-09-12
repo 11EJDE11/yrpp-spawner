@@ -207,7 +207,8 @@ the process exits back to the client. `StopReplaySystem` still runs on the way o
 divergence summary is still logged.
 
 The gate is the `ReplayFile` key rather than `ReplayState.Playback`: a session launched to watch a
-replay must not chain into another scenario even if playback itself stopped early on a read error.
+replay must not chain into another scenario even if playback itself stopped early on a read error,
+or was taken over (see *Taking over*).
 
 ## Frame records
 
@@ -807,6 +808,9 @@ and nothing breaks:
 | `TXT_REPLAY_VIEWPORT_LOCK_DESC` | Toggles following the viewport recorded in the replay. |
 | `TXT_REPLAY_SELECTION` | Replay: Follow/Free Unit Selection |
 | `TXT_REPLAY_SELECTION_DESC` | Toggles reproducing the unit selection recorded in the replay. |
+| `TXT_REPLAY_TAKE_OVER` | Replay: Take Over |
+| `TXT_REPLAY_TAKE_OVER_DESC` | Ends playback and gives you control of the player you are watching, from this moment on. |
+| `TXT_REPLAY_TAKEN_OVER` | You have taken over. Replay playback has ended. |
 | `TXT_REPLAY_DIAGNOSTICS` | Replay: Enable/Disable Diagnostics |
 | `TXT_REPLAY_DIAGNOSTICS_DESC` | Toggles expensive divergence diagnostics and starts a fresh capture window when enabled. |
 
@@ -910,6 +914,58 @@ at all.
 Everything ahead of those three still runs — input, keyboard commands, rendering, arrow-key and edge
 scrolling, the message list — and `Sync_Delay` still paces the loop, so a paused replay does not spin
 the CPU.
+
+## Taking over
+
+`ReplayTakeOver` hands the viewer the house on screen and ends playback: from the next frame the
+game is an ordinary one, driven by the viewer's own input, at the game speed the recording had
+reached. What is handed over is the simulation on screen, not the recorded one, so a replay that
+has diverged from its recording can still be taken over.
+
+The command only asks. `ServiceTakeOver` acts from the `Main_Loop` frame-start hook (0x55D878),
+after the seek has had its turn and before `RestoreFrameState` reads the frame's record, so the frame
+that was running when the key was pressed finishes as playback and nothing of the next one comes out
+of the file. That frame's recorded events are not injected: they were the recording player's
+orders, and the viewer is that player now.
+
+It is refused with a notice while a seek is running - asked again at the frame start, since a seek
+can begin in between - when watching as a spectator, from an observer seat, and once the house being
+watched has been defeated. The spectator seat is the recording player's own house made
+`HouseClass::Observer` and hidden from the simulation only while each frame runs (see *Watching as a
+spectator*); undoing that would mean rebuilding the sidebar, so the viewer switches to a player's
+view instead. Watching from another player (`ReplayViewPlayer`) takes over that player.
+
+What it does, in order:
+
+1. Removes the viewer's own unrun gameplay orders from `EventClass::OutList` and `DoList`. Playback
+   strips them on their frame, but one issued for a later frame would otherwise run the moment
+   control passes. Timing events and the local `Options`, `Exit` and `SaveGame` events stay.
+2. `StopReplaySystem`: the stream is closed, the keyframes deleted, and pacing, pause and the control
+   bar reset. Every hook gated on `ReplayState.Playback` goes back to vanilla - the viewer's orders
+   reach the `DoList`, selection triggers spring, the move flash shows, the options dialog's speed
+   slider is the game's again, and the map reveal ends.
+3. Latches `ReplayState.TakenOver` for the rest of the launch.
+4. Redraws what the reveal left behind. The radar only redraws a cell when it changes, so all of its
+   pixels are recomputed from the cells (0x657CE0, which `Load_Game` calls after a load), and the map
+   is flagged for a complete redraw, as `Reveal_All_Map` does.
+
+What it leaves alone is what the launch never had. `CreateConnections` was skipped because
+`ReplayFile` is set, so the hooks standing in for the network - the `Main_Loop` pump (0x55D8E3),
+`Queue_AI_Multiplayer`'s wait for other players (0x64806E) and its sync-check timer (0x647866), and
+the load-time wait (0x69AF0F) - are keyed on `ReplayFile` as well, not on playback running. A
+multiplayer recording taken over carries on as a session with no peers: the other human houses stop
+receiving orders and stand idle. `FrameSendRate` and `MaxAhead` stay pinned to 1, so the viewer's
+orders run on the next frame.
+
+The rest of the launch still belongs to a replay:
+
+- `stats.dmp` is not written - `IsStatisticsEnabled` checks `ReplayFile` - so a game taken over
+  cannot overwrite the last real game's statistics.
+- A campaign mission still ends the game after its score screen (see *Playback ends when the
+  mission does*).
+- A scenario started after the take over, such as a saved game loaded from the in-game menu, goes
+  through `Clear_Scenario` (0x685659) from `Decode_All_Pointers` and does not reopen the replay.
+
 
 ## Showing the whole map
 
