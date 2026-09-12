@@ -20,12 +20,14 @@ without the magic number - would look to the player like the update had deleted 
 ## Layout
 
 ```
-[ReplayHeader]        HeaderSize bytes (1124 today), #pragma pack(1)
+[ReplayHeader]        HeaderSize bytes (1072 today), #pragma pack(1)
 [spawn.ini]           SpawnIniSize bytes, verbatim text
 [spawnmap.ini]        SpawnMapSize bytes, verbatim text
---- everything past this point is one raw deflate stream ---
+--- start of the raw deflate frame stream ---
 [frame records]       repeated, one per simulated frame, monotonic
 [end-of-stream]       FrameRecordHeader with FrameNumber == -1
+--- end of the raw deflate frame stream ---
+[checkpoint archive] optional; independent compressed saves and sidecars
 ```
 
 The header and the two embedded INIs are never compressed, so a reader can pull them out with a
@@ -47,13 +49,13 @@ nothing until then.
 
 | Want to add | Use | Version |
 |---|---|---|
-| A header field | `Reserved`, or append and grow `HeaderSize` | stays |
+| A header field | append and grow `HeaderSize` | stays |
 | Per-frame data | an `Extensions` block | stays |
 | Anything that changes the meaning or position of an existing field | — | bump |
 
 An **additive** change keeps `Version` at 1. Older readers skip what they do not recognize:
-`Reserved` words they do not know, header bytes past their own `sizeof`, and the length-prefixed
-extension block. They keep playing the file.
+header bytes past their own `sizeof` and the length-prefixed extension block. They keep playing
+the file.
 
 After a public release, an **incompatible** change would bump `ReplayVersion`. The client rejects unsupported versions
 before launching playback; the spawner does not check version compatibility.
@@ -85,7 +87,8 @@ the two questions are answered separately and independently.
 | 1044 | 8 | `RecordedUnixTime` | `time()` at recording start |
 | 1052 | 4 | `TotalFrames` | last frame that carried a record |
 | 1056 | 4 | `Flags` | bit 0 = `CleanShutdown`; see below |
-| 1060 | 64 | `Reserved[16]` | zeroed on write; space for header fields added without moving anything. A reader that meets a value it does not understand here ignores it — that is what makes claiming one additive |
+| 1060 | 8 | `CheckpointArchiveOffset` | absolute offset of the [checkpoint archive](#optional-checkpoint-archive); 0 when there is none |
+| 1068 | 4 | `CheckpointArchiveSize` | archive bytes, running to EOF; 0 when there is none |
 
 The map name and the game client version are deliberately not header fields: the client already
 writes both into the embedded spawn.ini (`UIMapName`, `GameClientVersion`) and reads them back from
@@ -110,7 +113,7 @@ before seeking. Version compatibility belongs to the client; there is no checksu
 `ClassifyReplayHeader` retains distinct errors for unreadable input, a non-replay file, and malformed
 headers. Playback failure is fatal because `StartScenario` has already skipped `CreateConnections`.
 
-`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1124`, `sizeof(FrameRecordHeader) == 12`
+`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1072`, `sizeof(FrameRecordHeader) == 12`
 and `sizeof(SideChannelRecord) == 329`, **and** the individual `offsetof` of every header field the
 client hardcodes. Size alone does not pin a layout: swapping two fields of the same width, or
 shortening one array while lengthening another, leaves `sizeof` untouched and mis-parses everything
@@ -419,7 +422,7 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayPlaybackSpeed` | `0` | Playback frame rate in FPS. `0` uses the recorded speed. |
 | `ReplayViewPlayer` | `-1` | Which player's screen to watch the recording from. See below. |
 | `ReplayControlBar` | `false` | Draw the on-screen playback controls during playback. Toggled with a hotkey; no client UI sets this. See below. |
-| `ReplayKeyframeInterval` | `750` | Frames between playback keyframes. `0` disables rewind keyframes. |
+| `ReplayKeyframeInterval` | `750` | Frames between playback-generated keyframes. `0` still permits embedded checkpoints. |
 | `ReplayKeyframeStorageLimitMB` | `512` | Maximum temporary keyframe storage in MB. `0` disables the limit. |
 
 Playback speed is deliberately kept out of `OptionsClass Options.GameSpeed` (0xA8EB60): simulation
@@ -436,12 +439,102 @@ the events up to N. Seeking forward is therefore just running the simulation wit
 but seeking backwards needs an earlier state to restart from, and there is no way to run a frame
 in reverse.
 
-Those states are **not** in the replay file - they would dwarf the events many times over, and the
-file is meant to be small enough to hand around. Instead playback drops one every
-`ReplayKeyframeInterval` frames as it watches, using the engine's own savegame format
-(`ScenarioClass::SaveGame` 0x67CEF0). That only makes the part of the replay already watched cheap
-to rewind into, which is the part a viewer wants to rewind into. Nothing about the `.yrrp` layout
-changes, and a replay recorded by a build without any of this plays back identically.
+Recordings can embed up to four checkpoints from successful saves that already happen during
+play. Recording never calls `SaveGame` to obtain them. Each checkpoint pairs the existing save
+with a serialized simulation sidecar, and playback imports them before its first frame so the
+seek bar can offer forward jumps immediately. Playback also creates temporary checkpoints every
+`ReplayKeyframeInterval` frames using `ScenarioClass::SaveGame` (0x67CEF0). Setting the interval
+to zero disables those periodic saves while leaving embedded checkpoints available.
+
+Recorded checkpoints are independently compressed with miniz raw deflate (128 dictionary probes,
+equivalent to level 6) and retained in memory until the replay is finalized. The count limit is
+four and the combined compressed payload budget is 16 MiB. Retention keeps the first and latest
+saves and removes the interior save with the smallest surrounding frame gap. If even the first
+and latest exceed the byte budget, the latest takes priority. Repeated saves at the same frame
+are ignored, as are saves beyond the final recorded frame. A process crash before finalization
+loses these optional checkpoints; already-flushed event frames keep their existing recovery behavior.
+
+The save hook at `0x67D2F1` sits on `Save_Game`'s success epilogue, after `IStorage::Release`. It
+reads the UTF-16 filename at `ESP + 0x2C` (after `SaveGame_SGInSubdir` has prefixed
+`SavedGameDir`) and checks `BL` for the `Put_All` result before capturing. The existing
+`0x55DC99` hook, just ahead of `LogicClass::AI`, marks the start of the simulation update;
+returning from `Game::MainLoop` clears the mark before `After_Main_Loop` runs spawner saves.
+Saves made during the update (for example by a trigger) are excluded because they cannot resume
+at a frame boundary. Everything else is eligible: saves from the in-game menu (`Special_Dialog`,
+which `Main_Game` calls between `Main_Loop` iterations), keyboard quicksaves (`Keyboard_Process`
+runs before the logic tick), the campaign's first-frame save at `0x55DC92`, and spawner autosaves.
+Multiplayer save events only set `Spawner::DoSave` mid-frame; the save itself runs in
+`After_Main_Loop()`.
+
+The four supplied `.SAV` samples measured with the vendored miniz were:
+
+| Save | Original bytes | Deflated bytes | Remaining |
+| --- | ---: | ---: | ---: |
+| SAVE2CD6.SAV | 1,559,809 | 931,486 | 59.7% |
+| SAVE5F90.SAV | 1,726,544 | 1,055,052 | 61.1% |
+| SAVE6952.SAV | 1,694,217 | 1,027,926 | 60.7% |
+| SAVE72AE.SAV | 1,728,756 | 1,053,256 | 60.9% |
+
+That is about 3.88 MiB for four compressed saves, before their sidecars, so the conservative
+four-checkpoint limit is used. Compression took about 98-108 ms per sample on the test machine.
+
+### What must run before a checkpoint can resume
+
+The game still performs normal scenario initialization when playback opens. It does not need to
+simulate the preceding frames: `CaptureAfterSave()` samples the live state once when the save
+completes, and the recording embeds that entire sidecar. None of the snapshot capture helpers
+accumulates a playback history. Object references are resolved against the loaded save's IDs.
+
+Seeking scans and decompresses preceding replay records without executing their gameplay events.
+That rebuilds the last recorded camera position, selection IDs, and game speed. The snapshot
+restores simulation state, including RNG, timers, object order, planning routes, map state, and
+Ares particles. Beacons and their text are also captured in the sidecar and restored directly,
+without placement sounds or network messages. Chat and taunts from skipped frames are not played.
+CRC comparison counters describe only the frames actually simulated; they are diagnostics, not
+inputs to resuming simulation.
+
+Checkpoint import runs after the replay file has opened. A fresh playback can therefore import
+and use saved points without first creating any playback checkpoints. In-game CRC validation is
+still needed to verify the engine's reconstructed state across real matches and supported mods.
+
+### Optional checkpoint archive
+
+The header's `CheckpointArchiveOffset` is the absolute offset just past the finished frame deflate
+stream, and `CheckpointArchiveSize` is the archive's length; the archive runs to EOF. Both are
+stamped only after the entire archive has been appended, and stay zero when no saves were captured
+or recording was interrupted before finalization. There is one checkpoint format, with no legacy
+format detection or per-block version tags. The client does not read either field.
+
+All archive integers are little-endian. The archive begins with `uint32 checkpointCount`.
+Each entry contains, in order:
+
+| Field | Encoding |
+| --- | --- |
+| Frame | `int32`, strictly increasing, at most the final recorded frame |
+| Uncompressed payload size | `uint32`, at most 32 MiB |
+| Payload CRC-32 | `uint32`, over the uncompressed payload |
+| Compressed payload | `uint32 byteCount` followed by that many raw-deflate bytes |
+
+The uncompressed payload contains `uint32 saveBytes`, the save bytes, `uint32 sidecarBytes`,
+and the sidecar bytes. The sidecar field order is
+specified by the explicit visitors in `ReplayKeyframeState.Serialization.cpp`. Vectors have
+32-bit element counts; fixed arrays omit counts. Scalars use their game ABI widths, including
+one-byte checked bools. Existing fixed byte blobs (RNG, event packets, locomotor state, Ares
+particle records) retain their game ABI layout. STL objects and live object pointers are never
+serialized; object references remain IDs or the existing normalized type indices.
+
+Invalid bounds, truncated data, and checksum failures are
+ignored without disabling ordinary event playback. The archive and each inflated payload are
+bounded to 32 MiB; sidecar decoding also bounds aggregate vector allocations. Imported saves
+use generated filenames under `Replay Keyframes`, not filenames supplied by the replay. They
+share playback's temporary storage limit and cleanup. CRC checks detect corruption; they do not
+make arbitrary engine savegames safe to load.
+
+Run `scripts\test_replay_checkpoints.bat` for standalone serialization, compression, retention,
+recordings without saves, corrupt-input, buffered-read, and rewind tests. In-game validation
+should record normal saves, restart playback, seek to checkpoints and between them before
+watching those frames, and check the replay CRC log for divergence. Repeat with
+`ReplayKeyframeInterval=0` to exercise embedded checkpoints alone.
 
 A seek runs in two halves, in `src/Replay/ReplaySeek.cpp`:
 
@@ -457,6 +550,7 @@ A seek runs in two halves, in `src/Replay/ReplaySeek.cpp`:
 The temporary savegame's in-memory sidecar is owned by
 `ReplaySystem::KeyframeState::Snapshot`. Its implementation is split into
 `ReplayKeyframeState.cpp` for capture/restore coordination and collection order,
+`.Serialization.cpp` for on-disk sidecars,
 and `.Objects.cpp`, `.Map.cpp`, `.Planning.cpp`, and `.AresParticles.cpp` for the
 individual state repairs. Snapshot data definitions stay in
 `ReplayKeyframeState.Internal.h`; the seek controller only includes the public header.

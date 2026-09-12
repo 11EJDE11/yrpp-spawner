@@ -25,7 +25,12 @@ namespace ReplaySystem
 {
 	namespace Seek
 	{
-		// Frames between keyframes. Zero disables rewind keyframes.
+		// Successful existing saves are eligible only outside simulation updates.
+		void SetRecordingSimulationInProgress(bool inProgress);
+		void OnGameSaved(const wchar_t* path);
+		void FinishRecordingCheckpoints();
+
+		// Frames between playback-generated keyframes. Zero still allows embedded checkpoints.
 		int KeyframeInterval();
 
 		// Opens the keyframe store for a replay and drops the frame-zero keyframe. Called once, as

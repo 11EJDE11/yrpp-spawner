@@ -125,7 +125,7 @@ public:
 	int  ReplayViewPlayer;
 	// Show the playback control bar initially.
 	bool ReplayControlBar;
-	// Frames between playback keyframes. Zero disables rewind keyframes.
+	// Frames between playback keyframes. Zero still allows recorded checkpoints.
 	int  ReplayKeyframeInterval;
 	// Maximum keyframe storage in MB. Zero disables the limit.
 	int  ReplayKeyframeStorageLimitMB;

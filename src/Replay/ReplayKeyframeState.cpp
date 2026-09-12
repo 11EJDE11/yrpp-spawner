@@ -23,6 +23,8 @@
 #include <Utilities/Debug.h>
 
 #include <AircraftClass.h>
+#include <BeaconManagerClass.h>
+#include <Memory.h>
 #include <AnimClass.h>
 #include <BuildingClass.h>
 #include <BulletClass.h>
@@ -189,6 +191,21 @@ namespace ReplaySystem::KeyframeState
 			return false;
 
 		auto& snapshot = *this->Data;
+		for (size_t house = 0; house < snapshot.Beacons.size(); ++house)
+			for (size_t slot = 0; slot < snapshot.Beacons[house].size(); ++slot)
+			{
+				auto& saved = snapshot.Beacons[house][slot];
+				saved = {};
+				const auto* beacon = BeaconManagerClass::Instance.Beacons[house][slot];
+				if (!beacon || !beacon->IsAssigned()) continue;
+				saved.Present = true;
+				saved.X = beacon->Coord.X;
+				saved.Y = beacon->Coord.Y;
+				saved.Z = beacon->Coord.Z;
+				std::copy_n(beacon->Text, saved.Text.size(), saved.Text.begin());
+				saved.Text.back() = 0;
+			}
+
 		snapshot.ScenarioUniqueID = ScenarioClass::Instance->UniqueID;
 
 		memcpy(snapshot.Random.data(), &ScenarioClass::Instance->Random, sizeof(Randomizer));
@@ -307,13 +324,32 @@ namespace ReplaySystem::KeyframeState
 		return true;
 	}
 
-	void Snapshot::RestoreAfterResume(int keyframeFrame) const
+	void Snapshot::RestoreAfterResume(int keyframeFrame, bool showBeacons) const
 	{
 		const auto& snapshot = *this->Data;
 		RestoreHouseRepairState(snapshot, keyframeFrame);
 		RestoreLoadResetTimerState(snapshot, keyframeFrame);
 		RestoreSlaveManagerState(snapshot, keyframeFrame);
 		RestoreTechnoInPlayfieldState(snapshot, keyframeFrame);
+
+		// Rebuild directly: PlaceBeacon would replay sounds, help text and network sends.
+		auto& manager = BeaconManagerClass::Instance;
+		manager.Reset();
+		if (showBeacons)
+			for (size_t house = 0; house < snapshot.Beacons.size(); ++house)
+				for (size_t slot = 0; slot < snapshot.Beacons[house].size(); ++slot)
+				{
+					const auto& saved = snapshot.Beacons[house][slot];
+					if (!saved.Present) continue;
+					auto* beacon = GameCreate<BeaconClass>();
+					beacon->Coord = { saved.X, saved.Y, saved.Z };
+					beacon->HouseID = static_cast<int>(house);
+					beacon->Bitfield = static_cast<byte>(BeaconClass::Flag::Assigned);
+					std::copy(saved.Text.begin(), saved.Text.end(), beacon->Text);
+					manager.Beacons[house][slot] = beacon;
+					++manager.AllocatedCount;
+				}
+
 	}
 
 	#undef REPLAY_FOR_EACH_ORDERED_COLLECTION

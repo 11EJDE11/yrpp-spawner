@@ -614,10 +614,14 @@ namespace
 	}
 }
 
-// Holds the logic tick.
+// Holds the logic tick. Also where the simulation update starts: a save made from here until
+// Game::MainLoop returns (a trigger's, say) is not at a frame boundary, so it cannot become a
+// replay checkpoint.
 DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
 {
 	enum { SkipLogicAI = 0x55DCA3 };
+
+	ReplaySystem::Seek::SetRecordingSimulationInProgress(true);
 
 	if (ReplaySystem::Controls::IsPlaybackPaused())
 		return SkipLogicAI;
@@ -674,5 +678,18 @@ DEFINE_HOOK(0x752480, Speak_SilenceDuringSpectatorPlayback, 0x5)
 		return 0x752485;
 	}
 
+	return 0;
+}
+
+// Save_Game's success epilogue, after IStorage has been released; only the success path jumps here.
+// BL holds the Put_All result, and ESP+0x2C is the wide filename it saved to, after
+// SaveGame_SGInSubdir prefixed SavedGameDir.
+DEFINE_HOOK(0x67D2F1, SaveGame_RecordReplayCheckpoint, 0x6)
+{
+	if (ReplayState.Recording && R->BL())
+	{
+		LEA_STACK(const wchar_t*, path, 0x2C);
+		ReplaySystem::Seek::OnGameSaved(path);
+	}
 	return 0;
 }
