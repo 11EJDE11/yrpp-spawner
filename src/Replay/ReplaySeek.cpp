@@ -61,7 +61,7 @@ namespace ReplaySystem
 		{
 			constexpr const char* KeyframeSubdirectory = "Replay Keyframes";
 
-			constexpr int SeekRenderInterval = 60;
+			constexpr int SeekRenderInterval = 240;
 
 			// A backwards seek always has somewhere to land, because playback drops this one as it
 			// starts. Frame 0 is the state before the first frame ran.

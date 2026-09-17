@@ -778,7 +778,7 @@ A seek runs in two halves, in `src/Replay/ReplaySeek.cpp`:
    `LoadOptionsClass::LoadMission` (0x559D60), the engine's own in-game load.
 2. **Run to the target.** Frames go by with the pacing off (`ApplyPlaybackFramePacing` returns
    early), the drawing mostly off (`MainLoop_SkipRenderWhileSeeking` at 0x55D8F2 keeps one frame
-   in 61 so it reads as progress rather than as a hang) and the sound off (`VocAllowed` at
+   in 241 so it reads as progress rather than as a hang) and the sound off (`VocAllowed` at
    0x8464AC, which every `VocClass::Play` path tests, is cleared for the duration).
 
 The temporary savegame's in-memory sidecar is owned by
