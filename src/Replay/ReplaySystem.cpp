@@ -20,6 +20,7 @@
 #include "ReplayControls.h"
 #include "ReplayFile.h"
 #include "ReplayFrameCodec.h"
+#include "ReplayObjects.h"
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplaySideChannels.h"
@@ -105,6 +106,7 @@ namespace ReplaySystem
 			ReplayState.CarriedMoneyIn.clear();
 			SideChannels::Reset();
 			Statistics::Reset();
+			Objects::Reset();
 			ReplayState.CapturedFrameEventsFrame = -1;
 			ReplayState.CapturedFrameEvents.clear();
 			ReplayState.HasPlaybackHeader = false;
@@ -465,7 +467,7 @@ namespace ReplaySystem
 		{
 			while (!ReplayState.PendingFrameStates.empty())
 			{
-				const auto& capture = ReplayState.PendingFrameStates.front();
+				auto& capture = ReplayState.PendingFrameStates.front();
 				const int pendingFrame = capture.FrameNumber;
 				if (pendingFrame > frameNumber)
 					break;
@@ -480,6 +482,8 @@ namespace ReplaySystem
 					return;
 				}
 
+				if (capture.HasObjects)
+					Objects::RecycleBuffers(capture.ObjectsAppeared, capture.ObjectsUpdated, capture.ObjectsGone);
 				ReplayState.PendingFrameStates.pop_front();
 			}
 		}
@@ -725,6 +729,13 @@ namespace ReplaySystem
 					{
 						Statistics::FillHouseStats(capture.HouseStats);
 						capture.HasHouseStats = !capture.HouseStats.empty();
+					}
+
+					// Every object on the map, as changes since the last snapshot. Also only reads.
+					if (frameNumber % ObjectSnapshotIntervalFrames == 0 && !capture.HasObjects)
+					{
+						Objects::FillSnapshot(capture.ObjectsAppeared, capture.ObjectsUpdated, capture.ObjectsGone);
+						capture.HasObjects = true;
 					}
 				}
 				return;

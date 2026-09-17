@@ -55,7 +55,8 @@ namespace Replay
 		FrameRecordFlag_RandomState = 1u << 7,
 		FrameRecordFlag_SelectionTriggers = 1u << 8,
 		FrameRecordFlag_HouseStats = 1u << 9,
-		FrameRecordFlag_MoneyIn = 1u << 10
+		FrameRecordFlag_MoneyIn = 1u << 10,
+		FrameRecordFlag_Objects = 1u << 11
 	};
 
 	constexpr uint32_t KnownFrameRecordFlags = FrameRecordFlag_TacticalPos
@@ -68,7 +69,8 @@ namespace Replay
 		| FrameRecordFlag_RandomState
 		| FrameRecordFlag_SelectionTriggers
 		| FrameRecordFlag_HouseStats
-		| FrameRecordFlag_MoneyIn;
+		| FrameRecordFlag_MoneyIn
+		| FrameRecordFlag_Objects;
 
 	constexpr uint32_t MaxFrameExtensionBytes = 1u << 20;
 	constexpr uint32_t MaxEmbeddedFileBytes = 32u * 1024u * 1024u;
@@ -98,6 +100,41 @@ namespace Replay
 	constexpr uint32_t StatisticsChunk_Modules = MakeChunkTag('M', 'O', 'D', 'S');
 
 	constexpr int32_t MaxMoneyInPerFrame = 1024;
+
+	// Where everything on the map is, for readers outside the game: every ObjectSnapshotIntervalFrames,
+	// the objects that appeared, moved or changed, and the ones that left. Half a second at the fastest
+	// speed; a unit crosses about a cell in that time, so a reader can ease between snapshots.
+	constexpr int ObjectSnapshotIntervalFrames = 30;
+	constexpr int32_t MaxObjectRecordsPerFrame = 16384;
+	// ObjectUpdateRecord::X/Y are leptons / 16: sixteenths of a cell, 0..8191 on the 512-cell grid.
+	constexpr int ObjectPositionShift = 4;
+
+	enum ObjectRecordKind : uint8_t
+	{
+		ObjectRecordKind_Unit = 0,      // UnitClass, ships included
+		ObjectRecordKind_Infantry = 1,
+		ObjectRecordKind_Aircraft = 2,
+		ObjectRecordKind_Building = 3,
+	};
+
+	enum ObjectRecordFlags : uint8_t
+	{
+		ObjectRecordFlag_Veteran = 1u << 0,
+		ObjectRecordFlag_Elite = 1u << 1,
+		// Bit 2 is unused: it was "in the air", which cost a ground-height lookup per object and which
+		// no reader used - Height carries the altitude.
+		ObjectRecordFlag_Cloaked = 1u << 3,
+	};
+
+	enum ObjectGoneReason : uint8_t
+	{
+		// Off the map without being destroyed: sold, deployed, into a transport or building, grinded.
+		ObjectGoneReason_Removed = 0,
+		// Record_The_Kill_Object or Record_The_Kill_House ran for it.
+		ObjectGoneReason_Destroyed = 1,
+	};
+
+	constexpr uint8_t ObjectNoHouse = 0xFF;
 
 	// HouseStatsSample::Flags and StatisticsHouseRecord::Flags.
 	enum HouseStatsFlags : uint32_t
@@ -249,6 +286,50 @@ namespace Replay
 		int32_t Amount;
 	};
 
+	// The Objects block: this header, then AppearCount appear, UpdateCount update and GoneCount gone records.
+	struct ObjectsBlockHeader
+	{
+		uint16_t AppearCount;
+		uint16_t UpdateCount;
+		uint16_t GoneCount;
+		uint16_t Reserved;
+	};
+
+	// An object came onto the map, or its owner or type changed (capture, mind control, deploy).
+	struct ObjectAppearRecord
+	{
+		uint32_t UniqueID;        // AbstractClass::UniqueID, the ID the selection block and events use
+		uint16_t TypeIndex;       // position in the Kind's type array, as in the statistics TYPE chunk
+		uint8_t Kind;             // ObjectRecordKind
+		uint8_t Owner;            // HouseClass::ArrayIndex
+		uint8_t FoundationWidth;  // buildings only; 1 otherwise
+		uint8_t FoundationHeight;
+		uint16_t Reserved;
+	};
+
+	// Where an object is, written only when it moved or its state changed since the last snapshot.
+	struct ObjectUpdateRecord
+	{
+		uint32_t UniqueID;
+		uint16_t X;               // ObjectClass::Location >> ObjectPositionShift
+		uint16_t Y;
+		uint8_t Health;           // 0..255 of the type's Strength
+		uint8_t Mission;          // MissionClass::CurrentMission, 0xFF for none
+		uint8_t Flags;            // ObjectRecordFlags: veteran, elite, cloaked
+		uint8_t Height;           // Location.Z >> ObjectPositionShift, clamped
+	};
+
+	// An object left the map. X/Y are where it was destroyed, or where it was last seen.
+	struct ObjectGoneRecord
+	{
+		uint32_t UniqueID;
+		uint16_t X;
+		uint16_t Y;
+		uint8_t Reason;           // ObjectGoneReason
+		uint8_t KillerHouse;      // the house credited with the kill, or ObjectNoHouse
+		uint16_t Reserved;
+	};
+
 	// The fixed part of one house's end-of-game record in StatisticsChunk_Houses.
 	struct StatisticsHouseRecord
 	{
@@ -311,6 +392,10 @@ namespace Replay
 	static_assert(sizeof(HouseStatsSample) == 84, "HouseStatsSample layout changed; update docs/replay-format.md");
 	static_assert(sizeof(StatisticsHouseRecord) == 282, "StatisticsHouseRecord layout changed; update docs/replay-format.md");
 	static_assert(sizeof(MoneyInRecord) == 12, "MoneyInRecord layout changed; update docs/replay-format.md");
+	static_assert(sizeof(ObjectsBlockHeader) == 8, "ObjectsBlockHeader layout changed; update docs/replay-format.md");
+	static_assert(sizeof(ObjectAppearRecord) == 12, "ObjectAppearRecord layout changed; update docs/replay-format.md");
+	static_assert(sizeof(ObjectUpdateRecord) == 12, "ObjectUpdateRecord layout changed; update docs/replay-format.md");
+	static_assert(sizeof(ObjectGoneRecord) == 12, "ObjectGoneRecord layout changed; update docs/replay-format.md");
 	static_assert(sizeof(StatisticsGameRecord) == 20, "StatisticsGameRecord layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
 	static_assert(sizeof(FrameObjectCensus) == 8, "FrameObjectCensus layout changed; update docs/replay-format.md");

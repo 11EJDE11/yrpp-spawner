@@ -108,6 +108,8 @@ namespace ReplaySystem::Statistics
 			std::vector<int32_t> ArmyValue;
 			std::vector<int32_t> BuildingValue;
 			int OutOfSyncFrame = -1;
+			// House ArrayIndex to its position in Houses, for counting every house's objects in one pass.
+			std::vector<int> SlotOfHouse;
 		};
 
 		StatisticsState State;
@@ -141,16 +143,15 @@ namespace ReplaySystem::Statistics
 				values.pop_back();
 		}
 
-		std::vector<int32_t> TrackerArray(const UnitTrackerClass& tracker, int length)
+		// Refills an array the snapshot already holds, so its storage is reused rather than reallocated.
+		void TrackerInto(std::vector<int32_t>& values, const UnitTrackerClass& tracker, int length)
 		{
-			std::vector<int32_t> values;
 			length = std::clamp(length, 0, TrackerCapacity);
-			values.reserve(static_cast<size_t>(length));
+			values.clear();
 			for (int i = 0; i < length; ++i)
 				values.push_back(TrackerValue(tracker, i));
 
 			TrimTrailingZeros(values);
-			return values;
 		}
 
 		int32_t Sum(const std::vector<int32_t>& values)
@@ -161,30 +162,25 @@ namespace ReplaySystem::Statistics
 			return static_cast<int32_t>(std::clamp<int64_t>(total, 0, INT32_MAX));
 		}
 
-		// How many of each type the house owns right now, the way the packet's "left" arrays count.
-		template <typename TObjectArray>
-		std::vector<int32_t> CountOwned(const TObjectArray& objects, const HouseClass* pHouse, int typeCount)
+		// The same total as Sum(TrackerInto(...)), read straight off the tracker: what the timeline
+		// samples need, without building the arrays.
+		int32_t TrackerSum(const UnitTrackerClass& tracker, int length)
 		{
-			std::vector<int32_t> counts(static_cast<size_t>(std::max(typeCount, 0)), 0);
-			for (int i = 0; i < objects.Count; ++i)
-			{
-				auto* pObject = objects.Items[i];
-				if (!pObject || pObject->Owner != pHouse || !pObject->IsAlive)
-					continue;
-
-				const auto* pType = pObject->GetTechnoType();
-				const int index = pType ? pType->GetArrayIndex() : -1;
-				if (index >= 0 && index < typeCount)
-					++counts[static_cast<size_t>(index)];
-			}
-
-			TrimTrailingZeros(counts);
-			return counts;
+			length = std::clamp(length, 0, TrackerCapacity);
+			int64_t total = 0;
+			for (int i = 0; i < length; ++i)
+				total += TrackerValue(tracker, i);
+			return static_cast<int32_t>(std::clamp<int64_t>(total, 0, INT32_MAX));
 		}
 
-		std::vector<int32_t> CountOwnedBuildings(HouseClass* pHouse, int typeCount)
+		// How many of each type every tracked house owns right now, the way the packet's "left" arrays
+		// count, in one pass over the object array for all houses at once.
+		template <typename TObjectArray>
+		void CountOwnedInto(const TObjectArray& objects, StatisticsHouseArray which, int typeCount);
+
+		void CountOwnedBuildingsInto(std::vector<int32_t>& counts, HouseClass* pHouse, int typeCount)
 		{
-			std::vector<int32_t> counts(static_cast<size_t>(std::max(typeCount, 0)), 0);
+			counts.assign(static_cast<size_t>(std::max(typeCount, 0)), 0);
 			for (auto* pBuilding : pHouse->Buildings)
 			{
 				const auto* pType = pBuilding ? pBuilding->Type : nullptr;
@@ -194,7 +190,6 @@ namespace ReplaySystem::Statistics
 			}
 
 			TrimTrailingZeros(counts);
-			return counts;
 		}
 
 		uint32_t HouseFlags(HouseClass* pHouse)
@@ -329,6 +324,37 @@ namespace ReplaySystem::Statistics
 			a[StatisticsHouseArray_LostBuildings] = counters.Lost[Lost_Buildings];
 		}
 
+		template <typename TObjectArray>
+		void CountOwnedInto(const TObjectArray& objects, StatisticsHouseArray which, int typeCount)
+		{
+			for (auto& snapshot : State.Houses)
+				snapshot.Arrays[which].assign(static_cast<size_t>(std::max(typeCount, 0)), 0);
+
+			for (int i = 0; i < objects.Count; ++i)
+			{
+				auto* pObject = objects.Items[i];
+				if (!pObject || !pObject->IsAlive || !pObject->Owner)
+					continue;
+
+				const int house = pObject->Owner->ArrayIndex;
+				if (house < 0 || static_cast<size_t>(house) >= State.SlotOfHouse.size())
+					continue;
+				const int slot = State.SlotOfHouse[static_cast<size_t>(house)];
+				if (slot < 0)
+					continue;
+
+				const auto* pType = pObject->GetTechnoType();
+				const int index = pType ? pType->GetArrayIndex() : -1;
+				if (index >= 0 && index < typeCount)
+					++State.Houses[static_cast<size_t>(slot)].Arrays[which][static_cast<size_t>(index)];
+			}
+
+			for (auto& snapshot : State.Houses)
+				TrimTrailingZeros(snapshot.Arrays[which]);
+		}
+
+		// The full end-of-game snapshot. The houses' arrays are kept from one refresh to the next and
+		// refilled in place, and each mobile object array is walked once for every house together.
 		void RefreshSnapshot()
 		{
 			if (State.Frozen)
@@ -338,40 +364,48 @@ namespace ReplaySystem::Statistics
 			const int infantryTypes = InfantryTypeClass::Array.Count;
 			const int unitTypes = UnitTypeClass::Array.Count;
 			const int buildingTypes = BuildingTypeClass::Array.Count;
+			const int houseCount = std::max(HouseClass::Array.Count, 0);
 
-			State.Houses.clear();
-			for (int i = 0; i < HouseClass::Array.Count; ++i)
+			State.SlotOfHouse.assign(static_cast<size_t>(houseCount), -1);
+			size_t used = 0;
+			for (int i = 0; i < houseCount; ++i)
 			{
 				HouseClass* pHouse = HouseClass::Array.Items[i];
 				if (!IsTrackedHouse(pHouse))
 					continue;
 
-				HouseSnapshot snapshot;
+				if (used == State.Houses.size())
+					State.Houses.emplace_back();
+				HouseSnapshot& snapshot = State.Houses[used];
+				if (pHouse->ArrayIndex >= 0 && pHouse->ArrayIndex < houseCount)
+					State.SlotOfHouse[static_cast<size_t>(pHouse->ArrayIndex)] = static_cast<int>(used);
+				++used;
+
 				FillRecord(pHouse, snapshot.Record);
 
 				auto& a = snapshot.Arrays;
-				a[StatisticsHouseArray_BuiltAircraft] = TrackerArray(pHouse->BuiltAircraftTypes, aircraftTypes);
-				a[StatisticsHouseArray_BuiltInfantry] = TrackerArray(pHouse->BuiltInfantryTypes, infantryTypes);
-				a[StatisticsHouseArray_BuiltUnits] = TrackerArray(pHouse->BuiltUnitTypes, unitTypes);
-				a[StatisticsHouseArray_BuiltBuildings] = TrackerArray(pHouse->BuiltBuildingTypes, buildingTypes);
-				a[StatisticsHouseArray_KilledAircraft] = TrackerArray(pHouse->KilledAircraftTypes, aircraftTypes);
-				a[StatisticsHouseArray_KilledInfantry] = TrackerArray(pHouse->KilledInfantryTypes, infantryTypes);
-				a[StatisticsHouseArray_KilledUnits] = TrackerArray(pHouse->KilledUnitTypes, unitTypes);
-				a[StatisticsHouseArray_KilledBuildings] = TrackerArray(pHouse->KilledBuildingTypes, buildingTypes);
-				a[StatisticsHouseArray_CapturedBuildings] = TrackerArray(pHouse->CapturedBuildings, buildingTypes);
-				a[StatisticsHouseArray_CollectedCrates] = TrackerArray(pHouse->CollectedCrates, TrackerCapacity);
-				a[StatisticsHouseArray_LeftAircraft] = CountOwned(AircraftClass::Array, pHouse, aircraftTypes);
-				a[StatisticsHouseArray_LeftInfantry] = CountOwned(InfantryClass::Array, pHouse, infantryTypes);
-				a[StatisticsHouseArray_LeftUnits] = CountOwned(UnitClass::Array, pHouse, unitTypes);
-				a[StatisticsHouseArray_LeftBuildings] = CountOwnedBuildings(pHouse, buildingTypes);
+				TrackerInto(a[StatisticsHouseArray_BuiltAircraft], pHouse->BuiltAircraftTypes, aircraftTypes);
+				TrackerInto(a[StatisticsHouseArray_BuiltInfantry], pHouse->BuiltInfantryTypes, infantryTypes);
+				TrackerInto(a[StatisticsHouseArray_BuiltUnits], pHouse->BuiltUnitTypes, unitTypes);
+				TrackerInto(a[StatisticsHouseArray_BuiltBuildings], pHouse->BuiltBuildingTypes, buildingTypes);
+				TrackerInto(a[StatisticsHouseArray_KilledAircraft], pHouse->KilledAircraftTypes, aircraftTypes);
+				TrackerInto(a[StatisticsHouseArray_KilledInfantry], pHouse->KilledInfantryTypes, infantryTypes);
+				TrackerInto(a[StatisticsHouseArray_KilledUnits], pHouse->KilledUnitTypes, unitTypes);
+				TrackerInto(a[StatisticsHouseArray_KilledBuildings], pHouse->KilledBuildingTypes, buildingTypes);
+				TrackerInto(a[StatisticsHouseArray_CapturedBuildings], pHouse->CapturedBuildings, buildingTypes);
+				TrackerInto(a[StatisticsHouseArray_CollectedCrates], pHouse->CollectedCrates, TrackerCapacity);
+				CountOwnedBuildingsInto(a[StatisticsHouseArray_LeftBuildings], pHouse, buildingTypes);
 
 				snapshot.UnitsBuilt = Sum(a[StatisticsHouseArray_BuiltAircraft])
 					+ Sum(a[StatisticsHouseArray_BuiltInfantry])
 					+ Sum(a[StatisticsHouseArray_BuiltUnits]);
 				snapshot.BuildingsBuilt = Sum(a[StatisticsHouseArray_BuiltBuildings]);
-
-				State.Houses.push_back(std::move(snapshot));
 			}
+			State.Houses.resize(used);
+
+			CountOwnedInto(AircraftClass::Array, StatisticsHouseArray_LeftAircraft, aircraftTypes);
+			CountOwnedInto(InfantryClass::Array, StatisticsHouseArray_LeftInfantry, infantryTypes);
+			CountOwnedInto(UnitClass::Array, StatisticsHouseArray_LeftUnits, unitTypes);
 		}
 
 		const HouseSnapshot* FindSnapshot(int houseIndex)
@@ -529,7 +563,11 @@ namespace ReplaySystem::Statistics
 			CaptureTypes();
 
 		ComputeValues();
-		RefreshSnapshot();
+
+		const int aircraftTypes = AircraftTypeClass::Array.Count;
+		const int infantryTypes = InfantryTypeClass::Array.Count;
+		const int unitTypes = UnitTypeClass::Array.Count;
+		const int buildingTypes = BuildingTypeClass::Array.Count;
 
 		for (int i = 0; i < HouseClass::Array.Count; ++i)
 		{
@@ -565,10 +603,22 @@ namespace ReplaySystem::Statistics
 			}
 			sample.UnitsLost = pHouse->TotalKilledUnits;
 			sample.BuildingsLost = pHouse->TotalKilledBuildings;
-			if (const auto* pSnapshot = FindSnapshot(house))
+			// Once Send_Statistics_Packet has started the trackers hold what is left, not what was built,
+			// so from then on the frozen snapshot is the answer; until then, the trackers themselves.
+			if (State.Frozen)
 			{
-				sample.UnitsBuilt = pSnapshot->UnitsBuilt;
-				sample.BuildingsBuilt = pSnapshot->BuildingsBuilt;
+				if (const auto* pSnapshot = FindSnapshot(house))
+				{
+					sample.UnitsBuilt = pSnapshot->UnitsBuilt;
+					sample.BuildingsBuilt = pSnapshot->BuildingsBuilt;
+				}
+			}
+			else
+			{
+				sample.UnitsBuilt = TrackerSum(pHouse->BuiltAircraftTypes, aircraftTypes)
+					+ TrackerSum(pHouse->BuiltInfantryTypes, infantryTypes)
+					+ TrackerSum(pHouse->BuiltUnitTypes, unitTypes);
+				sample.BuildingsBuilt = TrackerSum(pHouse->BuiltBuildingTypes, buildingTypes);
 			}
 			sample.Score = pHouse->PointTotal;
 			sample.Flags = HouseFlags(pHouse);
@@ -577,10 +627,16 @@ namespace ReplaySystem::Statistics
 		}
 	}
 
+	void OnScenarioClearing()
+	{
+		RefreshSnapshot();
+	}
+
 	void WriteSection(File& file)
 	{
-		// The houses are still alive on every path that closes a recording; the check guards a
-		// scenario that has already been torn down, which leaves the last sample's snapshot.
+		// The houses are still alive on every path that closes a recording (docs/replay-format.md,
+		// "When the end-of-game snapshot is taken"). Should one ever close after Clear_Scenario has
+		// deleted them, OnScenarioClearing took the snapshot on the way in, and that one stands.
 		if (HouseClass::Array.Count > 0)
 			RefreshSnapshot();
 

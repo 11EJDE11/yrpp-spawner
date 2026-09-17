@@ -65,6 +65,11 @@ namespace Replay
 		bool HasHouseStats = false;
 		// Refund_Money payments made during the frame, summed per house and caller.
 		std::vector<MoneyInRecord> MoneyIn;
+		// Every ObjectSnapshotIntervalFrames, taken with HouseStats: what changed on the map.
+		std::vector<ObjectAppearRecord> ObjectsAppeared;
+		std::vector<ObjectUpdateRecord> ObjectsUpdated;
+		std::vector<ObjectGoneRecord> ObjectsGone;
+		bool HasObjects = false;
 	};
 
 	// Tracks the last serialized values so unchanged viewer state can be omitted.

@@ -24,6 +24,7 @@
 #include "ReplayFile.h"
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
+#include "ReplayStatistics.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
 
@@ -369,6 +370,17 @@ DEFINE_HOOK(0x6C6F50, SendStatisticsPacket_ReplayFinalSnapshot, 0x5)
 	return 0;
 }
 
+// Clear_Scenario deletes every house. Its callers - Read_Scenario_INI for a new game, the random map
+// generator and savegame loading - normally run with no recording open, since Select_Game's reset
+// closes it first; this keeps a recording that is still open from losing its end-of-game record.
+// The stolen bytes are mov eax, [Scen]: an absolute load, position independent.
+DEFINE_HOOK(0x6851F0, ClearScenario_ReplayFinalSnapshot, 0x5)
+{
+	if (ReplaySystem::IsRecordingActive())
+		ReplaySystem::Statistics::OnScenarioClearing();
+	return 0;
+}
+
 // HouseClass::Refund_Money is the one function every kind of income reaches the balance through,
 // so the call site it will return to says where the money came from. The stolen bytes are
 // mov eax, [esp+4] and mov edx, [ecx+30Ch], both position independent; nothing here writes.
@@ -383,18 +395,24 @@ DEFINE_HOOK(0x4F9950, HouseClass_RefundMoney_ReplayIncome, 0xA)
 }
 
 // Both functions that count HouseClass's units/buildings-lost totals. They open with
-// push ecx; push ebp; push esi; mov esi, ecx; push edi - position independent.
+// push ecx; push ebp; push esi; mov esi, ecx; push edi - position independent. Both are __thiscall
+// with one argument, the killer: an ObjectClass for Record_The_Kill_Object, whose owner the function
+// itself credits, and a HouseClass for Record_The_Kill_House. Either can be null.
 DEFINE_HOOK(0x702D40, TechnoClass_RecordTheKillObject_ReplayLosses, 0x6)
 {
 	GET(TechnoClass*, pTechno, ECX);
+	GET_STACK(ObjectClass*, pSource, 0x4);
 	ReplaySystem::RecordObjectLost(pTechno, true);
+	ReplaySystem::RecordObjectDestroyed(pTechno, pSource ? pSource->GetOwningHouse() : nullptr);
 	return 0;
 }
 
 DEFINE_HOOK(0x703230, TechnoClass_RecordTheKillHouse_ReplayLosses, 0x6)
 {
 	GET(TechnoClass*, pTechno, ECX);
+	GET_STACK(HouseClass*, pSource, 0x4);
 	ReplaySystem::RecordObjectLost(pTechno, false);
+	ReplaySystem::RecordObjectDestroyed(pTechno, pSource);
 	return 0;
 }
 

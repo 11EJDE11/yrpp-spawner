@@ -64,4 +64,6 @@ namespace ReplaySystem
 	// TechnoClass::Record_The_Kill_Object / Record_The_Kill_House: the object is being lost.
 	// The first only counts a loss for a type that scores; the second counts it regardless.
 	void RecordObjectLost(TechnoClass* pTechno, bool scoringTypesOnly);
+	// The same two functions, for the recording's object snapshots: where it died and who is credited.
+	void RecordObjectDestroyed(TechnoClass* pTechno, HouseClass* pKiller);
 }

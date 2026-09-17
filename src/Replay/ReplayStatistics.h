@@ -42,6 +42,10 @@ namespace ReplaySystem::Statistics
 	// Called at the frame's hash site on every frame while recording.
 	void OnFrame(int frame);
 
+	// Called as Clear_Scenario starts while recording: the last moment the houses exist, so the
+	// end-of-game snapshot is taken here in case the recording is only closed after they are gone.
+	void OnScenarioClearing();
+
 	// Appends the statistics section. Call once the frame stream is finished.
 	void WriteSection(Replay::File& file);
 }

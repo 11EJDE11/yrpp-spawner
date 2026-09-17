@@ -71,6 +71,7 @@
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySideChannels.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySideChannels.Hook.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySeek.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Replay\ReplayObjects.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayStatistics.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplaySystem.Hook.cpp" />
@@ -125,6 +126,7 @@
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Internal.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySideChannels.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplaySeek.h" />
+    <ClInclude Include="$(ThisDir)\src\Replay\ReplayObjects.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayStatistics.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayCheckpointCodec.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayRecordedCheckpoint.h" />

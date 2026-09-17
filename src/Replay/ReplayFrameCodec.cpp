@@ -72,9 +72,12 @@ namespace Replay
 		const bool hasSelectionTriggers = !capture.SelectionTriggerObjectIDs.empty();
 		const bool hasHouseStats = capture.HasHouseStats && !capture.HouseStats.empty();
 		const bool hasMoneyIn = !capture.MoneyIn.empty();
+		const bool hasObjects = capture.HasObjects
+			&& (!capture.ObjectsAppeared.empty() || !capture.ObjectsUpdated.empty() || !capture.ObjectsGone.empty());
 
 		if (eventsThisFrame == 0 && !tacticalPosChanged && !selectionChanged && !hasSideChannelEvents
-			&& !hasGameCRC && !capture.HasGameSpeed && !hasSelectionTriggers && !hasHouseStats && !hasMoneyIn)
+			&& !hasGameCRC && !capture.HasGameSpeed && !hasSelectionTriggers && !hasHouseStats && !hasMoneyIn
+			&& !hasObjects)
 		{
 			return true;
 		}
@@ -99,6 +102,8 @@ namespace Replay
 			header.Flags |= FrameRecordFlag_HouseStats;
 		if (hasMoneyIn)
 			header.Flags |= FrameRecordFlag_MoneyIn;
+		if (hasObjects)
+			header.Flags |= FrameRecordFlag_Objects;
 
 		if (!file.Write(&header, sizeof(header)))
 			return false;
@@ -174,6 +179,22 @@ namespace Replay
 			const auto count = static_cast<int32_t>(std::min<size_t>(capture.MoneyIn.size(), MaxMoneyInPerFrame));
 			if (!file.Write(&count, sizeof(count))
 				|| !file.Write(capture.MoneyIn.data(), static_cast<size_t>(count) * sizeof(MoneyInRecord)))
+			{
+				return false;
+			}
+		}
+
+		if (hasObjects)
+		{
+			// The snapshot's producer caps each list at MaxObjectRecordsPerFrame, which fits a uint16.
+			ObjectsBlockHeader objects {};
+			objects.AppearCount = static_cast<uint16_t>(std::min<size_t>(capture.ObjectsAppeared.size(), MaxObjectRecordsPerFrame));
+			objects.UpdateCount = static_cast<uint16_t>(std::min<size_t>(capture.ObjectsUpdated.size(), MaxObjectRecordsPerFrame));
+			objects.GoneCount = static_cast<uint16_t>(std::min<size_t>(capture.ObjectsGone.size(), MaxObjectRecordsPerFrame));
+			if (!file.Write(&objects, sizeof(objects))
+				|| (objects.AppearCount > 0 && !file.Write(capture.ObjectsAppeared.data(), objects.AppearCount * sizeof(ObjectAppearRecord)))
+				|| (objects.UpdateCount > 0 && !file.Write(capture.ObjectsUpdated.data(), objects.UpdateCount * sizeof(ObjectUpdateRecord)))
+				|| (objects.GoneCount > 0 && !file.Write(capture.ObjectsGone.data(), objects.GoneCount * sizeof(ObjectGoneRecord))))
 			{
 				return false;
 			}
@@ -349,6 +370,26 @@ namespace Replay
 				return false;
 
 			if (!SkipBytes(file, static_cast<size_t>(moneyCount) * sizeof(MoneyInRecord)))
+				return false;
+		}
+
+		if ((record.Flags & FrameRecordFlag_Objects) != 0u)
+		{
+			ObjectsBlockHeader objects {};
+			if (!file.Read(&objects, sizeof(objects)))
+				return false;
+
+			if (objects.AppearCount > MaxObjectRecordsPerFrame || objects.UpdateCount > MaxObjectRecordsPerFrame
+				|| objects.GoneCount > MaxObjectRecordsPerFrame
+				|| objects.AppearCount + objects.UpdateCount + objects.GoneCount == 0)
+			{
+				return false;
+			}
+
+			// Positions are for readers outside the game; playback re-simulates them.
+			const size_t records = static_cast<size_t>(objects.AppearCount) + objects.UpdateCount + objects.GoneCount;
+			static_assert(sizeof(ObjectAppearRecord) == sizeof(ObjectUpdateRecord) && sizeof(ObjectUpdateRecord) == sizeof(ObjectGoneRecord));
+			if (!SkipBytes(file, records * sizeof(ObjectUpdateRecord)))
 				return false;
 		}
 

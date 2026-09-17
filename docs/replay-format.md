@@ -251,6 +251,11 @@ Then, in order, whichever blocks the flags select:
   `MoneyInRecord` (12 bytes: `uint8 House`, 3 reserved bytes, `uint32 Caller`, `int32 Amount`): every
   payment through `HouseClass::Refund_Money` this frame, summed per house and caller. After
   HouseStats, before Extensions; playback skips it. See [Income by source](#income-by-source).
+- **Objects** (bit 11, `FrameRecordFlag_Objects`) — an 8-byte `ObjectsBlockHeader` (`uint16`
+  appear, update and gone counts, each 0-16384 and not all zero, then a reserved `uint16`), then that
+  many 12-byte `ObjectAppearRecord`, `ObjectUpdateRecord` and `ObjectGoneRecord`, in that order. Written
+  every `ObjectSnapshotIntervalFrames` (30) frames; after MoneyIn, before Extensions; playback skips it.
+  See [Object snapshots](#object-snapshots).
 - **Extensions** — `uint32 length` (max 1 MiB), then that many opaque bytes. Nothing writes one
   yet; see below.
 - **Events** — `EventCountThisFrame` × `sizeof(EventClass)` (111 bytes, static-asserted in
@@ -563,6 +568,57 @@ Verified in the binary; worth writing down because the names mislead.
   already opened the first for `WriteStatistics`; both now also count while a replay is recording,
   so LAN, skirmish and campaign recordings have them. The trackers are score keeping only -
   `Send_Statistics_Packet` is their one reader - so counting them changes nothing a game does.
+
+## Object snapshots
+
+Nothing in the event stream says where anything is: a `MEGAMISSION` names the object and where it
+was sent, never where it stood, and nothing records a death's location. So a reader that wants a map -
+units moving, bases growing, where the fighting was - gets one from `src/Replay/ReplayObjects.cpp`,
+which writes the Objects block every `ObjectSnapshotIntervalFrames` (30) frames: half a second at the
+fastest speed, about a cell of a tank's movement, fine enough for a reader to ease between snapshots.
+
+It is taken at the frame's hash site with `HouseStats`, and like it only reads object state: it walks
+`TechnoClass::Array` once, reading fields and the const queries `GetTechnoType`, `IsInAir` and the
+foundation size. Nothing calls into the simulation or draws from the RNG. The walk and a hash map
+lookup per object, every 30 frames, is noise beside `Compute_Game_CRC`, which walks every object on
+every frame.
+
+The block is a delta against what the previous snapshot told a reader, so a still object costs nothing:
+
+- **`ObjectAppearRecord`** - `uint32 UniqueID`, `uint16 TypeIndex` (the position in that kind's type
+  array, the same indices as the statistics `TYPE` chunk), `uint8 Kind` (0 unit - ships included, 1
+  infantry, 2 aircraft, 3 building), `uint8 Owner` (`HouseClass::ArrayIndex`), `uint8
+  FoundationWidth`/`FoundationHeight` (buildings; 1 otherwise), `uint16` reserved. Written when an
+  object comes onto the map, and again when its owner, type or kind changes - a capture, mind control,
+  a deploy.
+- **`ObjectUpdateRecord`** - `uint32 UniqueID`, `uint16 X`, `uint16 Y` (`ObjectClass::Location >> 4`:
+  sixteenths of a cell; for a building, inside its top-left cell), `uint8 Health` (0-255 of the type's
+  `Strength`), `uint8 Mission` (`CurrentMission`, 0xFF for none), `uint8 Flags` (veteran, elite, in the
+  air, cloaked), `uint8 Height` (`Location.Z >> 4`, clamped). Written with every appearance and
+  whenever any of it changes.
+- **`ObjectGoneRecord`** - `uint32 UniqueID`, `uint16 X`, `uint16 Y`, `uint8 Reason` (0 removed, 1
+  destroyed), `uint8 KillerHouse` (0xFF for none), `uint16` reserved. An object alive and out of limbo
+  at the previous snapshot and not at this one.
+
+Limbo objects are left out - a factory's unfinished product, and anything inside a transport, a
+garrison or a bunker - so they leave and come back as a fresh appearance. A reader should treat an ID
+that reappears as the same object.
+
+**Destroyed** comes from the same two hooks the loss counts use, `TechnoClass::Record_The_Kill_Object`
+(0x702D40) and `Record_The_Kill_House` (0x703230). Both are `__thiscall` with the killer as their one
+stack argument - an `ObjectClass*` whose `GetOwningHouse()` the engine itself credits, and a
+`HouseClass*` - so the hook reads `[esp+4]` and stores the victim's position and the killer's house by
+unique ID until the next snapshot finds the object gone. An object that leaves without either
+function running - sold, grinded, deployed, loaded into a transport - is **removed**, at the position
+the last snapshot gave it.
+
+A capture is not a death, although the engine books it like one: `TechnoClass::Captured` (0x7014A0)
+calls `Record_The_Kill_Object` on the object it hands over (0x7015A8, through vtable +0xE0, with no
+killer) before changing its owner - which is also why a captured building counts in the old owner's
+lost totals. So a pending death is dropped when the next snapshot finds the object still on the map
+under a new owner; `Captured` returns early when the owner would not change, and a real death leaves
+the map. Without that, a captured or mind-controlled object that later left the map alive - sold,
+loaded into a transport - would be reported destroyed.
 
 ## Relevant spawn.ini keys
 
