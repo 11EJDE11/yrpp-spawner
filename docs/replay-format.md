@@ -543,6 +543,23 @@ byte (`MakeChunkTag`). A reader skips tags it does not know.
   built one. Captured in `SendStatisticsPacket_WriteStatisticsDump` (0x6C856C) whether or not
   `stats.dmp` is written.
 
+### When the end-of-game snapshot is taken
+
+The `HOUS` records are a snapshot of every house, taken - never between samples - at:
+
+- **`Send_Statistics_Packet` starting** (0x6C6F50), then frozen, because the packet rewrites the built
+  trackers as it runs.
+- **The recording closing**, in `WriteSection`, whenever `HouseClass::Array` still holds the houses.
+- **`Clear_Scenario` starting** (0x6851F0), while a recording is open: the last moment the houses exist.
+
+The last is a safety net. Every path that closes a recording runs while the houses still exist:
+`Main_Game`'s loop exit (0x48CEAF, before anything clears the scenario), `Disconnect_Gracefully`
+(network shutdown only), the Aux_Loop abort, `Do_Win`, and `Game_Exit` (which never clears the
+scenario). Houses are only deleted by `Clear_Scenario`, whose callers - `Read_Scenario_INI` for a new
+game, the random map generator and savegame loading - run after `Select_Game`'s reset (0x52DAEF) has
+already closed any recording. The per-sample `UnitsBuilt`/`BuildingsBuilt` are summed from the
+trackers directly, and from the frozen snapshot once the packet has started.
+
 ### What the engine's counters actually mean
 
 Verified in the binary; worth writing down because the names mislead.
@@ -593,8 +610,9 @@ The block is a delta against what the previous snapshot told a reader, so a stil
   a deploy.
 - **`ObjectUpdateRecord`** - `uint32 UniqueID`, `uint16 X`, `uint16 Y` (`ObjectClass::Location >> 4`:
   sixteenths of a cell; for a building, inside its top-left cell), `uint8 Health` (0-255 of the type's
-  `Strength`), `uint8 Mission` (`CurrentMission`, 0xFF for none), `uint8 Flags` (veteran, elite, in the
-  air, cloaked), `uint8 Height` (`Location.Z >> 4`, clamped). Written with every appearance and
+  `Strength`), `uint8 Mission` (`CurrentMission`, 0xFF for none), `uint8 Flags` (bit 0 veteran, bit 1
+  elite, bit 3 cloaked; bit 2 unused - it was "in the air", which cost a ground-height lookup per
+  object and no reader used), `uint8 Height` (`Location.Z >> 4`, clamped). Written with every appearance and
   whenever any of it changes.
 - **`ObjectGoneRecord`** - `uint32 UniqueID`, `uint16 X`, `uint16 Y`, `uint8 Reason` (0 removed, 1
   destroyed), `uint8 KillerHouse` (0xFF for none), `uint16` reserved. An object alive and out of limbo

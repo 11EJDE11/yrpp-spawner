@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace ReplaySystem::KeyframeState::Detail
@@ -165,10 +166,22 @@ namespace ReplaySystem::KeyframeState::Detail
 			snapshot.Nodes.push_back(std::move(node));
 		}
 
+		// The engine adds an owner here when its first route node is queued but misses removing it on
+		// some paths, so over a long game the list fills with pointers to deleted technos. It only ever
+		// compares them by address, never reads through them. Keep the live ones and do not touch the rest.
+		std::unordered_set<const TechnoClass*> liveTechnos;
+		liveTechnos.reserve(static_cast<size_t>(std::max(TechnoClass::Array.Count, 0)));
+		for (int i = 0; i < TechnoClass::Array.Count; ++i)
+			liveTechnos.insert(TechnoClass::Array.Items[i]);
+
 		const auto& activeOwners = PlanningTokenClass::ActiveRouteOwners;
 		snapshot.ActiveRouteOwners.reserve(static_cast<size_t>(std::max(activeOwners.Count, 0)));
 		for (int i = 0; i < activeOwners.Count; ++i)
-			snapshot.ActiveRouteOwners.push_back(UniqueIDOf(activeOwners.Items[i]));
+		{
+			const auto* const pOwner = activeOwners.Items[i];
+			if (pOwner && liveTechnos.contains(pOwner))
+				snapshot.ActiveRouteOwners.push_back(UniqueIDOf(pOwner));
+		}
 
 		memcpy(snapshot.HouseRouteCounts.data(), PlanningTokenClass::HouseRouteCounts,
 			sizeof(snapshot.HouseRouteCounts));
@@ -205,7 +218,11 @@ namespace ReplaySystem::KeyframeState::Detail
 				return false;
 			}
 			if (!std::all_of(token.Nodes.begin(), token.Nodes.end(), validNodeIndex))
+			{
+				Debug::Log("[Replay] Keyframe %d planning route of owner %u names a node the "
+					"keyframe does not hold.\n", keyframeFrame, token.OwnerId);
 				return false;
+			}
 		}
 
 		for (const auto& node : snapshot.Nodes)
@@ -227,12 +244,25 @@ namespace ReplaySystem::KeyframeState::Detail
 		for (const auto& list : snapshot.ManagerNodeLists)
 		{
 			if (!std::all_of(list.begin(), list.end(), validNodeIndex))
+			{
+				Debug::Log("[Replay] Keyframe %d planning manager list names a node the keyframe "
+					"does not hold.\n", keyframeFrame);
 				return false;
+			}
 		}
-		for (uint32_t ownerId : snapshot.ActiveRouteOwners)
+
+		// Recordings made before capture filtered the engine's stale owner pointers hold IDs read
+		// out of freed memory. Nothing in the engine reads through these entries, so drop the ones
+		// with no techno behind them rather than refusing the keyframe.
+		PlanningSnapshot expected = snapshot;
+		std::erase_if(expected.ActiveRouteOwners,
+			[&findTechno](uint32_t ownerId) { return !ownerId || !findTechno(ownerId); });
+		if (expected.ActiveRouteOwners.size() != snapshot.ActiveRouteOwners.size())
 		{
-			if (!ownerId || !findTechno(ownerId))
-				return false;
+			Debug::Log("[Replay] Keyframe %d dropped %d of %d active planning route owners that "
+				"no longer exist.\n", keyframeFrame,
+				static_cast<int>(snapshot.ActiveRouteOwners.size() - expected.ActiveRouteOwners.size()),
+				static_cast<int>(snapshot.ActiveRouteOwners.size()));
 		}
 
 		auto& pendingEvents = PlanningTokenClass::PendingEvents;
@@ -348,7 +378,7 @@ namespace ReplaySystem::KeyframeState::Detail
 		}
 
 		auto& activeOwners = PlanningTokenClass::ActiveRouteOwners;
-		for (uint32_t ownerId : snapshot.ActiveRouteOwners)
+		for (uint32_t ownerId : expected.ActiveRouteOwners)
 		{
 			if (!activeOwners.AddItem(findTechno(ownerId)))
 				return false;
@@ -369,7 +399,7 @@ namespace ReplaySystem::KeyframeState::Detail
 		}
 
 		PlanningSnapshot rebuilt {};
-		if (!CapturePlanningState(rebuilt) || rebuilt != snapshot)
+		if (!CapturePlanningState(rebuilt) || rebuilt != expected)
 		{
 			Debug::Log("[Replay] Keyframe %d planning graph did not reproduce exactly after "
 				"rebuilding it.\n", keyframeFrame);
