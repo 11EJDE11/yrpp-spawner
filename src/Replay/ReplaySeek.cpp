@@ -666,6 +666,22 @@ namespace ReplaySystem
 			return State.Seeking;
 		}
 
+		bool CancelSeek()
+		{
+			if (!State.Seeking)
+				return false;
+
+			// A load that has not run yet is dropped with the seek, so playback carries on from the
+			// frame it is on rather than jumping to the keyframe first.
+			State.LoadPending = false;
+			State.PendingLoadFrame = -1;
+
+			// The viewer asked for playback back, so it runs even if the seek was meant to land paused.
+			State.ResumePaused = false;
+			EndSeek();
+			return true;
+		}
+
 		bool ShouldSkipRenderThisFrame()
 		{
 			if (!State.Seeking)

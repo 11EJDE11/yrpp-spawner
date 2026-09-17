@@ -42,7 +42,8 @@ namespace ReplaySystem
 		// only the simulation is held.
 		bool IsPlaybackPaused();
 
-		// Toggles the freeze. Does nothing outside playback.
+		// Toggles the freeze. During a seek it stops the seek instead and plays on. Does nothing
+		// outside playback.
 		void TogglePlaybackPause();
 
 		// Freezes or resumes playback without the on-screen notice the hotkey prints. Clears any

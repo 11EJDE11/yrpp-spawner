@@ -48,6 +48,11 @@ namespace ReplaySystem
 		// mostly not drawing while this holds.
 		bool IsSeeking();
 
+		// Stops a seek on whatever frame it has reached and returns to normal-speed, unpaused
+		// playback. A keyframe load still waiting for the next frame is dropped. Returns false when
+		// no seek was running.
+		bool CancelSeek();
+
 		// Whether this frame's GScreenClass::Render should be skipped. A seek still draws one frame
 		// in every SeekRenderInterval, so a long one does not look like a hang.
 		bool ShouldSkipRenderThisFrame();

@@ -781,6 +781,11 @@ A seek runs in two halves, in `src/Replay/ReplaySeek.cpp`:
    in 241 so it reads as progress rather than as a hang) and the sound off (`VocAllowed` at
    0x8464AC, which every `VocClass::Play` path tests, is cleared for the duration).
 
+Pause/resume (the hotkey or the overlay button) during a seek stops it: `Seek::CancelSeek` ends the
+seek on whatever frame it has reached and playback carries on at normal speed, unpaused, even for a
+seek that was meant to land paused. A keyframe load still queued for the next frame is dropped, so a
+seek cancelled that early stays on the current frame instead of jumping to the keyframe.
+
 The temporary savegame's in-memory sidecar is owned by
 `ReplaySystem::KeyframeState::Snapshot`. Its implementation is split into
 `ReplayKeyframeState.cpp` for capture/restore coordination and collection order,

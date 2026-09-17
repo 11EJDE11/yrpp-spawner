@@ -209,6 +209,14 @@ namespace ReplaySystem
 				return;
 
 			State.SingleStepTargetFrame = -1;
+
+			// Pause/resume during a seek is the way out of it: stop where it has got to and play on.
+			if (Seek::CancelSeek())
+			{
+				PrintControlMessage(L"Seek stopped.");
+				return;
+			}
+
 			if (State.Paused)
 			{
 				State.ResumePending = true;
