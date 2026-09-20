@@ -19,13 +19,29 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 namespace Replay
 {
 	constexpr size_t MaxRecordedCheckpoints = 4;
 	constexpr size_t MaxRecordedCheckpointBytes = 16u * 1024u * 1024u;
+
+	// How many saves the recording keeps on disk while the game runs, the newest included.
+	constexpr size_t MaxStagedCheckpoints = 8;
+
+	// Where the embedded checkpoints go, in thousandths of the recording. A frame costs more to
+	// simulate the more there is on the map, so seeking is cheap early and dear late, and the
+	// points sit where they save the most simulating: these minimise the expected cost of a seek
+	// to anywhere when a frame's cost grows with the frame number.
+	constexpr std::array<int, MaxRecordedCheckpoints> RecordedCheckpointTargetsPerMille { 375, 575, 725, 875 };
+
+	// The dictionary probes they are compressed with. They are compressed as the recording closes,
+	// after the game; 128 would make the file about 4% smaller and take two and a half times as long.
+	constexpr int RecordedCheckpointProbes = 6;
+
 	struct RecordedCheckpoint
 	{
 		int32_t Frame = 0;
@@ -34,27 +50,57 @@ namespace Replay
 		std::vector<unsigned char> Compressed;
 	};
 
-	inline void TrimRecordedCheckpoints(std::vector<RecordedCheckpoint>& records)
+	// Which staged save to drop once there are more than MaxStagedCheckpoints, given their frames in
+	// ascending order: the one whose removal leaves the smallest gap, measured from frame 0 for the
+	// first. The newest is never dropped - the game may end at any point after it - so the rest stay
+	// close to evenly spread over however long the game has run so far.
+	inline size_t ChooseStagedCheckpointToEvict(const std::vector<int32_t>& frames)
 	{
-		for (;;)
+		size_t victim = 0;
+		int32_t smallestGap = INT32_MAX;
+		for (size_t i = 0; i + 1 < frames.size(); ++i)
 		{
-			size_t total = 0;
-			for (const auto& item : records) total += item.Compressed.size();
-			if (records.size() <= MaxRecordedCheckpoints && total <= MaxRecordedCheckpointBytes)
-				return;
-
-			// Keep the first and latest saves while thinning densely sampled intervals.
-			// If even those two exceed the byte budget, prefer the latest save.
-			size_t victim = 0;
-			if (records.size() > 2)
+			const int32_t gap = frames[i + 1] - (i > 0 ? frames[i - 1] : 0);
+			if (gap < smallestGap)
 			{
-				victim = 1;
-				for (size_t i = 2; i + 1 < records.size(); ++i)
-					if (records[i + 1].Frame - records[i - 1].Frame
-						< records[victim + 1].Frame - records[victim - 1].Frame)
-						victim = i;
+				smallestGap = gap;
+				victim = i;
 			}
-			records.erase(records.begin() + victim);
 		}
+		return victim;
+	}
+
+	// The staged saves to embed, as ascending indices into frames (ascending), for a recording whose
+	// last frame is lastFrame: for each target in turn, the unused save nearest it, the earlier one
+	// on a tie. Saves past the last recorded frame cannot be resumed from and are never chosen.
+	inline std::vector<size_t> ChooseRecordedCheckpoints(const std::vector<int32_t>& frames, int32_t lastFrame)
+	{
+		std::vector<size_t> chosen;
+		std::vector<bool> used(frames.size(), false);
+
+		for (const int perMille : RecordedCheckpointTargetsPerMille)
+		{
+			const int64_t target = static_cast<int64_t>(lastFrame) * perMille / 1000;
+			size_t best = frames.size();
+			for (size_t i = 0; i < frames.size() && frames[i] <= lastFrame; ++i)
+			{
+				if (!used[i] && (best == frames.size()
+					|| std::llabs(frames[i] - target) < std::llabs(frames[best] - target)))
+				{
+					best = i;
+				}
+			}
+
+			if (best == frames.size())
+				break;
+			used[best] = true;
+		}
+
+		for (size_t i = 0; i < frames.size(); ++i)
+		{
+			if (used[i])
+				chosen.push_back(i);
+		}
+		return chosen;
 	}
 }

@@ -22,6 +22,7 @@
 #include "ReplayFormat.h"
 #include "ReplayStream.h"
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,14 @@ namespace Replay
 	const char* GetRecordingOutputPath(const SpawnerConfig* pConfig);
 	bool WriteInitialReplayFile(const SpawnerConfig* pConfig);
 
+	// A save to embed as a checkpoint: the game's own .SAV and the sidecar captured with it, both on disk.
+	struct CheckpointSource
+	{
+		int32_t Frame = 0;
+		std::filesystem::path Save;
+		std::filesystem::path Sidecar;
+	};
+
 	// Owns the file handle and compression state. The header and embedded files are
 	// uncompressed; frame bytes use one deflate stream beginning just after them.
 	// An optional checkpoint archive follows the completed deflate stream.
@@ -80,8 +89,12 @@ namespace Replay
 		bool SyncFlush();
 		bool FinishRecording();
 
-		// Optional independent checkpoint archive after the finished frame deflate stream.
-		bool WriteCheckpointArchive(const std::vector<unsigned char>& bytes);
+		// Optional independent checkpoint archive after the finished frame deflate stream, streamed
+		// from the sources' files so no save is ever held in memory. Sources must be in ascending frame
+		// order. One that cannot be read, or that would take the archive past maxBytes, is left out
+		// and the rest still written. Returns how many were written; the header only points at the
+		// archive when that is at least one.
+		int WriteCheckpointArchive(const std::vector<CheckpointSource>& sources, uint32_t maxBytes, int probes);
 		bool ReadCheckpointArchive(std::vector<unsigned char>& bytes);
 
 		// Optional statistics section, appended after the checkpoint archive. Nothing in the game
@@ -95,6 +108,13 @@ namespace Replay
 		// Appends a section at EOF, then stamps its offset and size into the header fields at
 		// offsetField (uint64) and offsetField + 8 (uint32) - only once all of it is on disk.
 		bool AppendSection(const std::vector<unsigned char>& bytes, uint32_t maxBytes, LONGLONG offsetField);
+		bool StampSection(LONGLONG offsetField, uint64_t sectionOffset, uint32_t sectionSize);
+
+		// Appends one archive entry at EOF: its index fields, then the payload deflated from the two files.
+		bool AppendCheckpoint(const CheckpointSource& source, int probes);
+		bool WriteAt(uint64_t offset, const void* data, size_t size);
+		bool TruncateTo(uint64_t offset);
+		bool EndOffset(uint64_t& offset);
 
 		HANDLE Handle = INVALID_HANDLE_VALUE;
 		DeflateWriter Writer;

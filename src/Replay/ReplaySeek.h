@@ -27,7 +27,10 @@ namespace ReplaySystem
 	{
 		// Successful existing saves are eligible only outside simulation updates.
 		void SetRecordingSimulationInProgress(bool inProgress);
+		// Clears this recording's staged saves, and those of games that died without closing theirs.
+		void OnRecordingStarted();
 		void OnGameSaved(const wchar_t* path);
+		// Embeds the staged saves best placed for the recording's length, then deletes them all.
 		void FinishRecordingCheckpoints();
 
 		// Frames between playback-generated keyframes. Zero still allows embedded checkpoints.

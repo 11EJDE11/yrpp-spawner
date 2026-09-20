@@ -1140,7 +1140,10 @@ namespace ReplaySystem
 			{
 				Debug::Log("[Replay] Failed to open replay file for recording.\n");
 				StopReplaySystem();
+				return;
 			}
+
+			Seek::OnRecordingStarted();
 		}
 
 		void StartReplayPlayback(const char* replayPath)

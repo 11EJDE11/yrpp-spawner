@@ -28,10 +28,6 @@ namespace Replay
 {
 	namespace
 	{
-		// miniz encodes the compression level as a dictionary probe count in the low 12 bits of
-		// the tdefl flags. 128 is what level 6 maps to.
-		constexpr int DeflateProbes = 128;
-
 		constexpr size_t OutputBufferSize = 32 * 1024;
 		constexpr size_t InputBufferSize = 32 * 1024;
 
@@ -59,7 +55,7 @@ namespace Replay
 		this->Reset();
 	}
 
-	bool DeflateWriter::Start(HANDLE file)
+	bool DeflateWriter::Start(HANDLE file, int probes)
 	{
 		this->Reset();
 
@@ -70,9 +66,10 @@ namespace Replay
 		if (!compressor)
 			return false;
 
-		// No TDEFL_WRITE_ZLIB_HEADER: a raw deflate stream, which the client can hand straight to
-		// System.IO.Compression.DeflateStream.
-		if (tdefl_init(AsCompressor(compressor.get()), nullptr, nullptr, DeflateProbes) != TDEFL_STATUS_OKAY)
+		// miniz encodes the compression level as a dictionary probe count in the low 12 bits of the
+		// tdefl flags. No TDEFL_WRITE_ZLIB_HEADER: a raw deflate stream, which the client can hand
+		// straight to System.IO.Compression.DeflateStream.
+		if (tdefl_init(AsCompressor(compressor.get()), nullptr, nullptr, probes) != TDEFL_STATUS_OKAY)
 			return false;
 
 		this->OutputBuffer.resize(OutputBufferSize);

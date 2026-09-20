@@ -679,13 +679,35 @@ seek bar can offer forward jumps immediately. Playback also creates temporary ch
 `ReplayKeyframeInterval` frames using `ScenarioClass::SaveGame` (0x67CEF0). Setting the interval
 to zero disables those periodic saves while leaving embedded checkpoints available.
 
-Recorded checkpoints are independently compressed with miniz raw deflate (128 dictionary probes,
-equivalent to level 6) and retained in memory until the replay is finalized. The count limit is
-four and the combined compressed payload budget is 16 MiB. Retention keeps the first and latest
-saves and removes the interior save with the smallest surrounding frame gap. If even the first
-and latest exceed the byte budget, the latest takes priority. Repeated saves at the same frame
-are ignored, as are saves beyond the final recorded frame. A process crash before finalization
-loses these optional checkpoints; already-flushed event frames keep their existing recovery behavior.
+Nothing is compressed or held in memory while the game runs. Each eligible save is staged on disk:
+the `.SAV` is copied with `CopyFileW` (autosaves reuse their slots, so it cannot be referred to in
+place) and its sidecar - which has to be captured then, from the live simulation - is written next
+to it, both under `SavedGameDir\Replay Checkpoints\<process id>\`. That costs the game thread a file
+copy and the sidecar capture. Measured on a 55-minute, 8-player recording, the compression this
+replaces took 93-124 ms per save on a fast machine, every autosave.
+
+At most eight saves stay staged (`MaxStagedCheckpoints`). When a ninth arrives, the one whose
+removal leaves the smallest gap is deleted - the first measured from frame 0 - but never the
+newest, since the game may end at any point after it. That keeps the staged saves close to evenly
+spread over however long the game has run, whatever its length.
+
+When the recording closes, `FinishRecordingCheckpoints` knows the length and embeds up to four:
+for each of 37.5%, 57.5%, 72.5% and 87.5% of the last recorded frame
+(`RecordedCheckpointTargetsPerMille`), the unused staged save nearest it. A frame costs more to
+simulate the more there is on the map, so a seek is cheap early and dear late; with a frame's cost
+growing with the frame number, those points minimise the expected cost of a seek to anywhere.
+Over games of 10 to 120 minutes with autosaves every two minutes, the eight staged saves let the
+chosen ones come within about 7% of that ideal on average. Saves after the last recorded frame are
+never chosen.
+
+The chosen saves are compressed straight from their files into the replay (6 dictionary probes: about
+2.5 times faster than 128 for about 4% more bytes, and it runs as the game closes), so a payload is
+never held whole in memory. An entry whose files cannot be read, or that would take the archive past
+the 16 MiB budget, is truncated off again and the rest still written; a set that could not fit even
+at half its raw size loses its earliest saves first. The staging folder is deleted once the archive is
+written, and also when a recording starts, together with any left by a process that is no longer
+running. A process crash before finalization loses these optional checkpoints; already-flushed event
+frames keep their existing recovery behavior. Repeated saves at the same frame are ignored.
 
 The save hook at `0x67D2F1` sits on `Save_Game`'s success epilogue, after `IStorage::Release`. It
 reads the UTF-16 filename at `ESP + 0x2C` (after `SaveGame_SGInSubdir` has prefixed
@@ -709,7 +731,7 @@ The four supplied `.SAV` samples measured with the vendored miniz were:
 | SAVE72AE.SAV | 1,728,756 | 1,053,256 | 60.9% |
 
 That is about 3.88 MiB for four compressed saves, before their sidecars, so the conservative
-four-checkpoint limit is used. Compression took about 98-108 ms per sample on the test machine.
+four-checkpoint limit is used. Compression at 128 probes took about 98-108 ms per sample on the test machine.
 
 ### What must run before a checkpoint can resume
 
@@ -764,7 +786,7 @@ use generated filenames under `Replay Keyframes`, not filenames supplied by the 
 share playback's temporary storage limit and cleanup. CRC checks detect corruption; they do not
 make arbitrary engine savegames safe to load.
 
-Run `scripts\test_replay_checkpoints.bat` for standalone serialization, compression, retention,
+Run `scripts\test_replay_checkpoints.bat` for standalone serialization, compression, staging and placement,
 recordings without saves, corrupt-input, buffered-read, and rewind tests. In-game validation
 should record normal saves, restart playback, seek to checkpoints and between them before
 watching those frames, and check the replay CRC log for divergence. Repeat with

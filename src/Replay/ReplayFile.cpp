@@ -18,11 +18,14 @@
 */
 
 #include "ReplayFile.h"
+#include "ReplayCheckpointCodec.h"
 
 #include <Utilities/Debug.h>
+#include <Vendor/miniz/miniz.h>
 
 #include <algorithm>
 #include <cstddef>
+#include <utility>
 
 namespace Replay
 {
@@ -324,18 +327,17 @@ namespace Replay
 		if (bytes.empty() || bytes.size() > maxBytes)
 			return false;
 
-		LARGE_INTEGER zero {}, sectionStart {};
-		if (!SetFilePointerEx(this->Handle, zero, &sectionStart, FILE_END)
-			|| !WriteRawToHandle(this->Handle, bytes.data(), bytes.size()))
-		{
+		uint64_t sectionStart = 0;
+		if (!this->EndOffset(sectionStart) || !WriteRawToHandle(this->Handle, bytes.data(), bytes.size()))
 			return false;
-		}
 
-		// Point the header at the section only once all of it is on disk.
-		const uint64_t sectionOffset = static_cast<uint64_t>(sectionStart.QuadPart);
-		const uint32_t sectionSize = static_cast<uint32_t>(bytes.size());
+		return this->StampSection(offsetField, sectionStart, static_cast<uint32_t>(bytes.size()));
+	}
 
-		LARGE_INTEGER fieldOffset {};
+	// Points the header at a section, which must already be entirely on disk.
+	bool File::StampSection(LONGLONG offsetField, uint64_t sectionOffset, uint32_t sectionSize)
+	{
+		LARGE_INTEGER fieldOffset {}, zero {};
 		fieldOffset.QuadPart = offsetField;
 		const bool ok = SetFilePointerEx(this->Handle, fieldOffset, nullptr, FILE_BEGIN)
 			&& WriteRawToHandle(this->Handle, &sectionOffset, sizeof(sectionOffset))
@@ -345,13 +347,162 @@ namespace Replay
 		return ok;
 	}
 
-	bool File::WriteCheckpointArchive(const std::vector<unsigned char>& bytes)
+	bool File::EndOffset(uint64_t& offset)
+	{
+		LARGE_INTEGER zero {}, end {};
+		if (!SetFilePointerEx(this->Handle, zero, &end, FILE_END))
+			return false;
+
+		offset = static_cast<uint64_t>(end.QuadPart);
+		return true;
+	}
+
+	bool File::WriteAt(uint64_t offset, const void* data, size_t size)
+	{
+		LARGE_INTEGER position {}, zero {};
+		position.QuadPart = static_cast<LONGLONG>(offset);
+		const bool ok = SetFilePointerEx(this->Handle, position, nullptr, FILE_BEGIN)
+			&& WriteRawToHandle(this->Handle, data, size);
+
+		SetFilePointerEx(this->Handle, zero, nullptr, FILE_END);
+		return ok;
+	}
+
+	bool File::TruncateTo(uint64_t offset)
+	{
+		LARGE_INTEGER position {};
+		position.QuadPart = static_cast<LONGLONG>(offset);
+		return SetFilePointerEx(this->Handle, position, nullptr, FILE_BEGIN)
+			&& SetEndOfFile(this->Handle);
+	}
+
+	int File::WriteCheckpointArchive(const std::vector<CheckpointSource>& sources, uint32_t maxBytes, int probes)
 	{
 		static_assert(offsetof(ReplayHeader, CheckpointArchiveSize)
 			== offsetof(ReplayHeader, CheckpointArchiveOffset) + sizeof(uint64_t),
 			"The checkpoint archive fields are stamped back to back and have to stay adjacent");
 
-		return this->AppendSection(bytes, MaxCheckpointArchiveBytes, offsetof(ReplayHeader, CheckpointArchiveOffset));
+		uint64_t archiveStart = 0;
+		uint32_t count = 0;
+		if (!this->IsOpen() || sources.empty() || !this->EndOffset(archiveStart)
+			|| !WriteRawToHandle(this->Handle, &count, sizeof(count)))
+		{
+			return 0;
+		}
+
+		maxBytes = std::min(maxBytes, MaxCheckpointArchiveBytes);
+		for (const auto& source : sources)
+		{
+			uint64_t entryStart = 0, entryEnd = 0;
+			if (!this->EndOffset(entryStart))
+				break;
+
+			if (!this->AppendCheckpoint(source, probes) || !this->EndOffset(entryEnd))
+			{
+				Debug::Log("[Replay] Could not embed the save at frame %d.\n", source.Frame);
+				if (!this->TruncateTo(entryStart))
+					break;
+				continue;
+			}
+
+			if (entryEnd - archiveStart > maxBytes)
+			{
+				Debug::Log("[Replay] Left out the save at frame %d: it would take the checkpoints past %u bytes.\n",
+					source.Frame, maxBytes);
+				if (!this->TruncateTo(entryStart))
+					break;
+				continue;
+			}
+
+			++count;
+		}
+
+		uint64_t archiveEnd = 0;
+		if (count == 0 || !this->EndOffset(archiveEnd)
+			|| !this->WriteAt(archiveStart, &count, sizeof(count))
+			|| !this->StampSection(offsetof(ReplayHeader, CheckpointArchiveOffset), archiveStart,
+				static_cast<uint32_t>(archiveEnd - archiveStart)))
+		{
+			this->TruncateTo(archiveStart);
+			return 0;
+		}
+
+		return static_cast<int>(count);
+	}
+
+	bool File::AppendCheckpoint(const CheckpointSource& source, int probes)
+	{
+		struct Input
+		{
+			HANDLE Handle = INVALID_HANDLE_VALUE;
+			uint32_t Size = 0;
+			~Input() { if (this->Handle != INVALID_HANDLE_VALUE) CloseHandle(this->Handle); }
+		};
+
+		Input save, sidecar;
+		for (auto [pInput, pPath] : { std::pair { &save, &source.Save }, std::pair { &sidecar, &source.Sidecar } })
+		{
+			pInput->Handle = CreateFileW(pPath->c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+				FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+			LARGE_INTEGER size {};
+			if (pInput->Handle == INVALID_HANDLE_VALUE || !GetFileSizeEx(pInput->Handle, &size)
+				|| size.QuadPart < 0 || size.QuadPart > static_cast<LONGLONG>(CheckpointCodec::MaxBytes))
+			{
+				return false;
+			}
+			pInput->Size = static_cast<uint32_t>(size.QuadPart);
+		}
+
+		// The payload is what CheckpointCodec::Fields(save, sidecar) produces - each as a uint32 length
+		// and its bytes - and playback bounds the whole of it.
+		const uint64_t rawSize = 8ull + save.Size + sidecar.Size;
+		if (save.Size == 0 || rawSize > CheckpointCodec::MaxBytes)
+			return false;
+
+		// Frame and raw size, then the CRC and compressed size, which are filled in once known.
+		uint64_t entryStart = 0;
+		const uint32_t index[4] = { static_cast<uint32_t>(source.Frame), static_cast<uint32_t>(rawSize), 0, 0 };
+		if (!this->EndOffset(entryStart) || !WriteRawToHandle(this->Handle, index, sizeof(index)))
+			return false;
+
+		DeflateWriter deflate;
+		if (!deflate.Start(this->Handle, probes))
+			return false;
+
+		mz_ulong crc = MZ_CRC32_INIT;
+		auto emit = [&](const void* data, size_t size)
+		{
+			crc = mz_crc32(crc, static_cast<const unsigned char*>(data), size);
+			return deflate.Write(data, size);
+		};
+
+		std::vector<unsigned char> buffer(64 * 1024);
+		for (Input* pInput : { &save, &sidecar })
+		{
+			if (!emit(&pInput->Size, sizeof(pInput->Size)))
+				return false;
+
+			for (uint32_t left = pInput->Size; left > 0;)
+			{
+				DWORD read = 0;
+				const DWORD wanted = std::min<DWORD>(left, static_cast<DWORD>(buffer.size()));
+				// A file that shrank since it was sized would leave its length prefix wrong.
+				if (!ReadFile(pInput->Handle, buffer.data(), wanted, &read, nullptr) || read == 0
+					|| !emit(buffer.data(), read))
+				{
+					return false;
+				}
+				left -= read;
+			}
+		}
+
+		if (!deflate.Finish())
+			return false;
+
+		const uint64_t compressedSize = deflate.CompressedBytesWritten();
+		const uint32_t tail[2] = { static_cast<uint32_t>(crc), static_cast<uint32_t>(compressedSize) };
+		return compressedSize > 0 && compressedSize <= CheckpointCodec::MaxBytes
+			&& this->WriteAt(entryStart + sizeof(uint32_t) * 2, tail, sizeof(tail));
 	}
 
 	bool File::WriteStatisticsSection(const std::vector<unsigned char>& bytes)

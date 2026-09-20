@@ -4,7 +4,9 @@
 #include <Replay/ReplayRecordedCheckpoint.h>
 #include <Utilities/Debug.h>
 #include <Vendor/miniz/miniz.h>
+#include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -112,28 +114,66 @@ static void TestSnapshot()
 	std::cout << "Snapshot round-trip, truncation, bounds, validation, and miniz checks passed\n";
 }
 
-static void TestFile(const std::filesystem::path& directory, bool checkpoints)
+static void WriteBytes(const std::filesystem::path& path, const std::vector<unsigned char>& bytes)
 {
-	const auto path = directory / (checkpoints ? "embedded.yrrp" : "no-saves.yrrp");
+	std::ofstream output(path, std::ios::binary | std::ios::trunc);
+	output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+static std::vector<unsigned char> Noise(size_t size, uint32_t seed)
+{
+	std::vector<unsigned char> bytes(size);
+	for (auto& value : bytes) { seed = 1664525u * seed + 1013904223u; value = static_cast<unsigned char>(seed >> 24); }
+	return bytes;
+}
+
+static void WriteStreamOnly(const std::filesystem::path& path)
+{
 	Replay::ReplayHeader header {};
 	header.Magic = Replay::ReplayMagic;
 	header.Version = Replay::ReplayVersion;
 	header.HeaderSize = sizeof(header);
 	{
-		std::ofstream output(path, std::ios::binary);
+		std::ofstream output(path, std::ios::binary | std::ios::trunc);
 		output.write(reinterpret_cast<const char*>(&header), sizeof(header));
 	}
+}
+
+static void TestFile(const std::filesystem::path& directory, bool checkpoints)
+{
+	const auto path = directory / (checkpoints ? "embedded.yrrp" : "no-saves.yrrp");
 	// Enough data to exercise buffering and decompressor read-ahead.
-	std::vector<unsigned char> events(512 * 1024);
-	uint32_t random = 17;
-	for (auto& value : events) { random = 1664525u * random + 1013904223u; value = static_cast<unsigned char>(random >> 24); }
-	std::vector<unsigned char> archive { 0, 0, 0, 0 };
+	const auto events = Noise(512 * 1024, 17);
+	WriteStreamOnly(path);
+
+	// Three staged saves, the middle one missing its sidecar: it is left out and the others still written.
+	std::vector<Replay::CheckpointSource> sources;
+	std::vector<std::pair<std::vector<unsigned char>, std::vector<unsigned char>>> payloads;
+	for (int i = 0; i < 3; ++i)
+	{
+		Replay::CheckpointSource source;
+		source.Frame = 100 * (i + 1);
+		source.Save = directory / ("staged" + std::to_string(i) + ".sav");
+		source.Sidecar = directory / ("staged" + std::to_string(i) + ".sidecar");
+		// Compressible, and larger than the writer's read buffer.
+		std::vector<unsigned char> save(200 * 1024 + i);
+		for (size_t j = 0; j < save.size(); ++j) save[j] = static_cast<unsigned char>((j / 7) ^ i);
+		const auto sidecar = Noise(3000 + i, 99 + i);
+		WriteBytes(source.Save, save);
+		std::error_code error;
+		std::filesystem::remove(source.Sidecar, error);
+		if (i != 1) WriteBytes(source.Sidecar, sidecar);
+		sources.push_back(source);
+		payloads.emplace_back(save, sidecar);
+	}
+
 	Replay::File file;
 	assert(file.OpenRecording(path.string().c_str()));
 	assert(file.Write(events.data(), events.size()));
 	assert(file.SyncFlush());
 	assert(file.FinishRecording());
-	if (checkpoints) assert(file.WriteCheckpointArchive(archive));
+	if (checkpoints)
+		assert(file.WriteCheckpointArchive(sources, Replay::MaxRecordedCheckpointBytes, Replay::RecordedCheckpointProbes) == 2);
 	assert(file.StampCleanShutdown(12345));
 	file.Close();
 	Replay::ReplayOpenFailure failure;
@@ -142,7 +182,34 @@ static void TestFile(const std::filesystem::path& directory, bool checkpoints)
 	assert(file.Read(decoded.data(), 17));
 	std::vector<unsigned char> loaded;
 	assert(file.ReadCheckpointArchive(loaded));
-	assert(checkpoints ? loaded == archive : loaded.empty());
+	if (checkpoints)
+	{
+		// Decoded the way ImportRecordedCheckpoints does.
+		Reader reader { loaded };
+		uint32_t count = 0;
+		reader.Scalar(count);
+		assert(reader.Good && count == 2);
+		for (const int source : { 0, 2 })
+		{
+			Replay::RecordedCheckpoint record;
+			Fields(reader, record.Frame, record.RawSize, record.CRC, record.Compressed);
+			assert(reader.Good && record.Frame == sources[source].Frame);
+			std::vector<unsigned char> raw(record.RawSize);
+			assert(tinfl_decompress_mem_to_mem(raw.data(), raw.size(), record.Compressed.data(),
+				record.Compressed.size(), 0) == raw.size());
+			assert(mz_crc32(0, raw.data(), raw.size()) == record.CRC);
+			Reader payload { raw };
+			std::vector<unsigned char> save, sidecar;
+			Fields(payload, save, sidecar);
+			assert(payload.Good && payload.Position == raw.size());
+			assert(save == payloads[source].first && sidecar == payloads[source].second);
+		}
+		assert(reader.Position == loaded.size());
+	}
+	else
+	{
+		assert(loaded.empty());
+	}
 	assert(file.Read(decoded.data() + 17, decoded.size() - 17));
 	assert(events == decoded);
 	assert(file.RestartPlaybackStream());
@@ -161,54 +228,84 @@ static void TestFile(const std::filesystem::path& directory, bool checkpoints)
 		assert(!file.ReadCheckpointArchive(loaded) && loaded.empty());
 		assert(file.Read(decoded.data(), decoded.size()) && decoded == events);
 		file.Close();
+
+		// Over the byte budget: every entry is rolled back, the header is not pointed at an archive,
+		// and the file ends where the stream did.
+		WriteStreamOnly(path);
+		assert(file.OpenRecording(path.string().c_str()));
+		assert(file.Write(events.data(), events.size()));
+		assert(file.FinishRecording());
+		file.Close();
+		const auto streamEnd = std::filesystem::file_size(path);
+		assert(file.OpenRecording(path.string().c_str()));
+		assert(file.WriteCheckpointArchive(sources, 64, Replay::RecordedCheckpointProbes) == 0);
+		file.Close();
+		assert(std::filesystem::file_size(path) == streamEnd);
+		assert(file.OpenPlayback(path.string().c_str(), failure));
+		assert(file.ReadCheckpointArchive(loaded) && loaded.empty());
+		file.Close();
 	}
 	std::filesystem::remove(path);
+
+	for (const auto& source : sources)
+	{
+		std::error_code error;
+		std::filesystem::remove(source.Save, error);
+		std::filesystem::remove(source.Sidecar, error);
+	}
 }
 
-static void TestRetention()
+static void TestCheckpointChoice()
 {
-	std::vector<Replay::RecordedCheckpoint> records;
-	Replay::TrimRecordedCheckpoints(records);
-	for (int frame : { 10, 1000, 1001, 1002, 2000 })
+	// Thinning: never the newest; otherwise the smallest gap, measured from frame 0 for the first.
+	assert(Replay::ChooseStagedCheckpointToEvict({ 7200, 14400 }) == 0);
+	assert(Replay::ChooseStagedCheckpointToEvict({ 100, 5000, 5100, 9000 }) == 2);
+	assert(Replay::ChooseStagedCheckpointToEvict({ 100, 9000, 9100 }) == 0);
+
+	// Autosaves every 7200 frames for a long game, thinned as they arrive, stay spread over the game.
+	std::vector<int32_t> staged;
+	for (int32_t frame = 7200; frame <= 7200 * 27; frame += 7200)
 	{
-		Replay::RecordedCheckpoint record;
-		record.Frame = frame;
-		record.Compressed = { 0 };
-		records.push_back(std::move(record));
-		Replay::TrimRecordedCheckpoints(records);
+		staged.push_back(frame);
+		while (staged.size() > Replay::MaxStagedCheckpoints)
+			staged.erase(staged.begin() + Replay::ChooseStagedCheckpointToEvict(staged));
+		assert(staged.back() == frame && std::is_sorted(staged.begin(), staged.end()));
 	}
-	assert(records.size() == 4 && records.front().Frame == 10 && records.back().Frame == 2000);
-	assert(records[1].Frame == 1000 && records[2].Frame == 1002);
-	for (int frame = 2001; frame <= 20000; ++frame)
+	assert(staged.size() == Replay::MaxStagedCheckpoints);
+	for (size_t i = 1; i < staged.size(); ++i)
+		assert(staged[i] - staged[i - 1] <= 7200 * 27 / 4);
+
+	// Picks land near 37.5/57.5/72.5/87.5% of the recording, never past its end.
+	const int32_t lastFrame = 198430;
+	const auto chosen = Replay::ChooseRecordedCheckpoints(staged, lastFrame);
+	assert(chosen.size() == Replay::MaxRecordedCheckpoints && std::is_sorted(chosen.begin(), chosen.end()));
+	for (size_t i = 0; i < chosen.size(); ++i)
 	{
-		Replay::RecordedCheckpoint record;
-		record.Frame = frame;
-		record.Compressed = { 0 };
-		records.push_back(std::move(record));
-		Replay::TrimRecordedCheckpoints(records);
-		assert(records.size() == 4 && records.front().Frame == 10 && records.back().Frame == frame);
+		const int64_t target = static_cast<int64_t>(lastFrame) * Replay::RecordedCheckpointTargetsPerMille[i] / 1000;
+		assert(std::llabs(staged[chosen[i]] - target) <= lastFrame / 8);
 	}
-	records.clear();
-	for (int frame = 1; frame <= 3; ++frame)
-	{
-		Replay::RecordedCheckpoint record;
-		record.Frame = frame;
-		record.Compressed.resize(8 * 1024 * 1024);
-		records.push_back(std::move(record));
-	}
-	Replay::TrimRecordedCheckpoints(records);
-	assert(records.size() == 2 && records.front().Frame == 1 && records.back().Frame == 3);
-	records.back().Compressed.push_back(0);
-	Replay::TrimRecordedCheckpoints(records);
-	assert(records.size() == 1 && records[0].Frame == 3);
-	std::cout << "Checkpoint count, time coverage, and byte-budget checks passed\n";
+
+	// A save every 1000 frames: the nearest to each target exactly.
+	std::vector<int32_t> even;
+	for (int32_t frame = 1000; frame <= 40000; frame += 1000) even.push_back(frame);
+	const auto exact = Replay::ChooseRecordedCheckpoints(even, 40000);
+	assert(exact.size() == 4 && even[exact[0]] == 15000 && even[exact[1]] == 23000
+		&& even[exact[2]] == 29000 && even[exact[3]] == 35000);
+
+	// Fewer saves than targets: all of them, each once. A save after the last frame: never.
+	assert((Replay::ChooseRecordedCheckpoints({ 500, 900 }, 1000) == std::vector<size_t> { 0, 1 }));
+	assert((Replay::ChooseRecordedCheckpoints({ 500, 1500 }, 1000) == std::vector<size_t> { 0 }));
+	assert(Replay::ChooseRecordedCheckpoints({ 1500 }, 1000).empty());
+	assert(Replay::ChooseRecordedCheckpoints({}, 1000).empty());
+
+	std::cout << "Checkpoint staging and placement checks passed\n";
 }
 
 int main(int argc, char** argv)
 {
 	assert(argc == 2);
 	TestSnapshot();
-	TestRetention();
+	TestCheckpointChoice();
 	TestFile(argv[1], false);
 	TestFile(argv[1], true);
 	std::cout << "Recording without saves, archive round-trip, buffered read, rewind, and corrupt locator checks passed\n";

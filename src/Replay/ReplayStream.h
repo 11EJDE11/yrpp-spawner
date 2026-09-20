@@ -42,8 +42,12 @@ namespace Replay
 		DeflateWriter(const DeflateWriter&) = delete;
 		DeflateWriter& operator=(const DeflateWriter&) = delete;
 
+		// The frame stream's setting: miniz's level 6.
+		static constexpr int DefaultProbes = 128;
+
 		// Begins a stream at the handle's current position. The handle stays owned by the caller.
-		bool Start(HANDLE file);
+		// probes is miniz's dictionary probe count, optionally with TDEFL_GREEDY_PARSING_FLAG.
+		bool Start(HANDLE file, int probes = DefaultProbes);
 
 		bool IsActive() const { return this->Compressor != nullptr; }
 

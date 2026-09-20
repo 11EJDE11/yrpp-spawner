@@ -101,16 +101,73 @@ namespace ReplaySystem
 
 			using Replay::RecordedCheckpoint;
 			using Replay::MaxRecordedCheckpoints;
-			using Replay::MaxRecordedCheckpointBytes;
-			std::vector<RecordedCheckpoint> RecordedCheckpoints;
 			bool RecordingSimulationInProgress = false;
+
+			// Saves the recording may embed, each copied to disk with its sidecar as it is made. Which
+			// ones are embedded is decided once the recording's length is known; see
+			// FinishRecordingCheckpoints.
+			constexpr const char* CheckpointStagingSubdirectory = "Replay Checkpoints";
+			std::vector<Replay::CheckpointSource> StagedCheckpoints;
+
+			std::filesystem::path SavedGameDirectory()
+			{
+				const auto* pConfig = GetConfig();
+				return std::filesystem::path(pConfig ? pConfig->SavedGameDir : "Saved Games");
+			}
 
 			std::filesystem::path KeyframeDirectory()
 			{
-				const auto* pConfig = GetConfig();
-				const char* const savedGameDir = pConfig ? pConfig->SavedGameDir : "Saved Games";
+				return SavedGameDirectory() / KeyframeSubdirectory;
+			}
 
-				return std::filesystem::path(savedGameDir) / KeyframeSubdirectory;
+			// One folder per process, so two games recording from the same folder keep apart.
+			std::filesystem::path CheckpointStagingDirectory()
+			{
+				return SavedGameDirectory() / CheckpointStagingSubdirectory / std::to_wstring(GetCurrentProcessId());
+			}
+
+			void RemoveStagedCheckpoint(const Replay::CheckpointSource& staged)
+			{
+				std::error_code error {};
+				std::filesystem::remove(staged.Save, error);
+				std::filesystem::remove(staged.Sidecar, error);
+			}
+
+			void DiscardStagedCheckpoints()
+			{
+				StagedCheckpoints.clear();
+				std::error_code error {};
+				std::filesystem::remove_all(CheckpointStagingDirectory(), error);
+			}
+
+			bool IsProcessRunning(DWORD processId)
+			{
+				const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+				if (!process)
+					return GetLastError() == ERROR_ACCESS_DENIED;
+
+				DWORD exitCode = 0;
+				const bool running = GetExitCodeProcess(process, &exitCode) && exitCode == STILL_ACTIVE;
+				CloseHandle(process);
+				return running;
+			}
+
+			// A game that crashed or was killed before its recording closed leaves its staged saves behind.
+			void RemoveAbandonedCheckpointStaging()
+			{
+				std::error_code error {};
+				const auto root = SavedGameDirectory() / CheckpointStagingSubdirectory;
+				for (const auto& entry : std::filesystem::directory_iterator(root, error))
+				{
+					const auto name = entry.path().filename().wstring();
+					wchar_t* end = nullptr;
+					const unsigned long processId = wcstoul(name.c_str(), &end, 10);
+					if (name.empty() || *end != L'\0' || processId == GetCurrentProcessId() || IsProcessRunning(processId))
+						continue;
+
+					std::error_code removeError {};
+					std::filesystem::remove_all(entry.path(), removeError);
+				}
 			}
 
 			// Relative to SavedGameDir, which is what the savegame path hooks expect.
@@ -487,62 +544,106 @@ namespace ReplaySystem
 			RecordingSimulationInProgress = inProgress;
 		}
 
+		void OnRecordingStarted()
+		{
+			DiscardStagedCheckpoints();
+			RemoveAbandonedCheckpointStaging();
+		}
+
+		// Stages the save as a checkpoint candidate: the .SAV copied, and its sidecar written, into this
+		// process's staging folder. Nothing is compressed or kept in memory; that waits for the end.
 		void OnGameSaved(const wchar_t* path)
 		{
 			if (!ReplayState.Recording || RecordingSimulationInProgress || !path) return;
 			const int frame = static_cast<int>(Unsorted::CurrentFrame);
-			if (frame < 0 || (!RecordedCheckpoints.empty() && frame <= RecordedCheckpoints.back().Frame)) return;
-			std::ifstream input(std::filesystem::path(path), std::ios::binary | std::ios::ate);
-			const auto size = input.tellg();
-			if (!input || size <= 0 || size > Replay::CheckpointCodec::MaxBytes) return;
-			std::vector<unsigned char> save(static_cast<size_t>(size));
-			input.seekg(0);
-			if (!input.read(reinterpret_cast<char*>(save.data()), save.size())) return;
-			KeyframeState::Snapshot snapshot;
-			std::vector<unsigned char> sidecar;
-			if (!snapshot.CaptureAfterSave() || !snapshot.Serialize(sidecar))
+			if (frame < 0 || (!StagedCheckpoints.empty() && frame <= StagedCheckpoints.back().Frame)) return;
+
+			const auto directory = CheckpointStagingDirectory();
+			std::error_code error {};
+			std::filesystem::create_directories(directory, error);
+
+			wchar_t name[32] = { 0 };
+			Replay::CheckpointSource staged;
+			staged.Frame = frame;
+			swprintf_s(name, L"c%08d.sav", frame);
+			staged.Save = directory / name;
+			swprintf_s(name, L"c%08d.sidecar", frame);
+			staged.Sidecar = directory / name;
+
+			// Autosaves reuse their slots, so the save is copied rather than referred to.
+			if (!CopyFileW(path, staged.Save.c_str(), FALSE))
 			{
-				Debug::Log("[Replay] Save at frame %d could not capture a checkpoint sidecar.\n", frame);
+				Debug::Log("[Replay] Could not stage the save at frame %d as a checkpoint (error %lu).\n",
+					frame, GetLastError());
 				return;
 			}
-			Replay::CheckpointCodec::Writer payload;
-			Replay::CheckpointCodec::Fields(payload, save, sidecar);
-			if (!payload.Good) return;
-			RecordedCheckpoint record;
-			record.Frame = frame;
-			record.RawSize = static_cast<uint32_t>(payload.Bytes.size());
-			record.CRC = static_cast<uint32_t>(mz_crc32(0, payload.Bytes.data(), payload.Bytes.size()));
-			size_t compressedSize = 0;
-			void* compressed = tdefl_compress_mem_to_heap(payload.Bytes.data(), payload.Bytes.size(),
-				&compressedSize, 128);
-			if (!compressed) return;
-			if (compressedSize <= MaxRecordedCheckpointBytes)
+
+			KeyframeState::Snapshot snapshot;
+			std::vector<unsigned char> sidecar;
+			bool stagedOk = snapshot.CaptureAfterSave() && snapshot.Serialize(sidecar);
+			if (stagedOk)
 			{
-				const auto* bytes = static_cast<unsigned char*>(compressed);
-				record.Compressed.assign(bytes, bytes + compressedSize);
+				std::ofstream output(staged.Sidecar, std::ios::binary | std::ios::trunc);
+				output.write(reinterpret_cast<const char*>(sidecar.data()), static_cast<std::streamsize>(sidecar.size()));
+				output.close();
+				stagedOk = static_cast<bool>(output);
 			}
-			mz_free(compressed);
-			if (record.Compressed.empty()) return;
-			RecordedCheckpoints.push_back(std::move(record));
-			Replay::TrimRecordedCheckpoints(RecordedCheckpoints);
-			Debug::Log("[Replay] Captured existing save at frame %d (%u compressed bytes; %u retained).\n",
-				frame, static_cast<unsigned int>(compressedSize), static_cast<unsigned int>(RecordedCheckpoints.size()));
+			if (!stagedOk)
+			{
+				Debug::Log("[Replay] Save at frame %d could not capture a checkpoint sidecar.\n", frame);
+				RemoveStagedCheckpoint(staged);
+				return;
+			}
+
+			StagedCheckpoints.push_back(std::move(staged));
+			while (StagedCheckpoints.size() > Replay::MaxStagedCheckpoints)
+			{
+				std::vector<int32_t> frames;
+				for (const auto& item : StagedCheckpoints) frames.push_back(item.Frame);
+				const size_t victim = Replay::ChooseStagedCheckpointToEvict(frames);
+				RemoveStagedCheckpoint(StagedCheckpoints[victim]);
+				StagedCheckpoints.erase(StagedCheckpoints.begin() + victim);
+			}
+
+			Debug::Log("[Replay] Staged the save at frame %d as a checkpoint (%u staged).\n",
+				frame, static_cast<unsigned int>(StagedCheckpoints.size()));
 		}
 
 		void FinishRecordingCheckpoints()
 		{
-			if (RecordedCheckpoints.empty()) return;
-			Replay::CheckpointCodec::Writer writer;
-			// A save at shutdown may precede a frame that was never recorded.
+			if (StagedCheckpoints.empty()) return;
+
+			// A save at shutdown may follow the last frame that was recorded; the choice skips those.
 			const int lastFrame = ReplayState.FrameWriter.LastFrameNumber();
-			std::erase_if(RecordedCheckpoints, [lastFrame](const auto& item) { return item.Frame > lastFrame; });
-			uint32_t count = static_cast<uint32_t>(RecordedCheckpoints.size());
-			if (count == 0) return;
-			writer.Scalar(count);
-			for (auto& record : RecordedCheckpoints)
-				Replay::CheckpointCodec::Fields(writer, record.Frame, record.RawSize, record.CRC, record.Compressed);
-			if (!writer.Good || !ReplayState.File.WriteCheckpointArchive(writer.Bytes))
-				Debug::Log("[Replay] Could not append recorded checkpoints; event playback remains available.\n");
+			std::vector<int32_t> frames;
+			for (const auto& item : StagedCheckpoints) frames.push_back(item.Frame);
+
+			std::vector<Replay::CheckpointSource> chosen;
+			uint64_t rawBytes = 0;
+			for (const size_t index : Replay::ChooseRecordedCheckpoints(frames, lastFrame))
+			{
+				const auto& item = StagedCheckpoints[index];
+				std::error_code error {};
+				rawBytes += std::filesystem::file_size(item.Save, error) + std::filesystem::file_size(item.Sidecar, error);
+				chosen.push_back(item);
+			}
+
+			// A payload deflates to under half its size, so a set that could not fit even at half is
+			// thinned first - from the start, where a seek costs least without a checkpoint.
+			while (chosen.size() > 1 && rawBytes / 2 > Replay::MaxRecordedCheckpointBytes)
+			{
+				std::error_code error {};
+				rawBytes -= std::filesystem::file_size(chosen.front().Save, error)
+					+ std::filesystem::file_size(chosen.front().Sidecar, error);
+				chosen.erase(chosen.begin());
+			}
+
+			const int written = chosen.empty() ? 0 : ReplayState.File.WriteCheckpointArchive(
+				chosen, Replay::MaxRecordedCheckpointBytes, Replay::RecordedCheckpointProbes);
+
+			Debug::Log("[Replay] Embedded %d of %u staged saves as checkpoints (the recording ends at frame %d).\n",
+				written, static_cast<unsigned int>(StagedCheckpoints.size()), lastFrame);
+			DiscardStagedCheckpoints();
 		}
 
 		int KeyframeInterval()
@@ -575,7 +676,7 @@ namespace ReplaySystem
 
 		void OnPlaybackStopped()
 		{
-			RecordedCheckpoints.clear();
+			DiscardStagedCheckpoints();
 			RecordingSimulationInProgress = false;
 			if (State.StoreReady)
 				RemoveKeyframeFiles();
