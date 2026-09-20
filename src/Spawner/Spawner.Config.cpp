@@ -90,6 +90,14 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		PacketRedundancy = pINI->ReadBool(pSettingsSection, "PacketRedundancy", PacketRedundancy);
 		RedundancyCopies = pINI->ReadInteger(pSettingsSection, "RedundancyCopies", RedundancyCopies);
 		AdaptiveRedundancy = pINI->ReadBool(pSettingsSection, "AdaptiveRedundancy", AdaptiveRedundancy);
+		RedundantAcks    = pINI->ReadBool(pSettingsSection, "RedundantAcks", RedundantAcks);
+		FrameAwareGate   = pINI->ReadBool(pSettingsSection, "FrameAwareGate", FrameAwareGate);
+		AdaptiveLatencyDescent = pINI->ReadBool(pSettingsSection, "AdaptiveLatencyDescent", AdaptiveLatencyDescent);
+		ConnectionTimeoutFloor = pINI->ReadInteger(pSettingsSection, "ConnectionTimeoutFloor", ConnectionTimeoutFloor);
+		RenderSkip       = pINI->ReadBool(pSettingsSection, "RenderSkip", RenderSkip);
+		RenderSkipMax    = pINI->ReadInteger(pSettingsSection, "RenderSkipMax", RenderSkipMax);
+		RenderSkipBudgetMs = pINI->ReadInteger(pSettingsSection, "RenderSkipBudgetMs", RenderSkipBudgetMs);
+		NetDiagnostics   = pINI->ReadBool(pSettingsSection, "NetDiagnostics", NetDiagnostics);
 		ForceMultiplayer = pINI->ReadBool(pSettingsSection, "ForceMultiplayer", ForceMultiplayer);
 	}
 

@@ -128,6 +128,14 @@ public:
 	bool PacketRedundancy;
 	int  RedundancyCopies;
 	bool AdaptiveRedundancy;
+	bool RedundantAcks;
+	bool FrameAwareGate;
+	bool AdaptiveLatencyDescent;
+	int  ConnectionTimeoutFloor;
+	bool RenderSkip;
+	int  RenderSkipMax;
+	int  RenderSkipBudgetMs;
+	bool NetDiagnostics;
 	bool ForceMultiplayer;
 
 	// Tunnel Options
@@ -211,6 +219,14 @@ public:
 		, PacketRedundancy { true }
 		, RedundancyCopies { 2 }
 		, AdaptiveRedundancy { true }
+		, RedundantAcks { true }
+		, FrameAwareGate { true }
+		, AdaptiveLatencyDescent { true }
+		, ConnectionTimeoutFloor { 300 }
+		, RenderSkip { true }
+		, RenderSkipMax { 1 }
+		, RenderSkipBudgetMs { 20 }
+		, NetDiagnostics { true }
 		, ForceMultiplayer { false }
 
 		// Tunnel Options

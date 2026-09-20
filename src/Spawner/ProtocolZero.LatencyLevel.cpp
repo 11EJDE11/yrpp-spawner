@@ -27,8 +27,28 @@
 
 LatencyLevelEnum LatencyLevel::CurentLatencyLevel = LatencyLevelEnum::LATENCY_LEVEL_INITIAL;
 unsigned char LatencyLevel::NewFrameSendRate = 3;
+bool LatencyLevel::AllowDescent = false;
+int LatencyLevel::TargetMaxAhead = 0;
 
-void LatencyLevel::Apply(LatencyLevelEnum newLatencyLevel)
+namespace
+{
+	int  g_lastChangeFrame = 0;
+	int  g_lastEvaluationFrame = 0;
+	bool g_hasEvaluated = false;
+	bool g_hasChanged = false;
+	int  g_goodEvaluations = 0;
+	bool g_descentStreak = false;
+
+	// Flap memory: the level a descent was pushed back off, and until when it
+	// stays refused.
+	int  g_blockedBelow = 0;
+	int  g_blockedUntilFrame = 0;
+	int  g_lastDescentFrame = 0;
+	int  g_lastDescentFrom = 0;
+	int  g_lastRaiseFrame = 0;
+}
+
+void LatencyLevel::Apply(LatencyLevelEnum newLatencyLevel, int eventFrame)
 {
 	if (newLatencyLevel > LatencyLevelEnum::LATENCY_LEVEL_MAX)
 		newLatencyLevel = LatencyLevelEnum::LATENCY_LEVEL_MAX;
@@ -47,12 +67,183 @@ void LatencyLevel::Apply(LatencyLevelEnum newLatencyLevel)
 		, (int)Unsorted::CurrentFrame
 	);
 
+	Commit(newLatencyLevel, eventFrame);
+}
+
+// Applies one agreed level. Two engine constraints govern what may be applied:
+// commands are stamped at roundup(Frame + MaxAhead, FrameSendRate) and protocol
+// 2 only executes on frames divisible by the rate (0x647F36), so MaxAhead must
+// stay an exact multiple of FrameSendRate; and a decrease needs the timing
+// window at 0x4C8033 to reschedule what is already queued.
+void LatencyLevel::Commit(LatencyLevelEnum newLatencyLevel, int eventFrame)
+{
+	const int previousLevel = (int)CurentLatencyLevel;
+	const int previousTarget = TargetMaxAhead;
+
 	CurentLatencyLevel = newLatencyLevel;
-	NewFrameSendRate = static_cast<unsigned char>(newLatencyLevel);
 	Game::Network::PreCalcFrameRate = 60;
-	Game::Network::PreCalcMaxAhead = GetMaxAhead(newLatencyLevel);
+
+	// The rate follows the level in both directions. The vanilla ladder is then
+	// self-consistent at every rung - MaxAhead 4/6/12/16/20/24/28/32/36 is an
+	// exact multiple of its own level - which is the invariant the engine needs.
+	NewFrameSendRate = static_cast<unsigned char>(newLatencyLevel);
+
+	const int rate = NewFrameSendRate < 1 ? 1 : (int)NewFrameSendRate;
+	int target = GetMaxAhead(newLatencyLevel);
+
+	// Westwood's documented floor, from the protocol comment in queue.cpp: the
+	// minimum MaxAhead is "n * 2, to give both sides some breathing room in case
+	// a FRAMEINFO packet gets missed". The ladder already clears it at every
+	// level; this guards the arithmetic, not the table.
+	if (target < 2 * rate)
+		target = 2 * rate;
+
+	if ((target % rate) != 0 || target < 2 * rate)
+	{
+		Debug::Log("[Audit] INVARIANT Commit produced maxahead=%d fsr=%d for level %d (divides=%d floor_ok=%d) - this pair must never be sent\n"
+			, target, rate, (int)newLatencyLevel
+			, (int)((target % rate) == 0), (int)(target >= 2 * rate));
+	}
+
+	TargetMaxAhead = target;
+	Game::Network::PreCalcMaxAhead = target;
+
+	Debug::Log("[Audit] latency frame=%d (event) lvl %d->%d | target maxahead %d->%d | engine maxahead=%d fsr=%d | multiple=%d | vanilla lvl=%d maxahead=%d\n"
+		, eventFrame
+		, previousLevel, (int)newLatencyLevel
+		, previousTarget, target
+		, (int)Game::Network::MaxAhead, rate
+		, (target % rate == 0)
+		, previousLevel, GetMaxAhead((LatencyLevelEnum)previousLevel)
+	);
+
+	if ((int)newLatencyLevel > previousLevel)
+	{
+		g_lastRaiseFrame = eventFrame;
+
+		// Undoing a descent this quickly means the level we dropped to was not
+		// actually supportable. Refuse it for a while rather than trying again
+		// on the same evidence.
+		if (g_lastDescentFrame && (eventFrame - g_lastDescentFrame) <= ReversalWindowFrames)
+		{
+			g_blockedBelow = g_lastDescentFrom;
+			g_blockedUntilFrame = eventFrame + FlapCooldownFrames;
+			Debug::Log("[Audit] latency frame=%d descent to %d reversed after %d frames - refusing below %d until %d\n"
+				, eventFrame, (int)CurentLatencyLevel, eventFrame - g_lastDescentFrame
+				, g_blockedBelow, g_blockedUntilFrame);
+		}
+	}
+	else if ((int)newLatencyLevel < previousLevel)
+	{
+		g_lastDescentFrame = eventFrame;
+		g_lastDescentFrom = previousLevel;
+	}
+
+	g_lastChangeFrame = eventFrame;
+	g_hasChanged = true;
 
 	MessageListClass::Instance.PrintMessage(GetLatencyMessage(newLatencyLevel), (int)(RulesClass::Instance->MessageDelay * 900), ColorScheme::White, true);
+}
+
+void LatencyLevel::ResetDescent()
+{
+	g_goodEvaluations = 0;
+	g_descentStreak = false;
+}
+
+void LatencyLevel::Update(LatencyLevelEnum desired, int worstResponseTime, int eventFrame)
+{
+	if (desired > CurentLatencyLevel)
+	{
+		// Worsening is never gated. Under-provisioning stalls everyone.
+		Apply(desired, eventFrame);
+		ResetDescent();
+		return;
+	}
+
+	if (!AllowDescent || desired >= CurentLatencyLevel || CurentLatencyLevel <= LatencyLevelEnum::LATENCY_LEVEL_1)
+	{
+		ResetDescent();
+		return;
+	}
+
+	// The clock is the event stream, never Unsorted::CurrentFrame. This handler
+	// runs when a ResponseTime2 event executes, and a late one is deliberately
+	// let through by the hook at 0x64C598 rather than rejected - so the local
+	// frame at which it runs differs between machines. Gating on that frame is
+	// what let one machine take a descent step the others never took.
+	const int frame = eventFrame;
+	if (g_hasEvaluated && (frame - g_lastEvaluationFrame) < EvaluationIntervalFrames)
+		return;
+
+	g_hasEvaluated = true;
+	g_lastEvaluationFrame = frame;
+
+	// The improvement must still hold with the measurement inflated, so a
+	// marginal reading never triggers a step. This is what stops oscillation.
+	int inflated = worstResponseTime <= 0 ? 0 : (worstResponseTime * HeadroomNumerator) / HeadroomDenominator;
+	if (inflated > 255)
+		inflated = 255;
+
+	const auto headroomLevel = FromResponseTime(static_cast<uint8_t>(inflated));
+	if (headroomLevel >= CurentLatencyLevel)
+	{
+		ResetDescent();
+		return;
+	}
+
+	// A rung that was just pushed back up stays refused for a while.
+	if (frame < g_blockedUntilFrame && (int)CurentLatencyLevel <= g_blockedBelow)
+		return;
+
+	// A raise blocks the next descent for longer than an ordinary change.
+	if (g_lastRaiseFrame && (frame - g_lastRaiseFrame) < RaiseCooldownFrames)
+		return;
+
+	// A streak that is already descending keeps going; the first step waits for
+	// the cooldown to expire.
+	if (g_hasChanged && !g_descentStreak && (frame - g_lastChangeFrame) < ChangeCooldownFrames)
+		return;
+
+	++g_goodEvaluations;
+	if (g_goodEvaluations < (g_descentStreak ? 1 : GoodEvaluationsRequired))
+		return;
+
+	// One rung per evaluation.
+	//
+	// Descending straight to the level the measurement supports is safe - the
+	// hook at 0x4C8033 repairs a 9->1 transition exactly as it does 9->8 - but
+	// it is not stable. A full-depth drop lands at the bottom of the ladder on a
+	// single good measurement and is then pulled straight back: measured as
+	// 3->1 reversed 238 frames later, and again 3->1 reversed after 641. Each
+	// reversal is a visible MaxAhead swing and a message to every player.
+	//
+	// Stepping one rung costs descent speed - a 9->1 recovery walks down over
+	// several evaluation intervals rather than one - and buys far fewer
+	// reversals. If the slow descent matters more than the churn, the middle
+	// option is a bounded step (two or three rungs) rather than either extreme.
+	int target = static_cast<int>(CurentLatencyLevel) - 1;
+	if (target < static_cast<int>(headroomLevel))
+		target = static_cast<int>(headroomLevel);
+	if (target < static_cast<int>(LatencyLevelEnum::LATENCY_LEVEL_1))
+		target = static_cast<int>(LatencyLevelEnum::LATENCY_LEVEL_1);
+
+	const auto next = static_cast<LatencyLevelEnum>(target);
+
+	Debug::Log("Player %ls, Latency descent %d -> %d (desired %d, headroom lvl %d from %d, rtt %d) Frame = %d\n"
+		, HouseClass::CurrentPlayer->UIName
+		, (int)CurentLatencyLevel
+		, (int)next
+		, (int)desired
+		, (int)headroomLevel
+		, inflated
+		, worstResponseTime
+		, frame
+	);
+
+	Commit(next, eventFrame);
+	g_descentStreak = true;
+	g_goodEvaluations = 0;
 }
 
 int LatencyLevel::GetMaxAhead(LatencyLevelEnum latencyLevel)

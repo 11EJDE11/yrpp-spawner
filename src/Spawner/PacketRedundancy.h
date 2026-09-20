@@ -25,6 +25,11 @@
 *  retransmit. The duplicate is byte-identical and rides below the engine's
 *  reliable/in-order layer, which acknowledges duplicate PacketIDs without
 *  delivering commands twice.
+*
+*  Acknowledgements (PACKET_ACK) are duplicated on the same terms. Re-marking an
+*  already-acknowledged send entry is idempotent, and a lost ACK is as expensive
+*  as a lost command: it costs the sender a full retransmit timeout and a
+*  usable RTT sample.
 */
 
 #pragma once
@@ -41,6 +46,8 @@ public:
 	static int  Copies;
 	// When true, only duplicate to peers where recent packet loss is observed.
 	static bool Adaptive;
+	// When true, acknowledgements are duplicated as well as commands.
+	static bool Acks;
 
 	static void Reset();
 	static int ClampCopies(int copies);
@@ -52,8 +59,18 @@ public:
 
 	// Loss signal for adaptive mode.
 	static void NoteResend(const ConnectionClass* connection);
+
+	// Feeds one received unreliable packet id. A forward gap tops up that peer's
+	// loss gauge immediately, without waiting for a retransmit timeout.
+	static void NoteInboundPacket(const ConnectionClass* connection, int packetId);
 	static int LossGauge(int peer);
+	// Total duplicate datagrams emitted for this peer, for diagnostics.
+	static int Duplicates(int peer);
 
 	// Logs failed duplicate sends at most once per second.
 	static void NoteExtraSend(int sendResult);
+
+	// Extra datagrams this feature has put on the wire beyond what vanilla
+	// would have sent, and how many of those sends failed.
+	static void GetCostStats(int& extraDatagrams, int& extraFailed);
 };
