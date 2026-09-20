@@ -104,8 +104,6 @@ namespace
 	int g_waitFirstCommandPeer = -1;
 	bool g_waitSawFrameBlock = false;
 	bool g_waitSawCommandBlock = false;
-	int g_lastRelaxedFrame = -1;
-	unsigned int g_relaxedFrames = 0;
 
 	// Run-length histogram of consecutive unreliable-packet loss, per connection.
 	// Buckets: 1, 2, 3, 4, 5, 6-9, 10+.
@@ -236,19 +234,10 @@ void NetDiagnostics::Reset()
 	g_frameEnteredTick = 0;
 	g_waiting = false;
 	g_waitStarted = g_waitReported = g_waitTotal = 0;
-	g_waitCount = g_relaxedFrames = 0;
-	g_waitFrame = g_lastRelaxedFrame = -1;
+	g_waitCount = 0;
+	g_waitFrame = -1;
 	for (int i = 0; i < 8; ++i)
 		g_noack[i] = NoAckTracker {};
-}
-
-void NetDiagnostics::NoteGateRelaxation(int frame)
-{
-	if (Enabled && frame != g_lastRelaxedFrame)
-	{
-		g_lastRelaxedFrame = frame;
-		++g_relaxedFrames;
-	}
 }
 
 void NetDiagnostics::NoteWait(int commandPeer, int minimumFrame, int maxAhead)

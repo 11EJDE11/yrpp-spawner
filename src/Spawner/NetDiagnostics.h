@@ -46,7 +46,6 @@ public:
 	static void Reset();
 	static void NoteWait(int commandPeer, int minimumFrame, int maxAhead);
 	static void EndWait();
-	static void NoteGateRelaxation(int frame);
 
 	// Called from IPXManagerClass::Service, which runs both once per frame and
 	// on every iteration of the Wait_For_Players stall spin.

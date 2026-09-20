@@ -18,7 +18,6 @@
 */
 
 #include "FrameGate.h"
-#include "NetDiagnostics.h"
 
 #include <Helpers/Macro.h>
 #include <Fundamentals.h>
@@ -182,11 +181,6 @@ bool FrameGate::AllCommandsSatisfied(TheirSync* peers, int* gapIndex)
 		if (*gapIndex < 0)
 			*gapIndex = i;
 	}
-
-	// Count only decisions that also have frame runway: a relaxed peer alone
-	// does not mean the overall gate allowed progress.
-	if (allSat && relaxed && nconn > 0 && frame < minFrame + ma)
-		NetDiagnostics::NoteGateRelaxation(frame);
 
 	return allSat;
 }
