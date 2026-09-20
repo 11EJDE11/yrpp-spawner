@@ -54,6 +54,9 @@ public:
 
 	static void Reset();
 
+	// Diagnostic snapshot; never used to change the gate.
+	static int GetSafeThrough(int peer);
+
 	// Called in place of the vanilla command-count loop. Returns true if every
 	// peer's commands for the current frame are in hand (vanilla recv>=send OR
 	// the frame-aware relaxation). On false, *gapIndex is the first blocking

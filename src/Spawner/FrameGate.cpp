@@ -18,6 +18,7 @@
 */
 
 #include "FrameGate.h"
+#include "NetDiagnostics.h"
 
 #include <Helpers/Macro.h>
 #include <Fundamentals.h>
@@ -119,6 +120,12 @@ namespace
 	}
 }
 
+int FrameGate::GetSafeThrough(int peer)
+{
+	InitOnce();
+	return peer >= 0 && peer < MaxPeers ? SafeThrough[peer] : INT_MIN;
+}
+
 void FrameGate::Reset()
 {
 	InitOnce();
@@ -154,19 +161,32 @@ bool FrameGate::AllCommandsSatisfied(TheirSync* peers, int* gapIndex)
 	const bool relaxOK = Enabled && !topologyChanged && frame >= guardUntilFrame;
 
 	bool allSat = true;
+	bool relaxed = false;
+	int minFrame = INT_MAX;
 
 	for (int i = 0; i < nconn; ++i)
 	{
+		if (peers[i].Frame < minFrame)
+			minFrame = peers[i].Frame;
+
 		if (static_cast<unsigned int>(peers[i].CommandsReceived) >= static_cast<unsigned int>(peers[i].CommandsSent))
 			continue;
 
 		if (relaxOK && SafeThrough[i] >= frame)
+		{
+			relaxed = true;
 			continue;
+		}
 
 		allSat = false;
 		if (*gapIndex < 0)
 			*gapIndex = i;
 	}
+
+	// Count only decisions that also have frame runway: a relaxed peer alone
+	// does not mean the overall gate allowed progress.
+	if (allSat && relaxed && nconn > 0 && frame < minFrame + ma)
+		NetDiagnostics::NoteGateRelaxation(frame);
 
 	return allSat;
 }

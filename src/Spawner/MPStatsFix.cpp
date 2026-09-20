@@ -35,6 +35,7 @@
 #include <IPXManagerClass.h>
 #include <SessionClass.h>
 #include "FrameGate.h"
+#include <Unsorted.h>
 
 // Replaces the mis-indexed "++MPStats[v79].CommandCoundStalls" at 0x6497DC.
 // Recomputes the real culprit - the first peer whose received command count
@@ -50,15 +51,35 @@ DEFINE_HOOK(0x6497DC, WaitForPlayers_CommandStallStat_Fix, 0x7)
 
 	const TheirSync* their = FrameGate::Peers();
 
+	// A count gap alone does not identify the blocker. FrameGate deliberately
+	// lets a peer run with CommandsReceived < CommandsSent while the missing
+	// commands belong to frames we have not reached yet, so the first peer with
+	// a gap is often one that is not holding anybody up. Prefer a peer that is
+	// both behind on count and not covered by its SafeThrough; fall back to the
+	// first peer with a gap only when none qualifies, which keeps the stat
+	// populated and still avoids the vanilla negative index.
 	int culprit = -1;
+	int fallback = -1;
 	for (int i = 0; i < nconn; ++i)
 	{
-		if (static_cast<unsigned int>(their[i].CommandsReceived) < static_cast<unsigned int>(their[i].CommandsSent))
+		if (static_cast<unsigned int>(their[i].CommandsReceived) >= static_cast<unsigned int>(their[i].CommandsSent))
+			continue;
+
+		if (fallback < 0)
+			fallback = i;
+
+		// SafeThrough is FrameGate's watermark for how far this peer's commands
+		// are known good. Covering the current frame means the gap is entirely
+		// in the future and this peer is not what anyone is waiting on.
+		if (FrameGate::GetSafeThrough(i) < (int)Unsorted::CurrentFrame)
 		{
 			culprit = i;
 			break;
 		}
 	}
+
+	if (culprit < 0)
+		culprit = fallback;
 
 	if (culprit >= 0)
 		++SessionClass::Instance.MPStats[culprit].CommandCoundStalls;

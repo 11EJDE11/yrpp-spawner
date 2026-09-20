@@ -29,6 +29,22 @@ private:
 
 public:
 	static bool Enable;
+	// Report max(engine response time, clean measured round trip) rather than the
+	// engine's figure alone. Avg_Response_Time is a 256-sample mean fed only by
+	// acknowledged reliable packets, so it climbs about one tick per 400 frames -
+	// a link that degrades suddenly takes minutes to reach the rung it needs, and
+	// the game is jittery for all of it. The clean estimate settles in seconds.
+	//
+	// Taking the maximum can only ever report a HIGHER figure than today, so it
+	// can never select less headroom than current behaviour. Under sustained loss
+	// the engine's figure is the larger of the two and still wins, which keeps the
+	// loss margin its inflation accidentally provides - and keeps descents, which
+	// track that same slow figure, exactly as conservative as they are now.
+
+	// Minimum per-connection timeout, in 16 ms engine ticks. The engine's own
+	// floor is 120 (1.92 s), which drops a client that stalls briefly for local
+	// reasons. Zero keeps vanilla behaviour.
+	static int ConnectionTimeoutFloor;
 	static unsigned char MaxLatencyLevel;
 	static int WorstMaxAhead;
 	static int NextSendFrame;

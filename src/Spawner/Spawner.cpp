@@ -24,6 +24,9 @@
 #include "ProtocolZero.LatencyLevel.h"
 #include "FrameGate.h"
 #include "FastRetransmit.h"
+#include "FrameGate.h"
+#include "NetDiagnostics.h"
+#include "RenderSkip.h"
 #include "PacketRedundancy.h"
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
@@ -423,12 +426,24 @@ void Spawner::InitNetwork()
 	PacketRedundancy::Enabled  = pSpawnerConfig->PacketRedundancy;
 	PacketRedundancy::Copies   = PacketRedundancy::ClampCopies(pSpawnerConfig->RedundancyCopies);
 	PacketRedundancy::Adaptive = pSpawnerConfig->AdaptiveRedundancy;
+	PacketRedundancy::Acks     = pSpawnerConfig->RedundantAcks;
+	FrameGate::Enabled         = pSpawnerConfig->FrameAwareGate;
+	RenderSkip::Enabled        = pSpawnerConfig->RenderSkip;
+	RenderSkip::MaxConsecutive = pSpawnerConfig->RenderSkipMax < 1 ? 1 : pSpawnerConfig->RenderSkipMax;
+	RenderSkip::BudgetMs       = pSpawnerConfig->RenderSkipBudgetMs;
+	NetDiagnostics::Enabled    = pSpawnerConfig->NetDiagnostics;
 	FastRetransmit::Reset();
 	PacketRedundancy::Reset();
+	FrameGate::Reset();
+	RenderSkip::Reset();
+	NetDiagnostics::Reset();
 	if (ProtocolZero::Enable)
 	{
 		Game::Network::FrameSendRate = 2;
 		Game::Network::PreCalcMaxAhead = pSpawnerConfig->PreCalcMaxAhead;
+
+		LatencyLevel::AllowDescent = pSpawnerConfig->AdaptiveLatencyDescent;
+		ProtocolZero::ConnectionTimeoutFloor = pSpawnerConfig->ConnectionTimeoutFloor;
 
 		ProtocolZero::NextSendFrame = -1;
 		ProtocolZero::WorstMaxAhead = LatencyLevel::GetMaxAhead(LatencyLevelEnum::LATENCY_LEVEL_6);
