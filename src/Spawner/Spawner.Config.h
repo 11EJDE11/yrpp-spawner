@@ -130,7 +130,6 @@ public:
 	int  RedundancyCopies;
 	bool AdaptiveRedundancy;
 	bool RedundantAcks;
-	bool FrameAwareGate;
 	bool AdaptiveLatencyDescent;
 	int  ConnectionTimeoutFloor;
 	bool RenderSkip;
@@ -222,7 +221,6 @@ public:
 		, RedundancyCopies { 2 }
 		, AdaptiveRedundancy { true }
 		, RedundantAcks { true }
-		, FrameAwareGate { true }
 		, AdaptiveLatencyDescent { true }
 		, ConnectionTimeoutFloor { 300 }
 		, RenderSkip { true }

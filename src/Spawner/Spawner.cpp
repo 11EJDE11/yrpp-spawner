@@ -24,7 +24,6 @@
 #include "ProtocolZero.LatencyLevel.h"
 #include "FrameGate.h"
 #include "FastRetransmit.h"
-#include "FrameGate.h"
 #include "NetDiagnostics.h"
 #include "RenderSkip.h"
 #include "PacketRedundancy.h"
@@ -418,8 +417,6 @@ void Spawner::InitNetwork()
 	Game::Network::GameStockKeepingUnit = 0x2901;
 
 	ProtocolZero::Enable = (pSpawnerConfig->Protocol == 0);
-	FrameGate::Enabled = pSpawnerConfig->FrameAwareGate;
-	FrameGate::Reset();
 
 	FastRetransmit::Enabled    = pSpawnerConfig->FastRetransmit;
 	FastRetransmit::Backoff    = pSpawnerConfig->FastRetransmit && pSpawnerConfig->RetransmitBackoff;

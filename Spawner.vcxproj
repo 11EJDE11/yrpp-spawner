@@ -57,8 +57,6 @@
     <ClCompile Include="$(ThisDir)\src\Spawner\MPStatsFix.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\FastRetransmit.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\NetDiagnostics.cpp" />
-    <ClCompile Include="$(ThisDir)\src\Spawner\FrameGate.cpp" />
-    <ClCompile Include="$(ThisDir)\src\Spawner\MPStatsFix.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\NetHack.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\PacketRedundancy.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\RenderSkip.cpp" />
@@ -95,7 +93,6 @@
     <ClInclude Include="$(ThisDir)\src\Spawner\FrameGate.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\FastRetransmit.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\NetDiagnostics.h" />
-    <ClInclude Include="$(ThisDir)\src\Spawner\FrameGate.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\NetHack.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\PacketRedundancy.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\RenderSkip.h" />
