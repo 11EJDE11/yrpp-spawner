@@ -19,6 +19,7 @@
 
 #include "Spawner.h"
 #include "NetHack.h"
+#include <Replay/ReplaySystem.h>
 
 #include <HouseClass.h>
 #include <SessionClass.h>
@@ -228,6 +229,7 @@ DEFINE_HOOK(0x52DAEF, Game_Start_ResetGlobal, 0x5)
 	Spawner::DoSave = false;
 	Spawner::NextAutoSaveFrame = -1;
 	Spawner::NextAutoSaveNumber = 0;
+	ReplaySystem::OnGameStartReset();
 	return 0;
 }
 

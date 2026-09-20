@@ -104,6 +104,31 @@ public:
 	int AutoSaveInterval;
 	int NextAutoSaveNumber;
 
+	// Replay Options
+	bool EnableReplayRecording;
+	// Where a recording is written, relative to the game directory. Missing folders are created.
+	char ReplayFileOut[MAX_PATH];
+	// The replay to watch. Empty means no playback.
+	char ReplayFile[MAX_PATH];
+	// Keep the recording player's shroud instead of revealing the map.
+	bool ReplayShroudEnabled;
+	// Move the camera yourself instead of following the recorded view.
+	bool ReplayFreeCamera;
+	bool ReplayShowSelections;
+	// Playback frame rate. Zero uses the recorded speed.
+	int  ReplayPlaybackSpeed;
+	// Watch as an observer with full map visibility.
+	bool ReplaySpectator;
+	// Playback only. Recording chat, beacons and taunts is unconditional.
+	bool ReplayShowChatAndBeacons;
+	// Player slot to watch. Zero or -1 uses the recorder.
+	int  ReplayViewPlayer;
+	// Show the playback control bar initially.
+	bool ReplayControlBar;
+	// Frames between playback keyframes. Zero disables rewind keyframes.
+	int  ReplayKeyframeInterval;
+	// Maximum keyframe storage in MB. Zero disables the limit.
+	int  ReplayKeyframeStorageLimitMB;
 	// Scenario Options
 	int  Seed;
 	int  TechLevel;
@@ -181,6 +206,19 @@ public:
 		, AutoSaveCount { 5 }
 		, AutoSaveInterval { 7200 }
 		, NextAutoSaveNumber { 0 }
+		, EnableReplayRecording { false }
+		, ReplayFileOut { "replay.yrrp" }
+		, ReplayFile { "" }
+		, ReplayShroudEnabled { false }
+		, ReplayFreeCamera { false }
+		, ReplayShowSelections { true }
+		, ReplayPlaybackSpeed { 0 }
+		, ReplaySpectator { false }
+		, ReplayShowChatAndBeacons { true }
+		, ReplayViewPlayer { -1 }
+		, ReplayControlBar { false }
+		, ReplayKeyframeInterval { 750 }
+		, ReplayKeyframeStorageLimitMB { 512 }
 
 		// Scenario Options
 		, Seed { 0 }

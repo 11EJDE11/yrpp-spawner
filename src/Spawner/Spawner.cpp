@@ -22,6 +22,7 @@
 #include "NetHack.h"
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
+#include <Replay/ReplaySystem.h>
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
 #include <Misc/Bugfixes.Desyncs.h>
@@ -88,6 +89,10 @@ bool Spawner::StartGame()
 
 	bool result = StartScenario(pScenarioName);
 
+	// After the scenario exists, so there is a house to make an observer of
+	if (result)
+		ReplaySystem::ApplyPlaybackSpectator();
+
 	if (Main::GetConfig()->DumpTypes)
 		DumperTypes::Dump();
 
@@ -99,6 +104,10 @@ bool Spawner::StartGame()
 void Spawner::AssignHouses()
 {
 	ScenarioClass::AssignHouses();
+
+	// Ahead of the loop below so that MakeObserver(), which only acts on the current player, sees
+	// the house a replay is being watched from rather than the one that recorded it.
+	ReplaySystem::ApplyPlaybackViewPlayer();
 
 	const int count = std::min(HouseClass::Array.Count, (int)std::size(Spawner::Config->Houses));
 	for (int indexOfHouseArray = 0; indexOfHouseArray < count; indexOfHouseArray++)
@@ -191,6 +200,11 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 	const auto pSession = &SessionClass::Instance;
 	const auto pGameModeOptions = &GameModeOptionsClass::Instance;
+	const bool isReplayPlayback = ReplaySystem::IsPlaybackRequested();
+
+	// Which spawn.ini player slot this screen belongs to. Always 0 outside replay playback, where
+	// it is whichever player the replay is being watched from.
+	const int localPlayerIndex = ReplaySystem::GetViewPlayerIndex();
 
 	strcpy_s(Game::ScenarioName, 0x200, pScenarioName);
 	pSession->ReadScenarioDescriptions();
@@ -226,7 +240,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 		Game::Seed = Spawner::Config->Seed;
 		Game::TechLevel = Spawner::Config->TechLevel;
-		Game::PlayerColor = Spawner::Config->Players[0].Color;
+		Game::PlayerColor = Spawner::Config->Players[localPlayerIndex].Color;
 		GameOptionsClass::Instance.GameSpeed = Spawner::Config->GameSpeed;
 
 		Spawner::NextAutoSaveNumber = Spawner::Config->NextAutoSaveNumber;
@@ -271,7 +285,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 				pNode->SpectatorFlag = 0xFFFFFFFF;
 
-				if (playerIndex == 0)
+				if (playerIndex == localPlayerIndex)
 					Game::ObserverMode = true;
 			}
 
@@ -299,6 +313,9 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		else
 			pSession->GameMode = GameMode::Skirmish;
 	}
+
+	if (ReplaySystem::IsSpectatorPlayback())
+		Game::ObserverMode = true;
 
 	Game::InitRandom();
 
@@ -344,7 +361,7 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		if (Config->LoadSaveGame && !Spawner::Reconcile_Players())
 			return false;
 
-		if (!pSession->CreateConnections())
+		if (!isReplayPlayback && !pSession->CreateConnections())
 			return false;
 
 		// Ares does not support MultiEngineer switching in multiplayer, however
@@ -392,6 +409,7 @@ bool Spawner::LoadSavedGame(const char* saveGameName)
 void Spawner::InitNetwork()
 {
 	const auto pSpawnerConfig = Spawner::GetConfig();
+	const bool isReplayPlayback = ReplaySystem::IsPlaybackRequested();
 
 	Tunnel::Id = htons((u_short)pSpawnerConfig->TunnelId);
 	Tunnel::Ip = inet_addr(pSpawnerConfig->TunnelIp);
@@ -411,7 +429,7 @@ void Spawner::InitNetwork()
 	Game::Network::PlanetWestwoodStartTime = time(NULL);
 	Game::Network::GameStockKeepingUnit = 0x2901;
 
-	ProtocolZero::Enable = (pSpawnerConfig->Protocol == 0);
+	ProtocolZero::Enable = !isReplayPlayback && (pSpawnerConfig->Protocol == 0);
 	if (ProtocolZero::Enable)
 	{
 		Game::Network::FrameSendRate = 2;
@@ -428,12 +446,17 @@ void Spawner::InitNetwork()
 	}
 	else
 	{
-		Game::Network::FrameSendRate = pSpawnerConfig->FrameSendRate;
+		Game::Network::FrameSendRate = isReplayPlayback ? 1 : pSpawnerConfig->FrameSendRate;
 	}
 
-	Game::Network::MaxAhead = pSpawnerConfig->MaxAhead == -1
-		? Game::Network::FrameSendRate * 6
-		: pSpawnerConfig->MaxAhead;
+	// Playback has no peers to stay ahead of, and every frame's events come out of the file on the
+	// frame they were recorded on, so send rate and MaxAhead are both pinned to 1
+	if (isReplayPlayback)
+		Game::Network::MaxAhead = 1;
+	else if (pSpawnerConfig->MaxAhead == -1)
+		Game::Network::MaxAhead = Game::Network::FrameSendRate * 6;
+	else
+		Game::Network::MaxAhead = pSpawnerConfig->MaxAhead;
 
 	Game::Network::MaxMaxAhead      = 0;
 	Game::Network::ProtocolVersion  = 2;
