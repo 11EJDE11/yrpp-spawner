@@ -18,6 +18,7 @@
 */
 
 #include "ReplayControls.h"
+#include "ReplaySeek.h"
 #include "ReplaySystem.h"
 #include "ReplayFormat.h"
 #include "ReplaySystem.Internal.h"
@@ -158,6 +159,15 @@ namespace ReplaySystem
 			if (!ReplayState.Playback)
 				return;
 
+			// A seek is not being watched, so it runs as fast as the machine manages. The engine
+			// still has to be told not to wait, which is what the two timers below do.
+			if (ReplaySystem::Seek::IsSeeking())
+			{
+				Unsorted::GameFrameTimer.TimeLeft = 0;
+				Unsorted::NetworkFrameTimer.TimeLeft = 0;
+				return;
+			}
+
 			if (State.FrameRate <= 0)
 				return;
 
@@ -238,7 +248,7 @@ namespace ReplaySystem
 
 		void RequestSingleStep()
 		{
-			if (!ReplayState.Playback)
+			if (!ReplayState.Playback || Seek::IsSeeking())
 				return;
 
 			// Stepping out of a running replay freezes it on the next frame rather than the one
