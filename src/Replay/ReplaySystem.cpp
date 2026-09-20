@@ -20,6 +20,7 @@
 #include "ReplayControls.h"
 #include "ReplayFile.h"
 #include "ReplayFrameCodec.h"
+#include "ReplaySideChannels.h"
 #include "ReplaySystem.h"
 #include "ReplaySystem.Internal.h"
 
@@ -60,13 +61,6 @@ namespace ReplaySystem
 	{
 		ReplayRuntimeState ReplayState;
 
-		// Structural checks in the frame codec are the only validation until the
-		// side-channel layer adds the engine-side range checks.
-		bool AcceptSideChannelRecord(Replay::SideChannelRecord&)
-		{
-			return true;
-		}
-
 		void StopReplaySystem();
 		void AbortReplaySystem();
 		void ApplyPlaybackInitialState();
@@ -102,6 +96,7 @@ namespace ReplaySystem
 			ReplayState.FirstMismatchFrame = -1;
 			ReplayState.LastMismatchFrame = -1;
 			ReplayState.PendingFrameStates.clear();
+			SideChannels::Reset();
 			ReplayState.CapturedFrameEventsFrame = -1;
 			ReplayState.CapturedFrameEvents.clear();
 			ReplayState.HasPlaybackHeader = false;
@@ -387,8 +382,7 @@ namespace ReplaySystem
 				if (pendingFrame > frameNumber)
 					break;
 
-				// The side-channel layer supplies chat, beacons and taunts here.
-				static const std::vector<Replay::SideChannelRecord> sideChannelForFrame;
+				const auto& sideChannelForFrame = SideChannels::DrainThroughFrame(pendingFrame);
 
 				const int eventCount = pendingFrame == frameNumber ? currentFrameEventCount : 0;
 				if (!ReplayState.FrameWriter.WriteFrame(ReplayState.File, capture, eventCount, sideChannelForFrame))
@@ -452,7 +446,7 @@ namespace ReplaySystem
 			for (;;)
 			{
 				PlaybackFrameRecord record {};
-				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, record, AcceptSideChannelRecord))
+				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, record, SideChannels::ValidateRecord))
 				{
 					Debug::Log("[Replay] Failed to read the replay stream while seeking to frame %d.\n",
 						targetFrame);
@@ -770,7 +764,7 @@ namespace ReplaySystem
 			if (!ReplayState.HasPendingPlaybackFrame && !ReplayState.PlaybackStreamEnded)
 			{
 				PlaybackFrameRecord nextRecord {};
-				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, nextRecord, AcceptSideChannelRecord))
+				if (!ReplayState.FrameReader.ReadFrame(ReplayState.File, nextRecord, SideChannels::ValidateRecord))
 				{
 					Debug::Log("[Replay] Failed to read frame state during playback.\n");
 					StopReplaySystem();
@@ -825,6 +819,13 @@ namespace ReplaySystem
 			// LogicClass::AI - which is where the recording's click sprang them too.
 			if ((frameRecord.Flags & FrameRecordFlag_SelectionTriggers) != 0u)
 				SpringRecordedSelectionTriggers(frameRecord);
+
+			if ((frameRecord.Flags & FrameRecordFlag_SideChannel) != 0u)
+			{
+				for (const auto& sideChannelEvent : frameRecord.SideChannelEvents)
+					SideChannels::ApplyRecord(sideChannelEvent,
+						ReplayState.ShowChatAndBeacons, false);
+			}
 
 			if ((frameRecord.Flags & FrameRecordFlag_GameCRC) != 0u)
 			{
