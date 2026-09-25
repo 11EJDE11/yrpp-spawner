@@ -185,7 +185,7 @@ namespace
 		Debug::Log("[Audit] config protocolzero=%d descent=%d timeoutfloor=%d maxlatency=%d"
 			" | retransmit=%d backoff=%d"
 			" | redundancy=%d copies=%d adaptive=%d acks=%d"
-			" | framegate=%d renderskip=%d rsmax=%d rsbudget=%d\n",
+			" | framegate=%d renderskip=%d rsminms=%d rsshare=%d\n",
 			(int)ProtocolZero::Enable, (int)LatencyLevel::AllowDescent,
 			ProtocolZero::ConnectionTimeoutFloor,
 			(int)ProtocolZero::MaxLatencyLevel,
@@ -193,7 +193,7 @@ namespace
 			(int)PacketRedundancy::Enabled, PacketRedundancy::Copies,
 			(int)PacketRedundancy::Adaptive, (int)PacketRedundancy::Acks,
 			(int)FrameGate::Enabled, (int)RenderSkip::Enabled,
-			RenderSkip::MaxConsecutive, RenderSkip::BudgetMs);
+			RenderSkip::MinProcessMs, RenderSkip::RenderSharePercent);
 
 		{
 			// GetTickCount is machine uptime; it cannot align two logs. A UTC
@@ -462,14 +462,6 @@ void NetDiagnostics::LogResponseDecision(int engineTicks, int cleanTicks, int ch
 	// headroom is what remains before the signed byte saturates at 126. A run
 	// of games that never gets near it says the saturation guard is insurance;
 	// a run that reaches it says the reported figure itself is the problem.
-}
-
-void NetDiagnostics::LogRenderDecision(int skipped, int rendered, int processMs,
-	int budgetMs, int behind, int engageBehind, bool active)
-{
-	if (!Enabled)
-		return;
-
 }
 
 namespace

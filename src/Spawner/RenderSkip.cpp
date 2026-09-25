@@ -23,20 +23,18 @@
 
 #include <Helpers/Macro.h>
 #include <GScreenClass.h>
-#include <IPXManagerClass.h>
-#include <TheirSync.h>
 #include <SessionClass.h>
 #include <Unsorted.h>
 #include <Utilities/Debug.h>
-#include "NetDiagnostics.h"
 
 bool RenderSkip::Enabled = true;
-int  RenderSkip::MaxConsecutive = 4;
-int  RenderSkip::BudgetMs = 0;
+int  RenderSkip::MinProcessMs = 20;
+int  RenderSkip::RenderSharePercent = 25;
 
 namespace
 {
-
+	// Draw two frames, then drop one - two frames in three.
+	const int DrawRun = 2;
 
 	// Engage fast, release slow. Flapping costs more than staying engaged a
 	// little too long, and both inputs sit on coarse integers - at MaxAhead 4
@@ -54,9 +52,20 @@ namespace
 	// cost if every one were rendered. The process figure alone cannot answer
 	// that - throttling is part of what it measures, so a release threshold
 	// below the engage threshold can be permanently unreachable.
-	int   g_renderCostMs = -1;   // EWMA, alpha = 1/4
+	int   g_renderCostUs = -1;   // EWMA, alpha = 1/4
+
+	// Rendered and skipped frames within the engine's current ProcessingTicks
+	// window, so the skip fraction describes the same frames as the average it
+	// corrects. Queue_AI_Multiplayer zeroes that window every 128 frames; a drop
+	// in ProcessingFrames is how the reset is seen from here.
 	int   g_windowRendered = 0;
 	int   g_windowSkipped = 0;
+	int   g_lastWindowFrames = 0;
+
+	// The average is only trusted once the window holds this many frames. At
+	// four frames, one 80ms hitch - an explosion, a stall on disk - averages out
+	// above the budget and engaged the throttle on a machine that keeps up fine.
+	const int MinWindowFrames = 32;
 	int   g_engagedAtFrame = 0;
 
 	// Hard ceiling on one engagement. Even if the projection is wrong, the
@@ -64,51 +73,15 @@ namespace
 	const int MaxEngagedFrames = 3600;
 
 	bool  g_active = false;
-	int   g_consecutiveSkips = 0;
+	int   g_drawRun = 0;
 	int   g_engageRun = 0;
 	int   g_releaseRun = 0;
-	int   g_skipped = 0;
-	int   g_rendered = 0;
-	DWORD g_lastSummaryTick = 0;
-
-	int ConnectionCount()
-	{
-		int nconn = static_cast<int>(IPXManagerClass::Instance.NumConnections);
-		const int arraySize = sizeof(IPXManagerClass::Instance.Connection) / sizeof(IPXManagerClass::Instance.Connection[0]);
-		if (nconn < 0) nconn = 0;
-		if (nconn > arraySize) nconn = arraySize;
-		return nconn;
-	}
-
-	// How far the slowest peer has run ahead of us. Positive means the others
-	// are waiting on this client, which is the only case where dropping our own
-	// render buys the game anything.
-	int FramesBehindPeers()
-	{
-		const int nconn = ConnectionCount();
-		if (nconn <= 0)
-			return 0;
-
-		int slowest = TheirSync::Array[0].Frame;
-		for (int i = 1; i < nconn; ++i)
-			if (TheirSync::Array[i].Frame < slowest)
-				slowest = TheirSync::Array[i].Frame;
-
-		return slowest - static_cast<int>(Unsorted::CurrentFrame);
-	}
-
-	// Below this there is no point intervening: rendering is not what is making
-	// the client slow, and dropping frames would cost picture quality for nothing.
-	const int MinimumBudgetMs = 20;
 
 	int FrameBudgetMs()
 	{
-		if (RenderSkip::BudgetMs > 0)
-			return RenderSkip::BudgetMs;
-
 		const int fps = Game::Network::RequestedFPS;
 		const int derived = fps > 0 ? (1000 / fps) : 16;
-		return derived < MinimumBudgetMs ? MinimumBudgetMs : derived;
+		return derived < RenderSkip::MinProcessMs ? RenderSkip::MinProcessMs : derived;
 	}
 
 	// Average cost of the frames in the current 128-frame accounting window.
@@ -118,46 +91,26 @@ namespace
 		const int frames = Game::Network::ProcessingFrames;
 		return frames >= 4 ? (Game::Network::ProcessingTicks / frames) : 0;
 	}
-
-	void Summarise()
-	{
-		const DWORD now = GetTickCount();
-		if (g_lastSummaryTick != 0 && (now - g_lastSummaryTick) < 5000)
-			return;
-		g_lastSummaryTick = now;
-
-		if (g_skipped == 0 && g_rendered == 0)
-			return;
-
-		g_windowRendered = 0;
-		g_windowSkipped = 0;
-
-
-		g_skipped = 0;
-		g_rendered = 0;
-	}
 }
 
-void RenderSkip::NoteRenderCost(int ms)
+void RenderSkip::NoteRenderCost(int us)
 {
-	if (ms < 0 || ms > 1000)
+	if (us < 0 || us > 1000000)
 		return;
-	g_renderCostMs = (g_renderCostMs < 0) ? ms : (g_renderCostMs + ((ms - g_renderCostMs) >> 2));
+	g_renderCostUs = (g_renderCostUs < 0) ? us : (g_renderCostUs + ((us - g_renderCostUs) >> 2));
 }
 
 void RenderSkip::Reset()
 {
-	g_renderCostMs = -1;
+	g_renderCostUs = -1;
 	g_windowRendered = 0;
 	g_windowSkipped = 0;
+	g_lastWindowFrames = 0;
 	g_engagedAtFrame = 0;
 	g_active = false;
-	g_consecutiveSkips = 0;
+	g_drawRun = 0;
 	g_engageRun = 0;
 	g_releaseRun = 0;
-	g_skipped = 0;
-	g_rendered = 0;
-	g_lastSummaryTick = 0;
 }
 
 bool RenderSkip::ThrottleActive()
@@ -176,37 +129,34 @@ bool RenderSkip::ShouldRenderThisFrame()
 	if (!Enabled || SessionClass::IsSingleplayer())
 		return true;
 
-	Summarise();
+	const int windowFrames = Game::Network::ProcessingFrames;
+	if (windowFrames < g_lastWindowFrames)
+	{
+		g_windowRendered = 0;
+		g_windowSkipped = 0;
+	}
+	g_lastWindowFrames = windowFrames;
 
 	const int budget = FrameBudgetMs();
 	const int average = AverageProcessMs();
-	const int behind = FramesBehindPeers();
-	const int maxAhead = Game::Network::MaxAhead;
 
-	// Two conditions, deliberately. A slow client in a game where nobody is
-	// waiting should keep drawing - dropping frames there costs the player
-	// picture quality and buys the match nothing. Only when this client is the
-	// one the others are blocked on does trading render for simulation pay for
-	// itself.
+	// Engages when the average frame reaches the budget AND rendering is at
+	// least RenderSharePercent of it; releases on the projected full-render cost
+	// falling below three quarters of the budget.
 	//
-	// Each gets a hysteresis band: starting needs the full threshold, continuing
-	// only needs to stay above a lower one.
-	const int engageBehind = maxAhead / 2 < 2 ? 2 : maxAhead / 2;
-	// Release well below the engage point, not just under it. The throttle
-	// itself lowers the process figure, so a release threshold close to the
-	// budget guarantees oscillation: engage, cost drops, release, cost rises.
-	const int releaseBudget = budget / 2;
+	// Release below the engage point, judged on the projected full-render cost
+	// rather than the throttled figure - the throttle itself lowers the process
+	// figure, so judging that would guarantee oscillation: engage, cost drops,
+	// release, cost rises. Against the projection a quarter-budget band is
+	// enough. Half the budget was unreachable in any large battle, so one
+	// engagement lasted until the forced re-probe and re-engaged straight after.
+	const int releaseBudget = budget * 3 / 4;
 
-	// The "is anyone waiting on us" test has been removed, because the figure it
-	// used cannot answer that question.
-	//
-	// FramesBehindPeers subtracts our frame from the slowest peer's LAST REPORTED
-	// frame, and those reports only arrive with FRAMEINFO every FrameSendRate
-	// frames, carrying a frame stamped up to MaxAhead ahead. So the figure sits
-	// structurally near -MaxAhead even when every client is perfectly healthy:
-	// measured at level 9 it ran -13 to -35 against an engage threshold of +18,
-	// which is unreachable. That is why this throttle has never once engaged in
-	// any recorded game - it was gated on reporting lag, not on who is slow.
+	// There is no "is anyone waiting on us" test. The peers' frames are only
+	// known from FRAMEINFO, sent every FrameSendRate frames and stamped up to
+	// MaxAhead ahead, so our lag behind the slowest peer sits near -MaxAhead
+	// even when every client is healthy (measured -13 to -35 at level 9) and
+	// cannot say who is slow.
 	//
 	// Process time alone is the honest signal, and it is self-limiting: it only
 	// exceeds the budget when this client genuinely cannot render and simulate a
@@ -215,26 +165,42 @@ bool RenderSkip::ShouldRenderThisFrame()
 	// can raise it - and skipping a render is sync-neutral either way.
 	// What a fully-rendered frame would cost: the measured average plus the
 	// render we are currently not paying for.
-	int projected = average;
-	if (g_renderCostMs > 0)
+	int projectedUs = average * 1000;
+	if (g_renderCostUs > 0)
 	{
 		const int total = g_windowRendered + g_windowSkipped;
 		if (total > 0 && g_windowSkipped > 0)
-			projected = average + (g_renderCostMs * g_windowSkipped) / total;
+			projectedUs += static_cast<int>(static_cast<long long>(g_renderCostUs) * g_windowSkipped / total);
 	}
+	const int projected = projectedUs / 1000;
 
-	if (!g_active)
-		g_engageRun = (average >= budget) ? g_engageRun + 1 : 0;
-	else
-		g_releaseRun = (projected < releaseBudget) ? g_releaseRun + 1 : 0;
+	// Only intervene when rendering is a real share of the frame. A client whose
+	// time goes to simulation gains nothing from dropped frames - measured: a
+	// client at 18-20ms per frame with a render cost rounding to zero. Checked
+	// in microseconds; whole milliseconds read a 4.9ms render as 4 and failed a
+	// 25% share of a 20ms frame. No sample yet (-1) does not block, so the
+	// first engagement can happen before a render is timed.
+	const bool renderIsTheCost = g_renderCostUs < 0
+		|| static_cast<long long>(g_renderCostUs) * 100 >= static_cast<long long>(RenderSharePercent) * average * 1000;
+
+	// Early in a window the average is a handful of frames and one hitch
+	// dominates it. Hold both runs there rather than let it decide - neither
+	// counting toward a change nor resetting progress already made.
+	if (windowFrames >= MinWindowFrames)
+	{
+		if (!g_active)
+			g_engageRun = (average >= budget && renderIsTheCost) ? g_engageRun + 1 : 0;
+		else
+			g_releaseRun = (projectedUs < releaseBudget * 1000) ? g_releaseRun + 1 : 0;
+	}
 
 	// Re-probe rather than latch: if we have been throttling for a long time,
 	// drop it and let the next few frames say whether it is still needed.
 	if (g_active && (int)Unsorted::CurrentFrame - g_engagedAtFrame > MaxEngagedFrames)
 	{
-		Debug::Log("[Audit] render re-probe frame=%d after %d frames engaged (process=%dms render=%dms projected=%dms budget=%dms)\n"
+		Debug::Log("[Audit] render re-probe frame=%d after %d frames engaged (process=%dms render=%dus projected=%dms budget=%dms)\n"
 			, (int)Unsorted::CurrentFrame, (int)Unsorted::CurrentFrame - g_engagedAtFrame
-			, average, g_renderCostMs, projected, budget);
+			, average, g_renderCostUs, projected, budget);
 		g_releaseRun = ReleaseFrames;
 	}
 
@@ -246,11 +212,11 @@ bool RenderSkip::ShouldRenderThisFrame()
 		{
 			g_active = false;
 			g_engageRun = 0;
-			Debug::Log("[RenderSkip] released at frame %d (process=%dms budget=%dms behind=%d)\n",
-				(int)Unsorted::CurrentFrame, average, budget, behind);
+			Debug::Log("[RenderSkip] released at frame %d (process=%dms projected=%dms budget=%dms)\n",
+				(int)Unsorted::CurrentFrame, average, projected, budget);
 		}
-		g_consecutiveSkips = 0;
-		++g_rendered;
+		// A full run, so the first throttled frame drops immediately.
+		g_drawRun = DrawRun;
 		++g_windowRendered;
 		return true;
 	}
@@ -260,20 +226,21 @@ bool RenderSkip::ShouldRenderThisFrame()
 		g_active = true;
 		g_releaseRun = 0;
 		g_engagedAtFrame = (int)Unsorted::CurrentFrame;
-		Debug::Log("[RenderSkip] engaged at frame %d (process=%dms budget=%dms behind=%d/%d max=%d)\n",
-			(int)Unsorted::CurrentFrame, average, budget, behind, engageBehind, MaxConsecutive);
+		Debug::Log("[RenderSkip] engaged at frame %d (process=%dms render=%dus share=%d%% budget=%dms)\n",
+			(int)Unsorted::CurrentFrame, average, g_renderCostUs, RenderSharePercent, budget);
 	}
 
-	// Floor on the visible frame rate: after MaxConsecutive drops, draw one.
-	if (g_consecutiveSkips >= MaxConsecutive)
+	// DrawRun frames drawn, then one dropped.
+	if (g_drawRun < DrawRun)
 	{
-		g_consecutiveSkips = 0;
-		++g_rendered;
+		++g_drawRun;
+		// Counted, or the projection treats every throttled frame as skipped
+		// and overstates the full-render cost by up to the whole render.
+		++g_windowRendered;
 		return true;
 	}
 
-	++g_consecutiveSkips;
-	++g_skipped;
+	g_drawRun = 0;
 	++g_windowSkipped;
 	return false;
 }
@@ -300,7 +267,7 @@ DEFINE_HOOK(0x55D8F2, MainLoop_Render_RenderSkip, 0x5)
 
 		if (timed && QueryPerformanceCounter(&after))
 		{
-			const long long us = ((after.QuadPart - before.QuadPart) * 1000LL) / freq.QuadPart;
+			const long long us = ((after.QuadPart - before.QuadPart) * 1000000LL) / freq.QuadPart;
 			RenderSkip::NoteRenderCost((int)us);
 		}
 	}

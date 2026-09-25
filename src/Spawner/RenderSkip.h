@@ -18,8 +18,10 @@
 */
 
 /**
-*  RenderSkip - drops render frames while this client is the one holding the
-*  game up.
+*  RenderSkip - drops one render frame in three while this client cannot keep
+*  up: its average frame reaches the budget (MinProcessMs, or the frame time at
+*  the requested rate if longer) and rendering is at least RenderSharePercent
+*  of that frame. Multiplayer only.
 *
 *  Main_Loop measures ProcessingTicks from before GScreenClass::Input to after
 *  LogicClass::AI, so the render is inside the "Process" figure the multiplayer
@@ -54,22 +56,23 @@ class RenderSkip
 public:
 	static bool Enabled;
 
-	// Never drop more than this many frames in a row. One means strict
-	// alternation - draw, skip, draw, skip - which halves the render cost with
-	// even pacing. Larger values buy more headroom but arrive as bursts: at 4,
-	// the display shows one frame in five for the duration, which reads as a
-	// stutter rather than a lower frame rate.
-	static int MaxConsecutive;
+	// Floor on the per-frame processing budget, in milliseconds. The budget is
+	// the frame time at the requested frame rate, but never below this: under
+	// it, the client is keeping up and dropping frames costs picture quality
+	// for nothing. Engages at the budget, releases below three quarters of it.
+	static int MinProcessMs;
 
-	// Per-frame processing budget in milliseconds. Zero derives it from the
-	// requested frame rate.
-	static int BudgetMs;
+	// Share of the frame, in percent, that rendering must take before the
+	// throttle engages. A client whose time goes to simulation gains nothing
+	// from dropped frames. Zero disables the check.
+	static int RenderSharePercent;
 
 	static void Reset();
 
-	// One measured render, in milliseconds. Feeds the estimate of what a fully
-	// rendered frame would cost, which is what the release decision needs.
-	static void NoteRenderCost(int ms);
+	// One measured render, in microseconds. Feeds the render-share check and
+	// the estimate of what a fully rendered frame would cost, which is what the
+	// release decision needs.
+	static void NoteRenderCost(int us);
 
 	// Called in place of Main_Loop's render. Advances the throttle state.
 	static bool ShouldRenderThisFrame();

@@ -133,8 +133,8 @@ public:
 	bool AdaptiveLatencyDescent;
 	int  ConnectionTimeoutFloor;
 	bool RenderSkip;
-	int  RenderSkipMax;
-	int  RenderSkipBudgetMs;
+	int  RenderSkipMinProcessMs;
+	int  RenderSkipRenderShare;
 	bool NetDiagnostics;
 	bool ForceMultiplayer;
 
@@ -224,8 +224,8 @@ public:
 		, AdaptiveLatencyDescent { true }
 		, ConnectionTimeoutFloor { 300 }
 		, RenderSkip { true }
-		, RenderSkipMax { 1 }
-		, RenderSkipBudgetMs { 20 }
+		, RenderSkipMinProcessMs { 20 }
+		, RenderSkipRenderShare { 25 }
 		, NetDiagnostics { true }
 		, ForceMultiplayer { false }
 

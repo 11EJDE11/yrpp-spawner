@@ -426,8 +426,8 @@ void Spawner::InitNetwork()
 	PacketRedundancy::Acks     = pSpawnerConfig->RedundantAcks;
 	FrameGate::Enabled         = pSpawnerConfig->FrameAwareGate;
 	RenderSkip::Enabled        = pSpawnerConfig->RenderSkip;
-	RenderSkip::MaxConsecutive = pSpawnerConfig->RenderSkipMax < 1 ? 1 : pSpawnerConfig->RenderSkipMax;
-	RenderSkip::BudgetMs       = pSpawnerConfig->RenderSkipBudgetMs;
+	RenderSkip::MinProcessMs       = std::clamp(pSpawnerConfig->RenderSkipMinProcessMs, 1, 1000);
+	RenderSkip::RenderSharePercent = std::clamp(pSpawnerConfig->RenderSkipRenderShare, 0, 100);
 	NetDiagnostics::Enabled    = pSpawnerConfig->NetDiagnostics;
 	FastRetransmit::Reset();
 	PacketRedundancy::Reset();

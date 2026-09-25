@@ -83,9 +83,4 @@ public:
 
 	static void LogResponseDecision(int engineTicks, int cleanTicks, int chosenTicks,
 		int wireTicks, int engineLevel, int sentLevel, bool fastWon);
-
-	// Audits the render throttle: how many frames it dropped and drew in the
-	// window, and the inputs it decided on.
-	static void LogRenderDecision(int skipped, int rendered, int processMs,
-		int budgetMs, int behind, int engageBehind, bool active);
 };
