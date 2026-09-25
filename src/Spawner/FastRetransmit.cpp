@@ -97,6 +97,29 @@ namespace
 	int g_worstOvershoot = 0;
 	int g_lastUncapped = 0;
 
+	// Last clamped value per connection. One value shared by all connections
+	// made several capped links alternate, so every read counted as new: 163,470
+	// in Game 21 with four connections capped at once. Connections are created
+	// at game start, so the pointer is a stable key for the match.
+	const ConnectionClass* g_capConnection[8] = {};
+	int g_capLast[8] = {};
+
+	int& LastCapFor(const ConnectionClass* connection)
+	{
+		for (int k = 0; k < 8; ++k)
+			if (g_capConnection[k] == connection)
+				return g_capLast[k];
+		for (int k = 0; k < 8; ++k)
+			if (!g_capConnection[k])
+			{
+				g_capConnection[k] = connection;
+				return g_capLast[k];
+			}
+		g_capConnection[0] = connection;
+		g_capLast[0] = 0;
+		return g_capLast[0];
+	}
+
 	// Never let an adaptive timer fire LATER than the engine's own RetryDelta.
 	//
 	// Add_Delay stamps a packet's delay sample from FirstTime - the first
@@ -128,8 +151,10 @@ namespace
 		// each check and again whenever diagnostics inspect a timer, so a plain
 		// increment counted queue traffic rather than ceiling events - it reached
 		// 1.5 million in one match while another client logged 191.
-		if (ticks != g_lastUncapped)
+		int& last = LastCapFor(connection);
+		if (ticks != last)
 			++g_vanillaCaps;
+		last = ticks;
 
 		const int overshoot = ticks - vanilla;
 		if (overshoot > g_worstOvershoot)

@@ -34,8 +34,11 @@
 #include <IPXConnClass.h>
 #include <CommBufferClass.h>
 #include <HouseClass.h>
+#include <SessionClass.h>
 #include <Unsorted.h>
 #include <Utilities/Debug.h>
+
+#include <cstdio>
 
 bool NetDiagnostics::Enabled = true;
 
@@ -559,16 +562,48 @@ void NetDiagnostics::LogSummary(const char* reason)
 	if (recvAck   > g_peakRecvAck)   g_peakRecvAck   = recvAck;   else recvAck   = g_peakRecvAck;
 	if (recvNoAck > g_peakRecvNoAck) g_peakRecvNoAck = recvNoAck; else recvNoAck = g_peakRecvNoAck;
 
+	// Real game speed since the previous summary, by wall clock, so MaxAhead can
+	// be read in time rather than frames: 36 frames is 0.6s at 60fps, 1.2s at 30.
+	static DWORD s_lastTick = 0;
+	static int s_lastFrame = 0;
+	const DWORD tick = GetTickCount();
+	const int frame = CurrentFrame();
+	int fps10 = 0;
+	if (s_lastTick != 0 && tick != s_lastTick && frame > s_lastFrame)
+		fps10 = (int)((long long)(frame - s_lastFrame) * 10000 / (DWORD)(tick - s_lastTick));
+	s_lastTick = tick;
+	s_lastFrame = frame;
+
+	// Each player's reported average frame cost (NodeNameType::Time, 0x73; the
+	// PROCESS_TIME event every 128 frames, -1 before the first). The same table
+	// on every client, and what Queue_AI_Multiplayer divides into 1000 for the
+	// frame rate the slowest machine can sustain.
+	char proc[160] = "";
+	int procLen = 0;
+	int procMax = -1;
+	const auto& nodes = NodeNameType::Array;
+	for (int i = 0; i < nodes.Count && procLen < (int)sizeof(proc) - 16; ++i)
+	{
+		const auto* node = nodes.Items[i];
+		if (!node)
+			continue;
+		if (node->Time > procMax)
+			procMax = node->Time;
+		procLen += std::snprintf(proc + procLen, sizeof(proc) - procLen, " h%d=%d", node->HouseIndex, node->Time);
+	}
+
 	Debug::Log("[Audit] SUMMARY %s frame=%d conns=%d | level=%d maxahead=%d fsr=%d"
 		" | sent_ack=%d sent_noack=%d recv_ack=%d recv_noack=%d resends=%d lost=%d"
 		" | extra_datagrams=%d failed=%d | retry_caps=%d worst_overshoot=%d"
-		" | badconn_trips=%d worst_packet_age=%d sendfail=%d last_wsa=%d\n",
-		reason, CurrentFrame(), nconn,
+		" | badconn_trips=%d worst_packet_age=%d sendfail=%d last_wsa=%d"
+		" | t=%lu fps=%d.%d | proc_ms max=%d%s\n",
+		reason, frame, nconn,
 		(int)LatencyLevel::CurentLatencyLevel, (int)Game::Network::MaxAhead,
 		(int)Game::Network::FrameSendRate,
 		sentAck, sentNoAck, recvAck, recvNoAck, resends, lost,
 		extraDatagrams, extraFailed, caps, worstOvershoot,
-		g_badConnTrips, g_badConnWorstAge, g_sendFailures, g_lastSendError);
+		g_badConnTrips, g_badConnWorstAge, g_sendFailures, g_lastSendError,
+		(unsigned long)tick, fps10 / 10, fps10 % 10, procMax, proc);
 }
 
 DEFINE_HOOK(0x541820, IPXManagerClass_Service_NetDiagnostics, 0x6)

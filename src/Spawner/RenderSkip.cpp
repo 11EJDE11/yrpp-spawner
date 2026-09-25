@@ -77,6 +77,45 @@ namespace
 	int   g_engageRun = 0;
 	int   g_releaseRun = 0;
 
+	DWORD     g_engagedTick = 0;
+	int       g_engagedSamples = 0;
+	long long g_engagedProcessMsSum = 0;
+	long long g_engagedFullUsSum = 0;
+	int       g_engagedSkipped = 0;
+	int       g_matchEngagedFrames = 0;
+	int       g_matchSkipped = 0;
+
+	void LogEngagementSummary(int frame)
+	{
+		const int frames = frame - g_engagedAtFrame;
+		g_matchEngagedFrames += frames;
+
+		const DWORD elapsedMs = GetTickCount() - g_engagedTick;
+		const int realFps10 = elapsedMs > 0 ? (int)((long long)frames * 10000 / elapsedMs) : 0;
+		const int matchPct = frame > 0 ? (int)((long long)g_matchEngagedFrames * 100 / frame) : 0;
+
+		if (g_engagedSamples <= 0)
+		{
+			Debug::Log("[RenderSkip] summary frames=%d-%d (%d) | no samples | real=%d.%dfps skipped=%d | match engaged=%d%% skipped=%d\n"
+				, g_engagedAtFrame, frame, frames, realFps10 / 10, realFps10 % 10, g_engagedSkipped, matchPct, g_matchSkipped);
+			return;
+		}
+
+		// Tenths of a millisecond throughout, so a saving under 1ms is visible.
+		const int process10 = (int)(g_engagedProcessMsSum * 10 / g_engagedSamples);
+		const int full10 = (int)(g_engagedFullUsSum / g_engagedSamples / 100);
+		const int saved10 = full10 - process10;
+		const int limitSkip = process10 > 0 ? 10000 / process10 : 0;
+		const int limitFull = full10 > 0 ? 10000 / full10 : 0;
+
+		Debug::Log("[RenderSkip] summary frames=%d-%d (%d) | process=%d.%dms full=%d.%dms saved=%d.%dms/frame | limit %d->%dfps real=%d.%dfps | skipped=%d | match engaged=%d%% skipped=%d\n"
+			, g_engagedAtFrame, frame, frames
+			, process10 / 10, process10 % 10, full10 / 10, full10 % 10
+			, saved10 / 10, saved10 % 10
+			, limitFull, limitSkip, realFps10 / 10, realFps10 % 10
+			, g_engagedSkipped, matchPct, g_matchSkipped);
+	}
+
 	int FrameBudgetMs()
 	{
 		const int fps = Game::Network::RequestedFPS;
@@ -111,6 +150,13 @@ void RenderSkip::Reset()
 	g_drawRun = 0;
 	g_engageRun = 0;
 	g_releaseRun = 0;
+	g_engagedTick = 0;
+	g_engagedSamples = 0;
+	g_engagedProcessMsSum = 0;
+	g_engagedFullUsSum = 0;
+	g_engagedSkipped = 0;
+	g_matchEngagedFrames = 0;
+	g_matchSkipped = 0;
 }
 
 bool RenderSkip::ThrottleActive()
@@ -214,6 +260,7 @@ bool RenderSkip::ShouldRenderThisFrame()
 			g_engageRun = 0;
 			Debug::Log("[RenderSkip] released at frame %d (process=%dms projected=%dms budget=%dms)\n",
 				(int)Unsorted::CurrentFrame, average, projected, budget);
+			LogEngagementSummary((int)Unsorted::CurrentFrame);
 		}
 		// A full run, so the first throttled frame drops immediately.
 		g_drawRun = DrawRun;
@@ -226,8 +273,20 @@ bool RenderSkip::ShouldRenderThisFrame()
 		g_active = true;
 		g_releaseRun = 0;
 		g_engagedAtFrame = (int)Unsorted::CurrentFrame;
+		g_engagedTick = GetTickCount();
+		g_engagedSamples = 0;
+		g_engagedProcessMsSum = 0;
+		g_engagedFullUsSum = 0;
+		g_engagedSkipped = 0;
 		Debug::Log("[RenderSkip] engaged at frame %d (process=%dms render=%dus share=%d%% budget=%dms)\n",
 			(int)Unsorted::CurrentFrame, average, g_renderCostUs, RenderSharePercent, budget);
+	}
+
+	if (windowFrames >= MinWindowFrames)
+	{
+		++g_engagedSamples;
+		g_engagedProcessMsSum += average;
+		g_engagedFullUsSum += projectedUs;
 	}
 
 	// DrawRun frames drawn, then one dropped.
@@ -242,6 +301,8 @@ bool RenderSkip::ShouldRenderThisFrame()
 
 	g_drawRun = 0;
 	++g_windowSkipped;
+	++g_engagedSkipped;
+	++g_matchSkipped;
 	return false;
 }
 

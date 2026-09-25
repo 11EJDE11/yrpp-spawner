@@ -46,6 +46,12 @@ namespace
 	int  g_lastDescentFrame = 0;
 	int  g_lastDescentFrom = 0;
 	int  g_lastRaiseFrame = 0;
+
+	int  g_reportRtt = 0;
+	int  g_reportRttSlot = -1;
+	int  g_reportLevel = 0;
+	int  g_reportLevelSlot = -1;
+	int  g_upOnlyLevel = 0;
 }
 
 void LatencyLevel::Apply(LatencyLevelEnum newLatencyLevel, int eventFrame)
@@ -108,13 +114,14 @@ void LatencyLevel::Commit(LatencyLevelEnum newLatencyLevel, int eventFrame)
 	TargetMaxAhead = target;
 	Game::Network::PreCalcMaxAhead = target;
 
-	Debug::Log("[Audit] latency frame=%d (event) lvl %d->%d | target maxahead %d->%d | engine maxahead=%d fsr=%d | multiple=%d | vanilla lvl=%d maxahead=%d\n"
+	Debug::Log("[Audit] latency frame=%d (event) lvl %d->%d | target maxahead %d->%d | engine maxahead=%d fsr=%d | multiple=%d | worst rtt=%d slot=%d, worst lvl=%d slot=%d | up-only lvl=%d maxahead=%d\n"
 		, eventFrame
 		, previousLevel, (int)newLatencyLevel
 		, previousTarget, target
 		, (int)Game::Network::MaxAhead, rate
 		, (target % rate == 0)
-		, previousLevel, GetMaxAhead((LatencyLevelEnum)previousLevel)
+		, g_reportRtt, g_reportRttSlot, g_reportLevel, g_reportLevelSlot
+		, g_upOnlyLevel, GetMaxAhead((LatencyLevelEnum)g_upOnlyLevel)
 	);
 
 	if ((int)newLatencyLevel > previousLevel)
@@ -151,8 +158,23 @@ void LatencyLevel::ResetDescent()
 	g_descentStreak = false;
 }
 
-void LatencyLevel::Update(LatencyLevelEnum desired, int worstResponseTime, int eventFrame)
+void LatencyLevel::Update(LatencyLevelEnum desired, int worstResponseTime,
+	int worstRttSlot, int worstLevelSlot, int eventFrame)
 {
+	g_reportRtt = worstResponseTime;
+	g_reportRttSlot = worstRttSlot;
+	g_reportLevel = (int)desired;
+	g_reportLevelSlot = worstLevelSlot;
+
+	// Vanilla keeps the highest level ever requested, capped like Apply caps it.
+	int upOnly = (int)desired;
+	if (upOnly > (int)LatencyLevelEnum::LATENCY_LEVEL_MAX)
+		upOnly = (int)LatencyLevelEnum::LATENCY_LEVEL_MAX;
+	if (upOnly > (int)ProtocolZero::MaxLatencyLevel)
+		upOnly = (int)ProtocolZero::MaxLatencyLevel;
+	if (upOnly > g_upOnlyLevel)
+		g_upOnlyLevel = upOnly;
+
 	if (desired > CurentLatencyLevel)
 	{
 		// Worsening is never gated. Under-provisioning stalls everyone.

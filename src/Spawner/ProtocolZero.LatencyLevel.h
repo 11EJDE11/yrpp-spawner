@@ -86,16 +86,17 @@ public:
 	// retried on the same evidence that just failed.
 	static const int FlapCooldownFrames = 4096;
 
-	// Step size is not a free parameter. A descent may only land on a level that
-	// divides the current one, because FrameSendRate tracks the level and the
-	// engine drops any queued command whose stamp is no longer on the new
-	// execution cadence - and because MaxAhead must stay an exact multiple of
-	// FrameSendRate or commands get stamped past what the frame gate covers.
-	// Legal paths: 9->3->1, 8->4->2->1, 6->3->1, 4->2->1, 7->1, 5->1.
+	// Descent steps one rung per evaluation, and any rung is legal. FrameSendRate
+	// follows the level in both directions, so every rung's MaxAhead is an exact
+	// multiple of its own rate, and the hook at 0x4C8033 opens the rescheduling
+	// window on a decrease too, so commands already queued on the old cadence
+	// are moved rather than dropped.
 
 	// Called once per timing report with the worst level and worst response time
-	// any player has reported. Raises immediately, descends only on the gates.
-	static void Update(LatencyLevelEnum desired, int worstResponseTime, int eventFrame);
+	// any player has reported, and the house slots that reported them (logging
+	// only). Raises immediately, descends only on the gates.
+	static void Update(LatencyLevelEnum desired, int worstResponseTime,
+		int worstRttSlot, int worstLevelSlot, int eventFrame);
 	static void ResetDescent();
 
 	static void Apply(LatencyLevelEnum newLatencyLevel, int eventFrame);

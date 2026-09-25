@@ -125,6 +125,8 @@ void ProtocolZero::HandleResponseTime2(EventExt* event)
 
 	uint8_t setLatencyMode = 0;
 	int maxMaxAheads = 0;
+	int worstRttSlot = -1;
+	int worstLevelSlot = -1;
 
 	// Age against the newest frame the reports themselves carry, never against
 	// Unsorted::CurrentFrame. This handler runs when a ResponseTime2 event
@@ -150,9 +152,16 @@ void ProtocolZero::HandleResponseTime2(EventExt* event)
 		}
 		else
 		{
-			maxMaxAheads = PlayerMaxAheads[i] > maxMaxAheads ? PlayerMaxAheads[i] : maxMaxAheads;
+			if (PlayerMaxAheads[i] > maxMaxAheads)
+			{
+				maxMaxAheads = PlayerMaxAheads[i];
+				worstRttSlot = i;
+			}
 			if (PlayerLatencyMode[i] > setLatencyMode)
+			{
 				setLatencyMode = PlayerLatencyMode[i];
+				worstLevelSlot = i;
+			}
 		}
 	}
 
@@ -160,5 +169,6 @@ void ProtocolZero::HandleResponseTime2(EventExt* event)
 
 	// maxMaxAheads is the worst reported response time plus one; back that out so
 	// the descent gate sees the measurement itself.
-	LatencyLevel::Update(static_cast<LatencyLevelEnum>(setLatencyMode), maxMaxAheads > 0 ? maxMaxAheads - 1 : 0, newestReportFrame);
+	LatencyLevel::Update(static_cast<LatencyLevelEnum>(setLatencyMode), maxMaxAheads > 0 ? maxMaxAheads - 1 : 0,
+		worstRttSlot, worstLevelSlot, newestReportFrame);
 }
