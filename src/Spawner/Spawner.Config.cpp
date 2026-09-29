@@ -99,6 +99,19 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		MaxAhead         = pINI->ReadInteger(pSettingsSection, "MaxAhead", MaxAhead);
 		PreCalcMaxAhead  = pINI->ReadInteger(pSettingsSection, "PreCalcMaxAhead", PreCalcMaxAhead);
 		MaxLatencyLevel  = (byte)pINI->ReadInteger(pSettingsSection, "MaxLatencyLevel", (int)MaxLatencyLevel);
+		FrameAwareGate   = pINI->ReadBool(pSettingsSection, "FrameAwareGate", FrameAwareGate);
+		FastRetransmit   = pINI->ReadBool(pSettingsSection, "FastRetransmit", FastRetransmit);
+		RetransmitBackoff = pINI->ReadBool(pSettingsSection, "RetransmitBackoff", RetransmitBackoff);
+		PacketRedundancy = pINI->ReadBool(pSettingsSection, "PacketRedundancy", PacketRedundancy);
+		RedundancyCopies = pINI->ReadInteger(pSettingsSection, "RedundancyCopies", RedundancyCopies);
+		AdaptiveRedundancy = pINI->ReadBool(pSettingsSection, "AdaptiveRedundancy", AdaptiveRedundancy);
+		RedundantAcks    = pINI->ReadBool(pSettingsSection, "RedundantAcks", RedundantAcks);
+		AdaptiveLatencyDescent = pINI->ReadBool(pSettingsSection, "AdaptiveLatencyDescent", AdaptiveLatencyDescent);
+		ConnectionTimeoutFloor = pINI->ReadInteger(pSettingsSection, "ConnectionTimeoutFloor", ConnectionTimeoutFloor);
+		RenderSkip       = pINI->ReadBool(pSettingsSection, "RenderSkip", RenderSkip);
+		RenderSkipMinProcessMs = pINI->ReadInteger(pSettingsSection, "RenderSkipMinProcessMs", RenderSkipMinProcessMs);
+		RenderSkipRenderShare  = pINI->ReadInteger(pSettingsSection, "RenderSkipRenderShare", RenderSkipRenderShare);
+		NetDiagnostics   = pINI->ReadBool(pSettingsSection, "NetDiagnostics", NetDiagnostics);
 		ForceMultiplayer = pINI->ReadBool(pSettingsSection, "ForceMultiplayer", ForceMultiplayer);
 	}
 

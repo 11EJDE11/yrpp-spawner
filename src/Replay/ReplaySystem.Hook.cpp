@@ -540,7 +540,7 @@ DEFINE_HOOK(0x6924FC, ScrollClass_ClickInfo_ReplayClickThroughShroud, 0x12)
 DEFINE_HOOK(0x647866, Queue_AI_Multiplayer_OverrideDelayTime, 0x5)
 {
 	if (ReplaySystem::IsPlaybackRequested())
-		Unsorted::QueueAIMultiplayerSkipCRC.TimeLeft = std::numeric_limits<int>::max();
+		GameTimers::QueueAIMultiplayerSkipCRC.TimeLeft = std::numeric_limits<int>::max();
 
 	return 0;
 }
@@ -591,24 +591,8 @@ DEFINE_HOOK(0x5BDF13, MouseClass_AI_ReplayOverlayInput, 0x8)
 	return 0;
 }
 
-// Main_Loop's per-frame render. A seek runs frames as fast as it can and drawing is most of what
-// one costs, so it draws only every so often - enough to read as progress rather than as a hang.
-DEFINE_HOOK(0x55D8F2, MainLoop_SkipRenderWhileSeeking, 0x5)
-{
-	enum { SkipRender = 0x55D8F7 };
-
-	if (!ReplaySystem::Seek::IsSeeking())
-		return 0;
-
-	if (ReplaySystem::Seek::ShouldSkipRenderThisFrame())
-	{
-		ReplaySystem::Seek::CountRenderedFrame();
-		return SkipRender;
-	}
-
-	ReplaySystem::Seek::CountRenderedFrame();
-	return 0;
-}
+// Main_Loop's per-frame render is thinned out while seeking by MainLoop_Render_RenderSkip, which owns
+// that call.
 
 #pragma endregion Playback controls overlay
 

@@ -16,6 +16,8 @@
 
 #include "NetHack.h"
 #include "Spawner.h"
+#include "PacketRedundancy.h"
+#include "NetDiagnostics.h"
 
 #include <windows.h>
 #include <stdint.h>
@@ -52,7 +54,28 @@ int WINAPI NetHack::SendTo(
 	tempDest.sin_port = player.Port;
 	tempDest.sin_addr.S_un.S_addr = player.Ip;
 
-	return Tunnel::SendTo(sockfd, buf, len, flags, &tempDest, addrlen);
+	const int copies = PacketRedundancy::CopiesFor(buf, len, index);
+
+	int ret = Tunnel::SendTo(sockfd, buf, len, flags, &tempDest, addrlen);
+	const int firstError = ret == SOCKET_ERROR ? WSAGetLastError() : 0;
+
+	// A failing sendto is the one signal that distinguishes "this machine lost
+	// its link" from "the packets left but never arrived". Without it, a client
+	// whose NIC has gone down looks identical to one being silently dropped
+	// upstream - both just stop hearing from everyone.
+	if (ret == SOCKET_ERROR)
+		NetDiagnostics::LogSendFailure(index, firstError);
+	for (int i = 1; i < copies; ++i)
+	{
+		const int extra = Tunnel::SendTo(sockfd, buf, len, flags, &tempDest, addrlen);
+		PacketRedundancy::NoteExtraSend(extra);
+		if (ret == SOCKET_ERROR && extra != SOCKET_ERROR)
+			ret = extra;
+	}
+	// Preserve the first socket error if every copy failed.
+	if (ret == SOCKET_ERROR)
+		WSASetLastError(firstError);
+	return ret;
 }
 
 int WINAPI NetHack::RecvFrom(
@@ -116,10 +139,11 @@ int WINAPI Tunnel::SendTo(
 	*BufFrom = Tunnel::Id;
 	*BufTo = dest_addr->sin_port;
 
-	dest_addr->sin_port = Tunnel::Port;
-	dest_addr->sin_addr.S_un.S_addr = Tunnel::Ip;
+	sockaddr_in sendDest = *dest_addr;
+	sendDest.sin_port = Tunnel::Port;
+	sendDest.sin_addr.S_un.S_addr = Tunnel::Ip;
 
-	return sendto(sockfd, TempBuf, len + 4, flags, (struct sockaddr*)dest_addr, addrlen);
+	return sendto(sockfd, TempBuf, len + 4, flags, (struct sockaddr*)&sendDest, addrlen);
 }
 
 int WINAPI Tunnel::RecvFrom(

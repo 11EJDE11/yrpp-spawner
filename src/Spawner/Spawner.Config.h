@@ -148,6 +148,19 @@ public:
 	int MaxAhead;
 	int PreCalcMaxAhead;
 	byte MaxLatencyLevel;
+	bool FrameAwareGate;
+	bool FastRetransmit;
+	bool RetransmitBackoff;
+	bool PacketRedundancy;
+	int  RedundancyCopies;
+	bool AdaptiveRedundancy;
+	bool RedundantAcks;
+	bool AdaptiveLatencyDescent;
+	int  ConnectionTimeoutFloor;
+	bool RenderSkip;
+	int  RenderSkipMinProcessMs;
+	int  RenderSkipRenderShare;
+	bool NetDiagnostics;
 	bool ForceMultiplayer;
 
 	// Tunnel Options
@@ -239,6 +252,19 @@ public:
 		, MaxAhead { -1 }
 		, PreCalcMaxAhead { 0 }
 		, MaxLatencyLevel { 0xFF }
+		, FrameAwareGate { true }
+		, FastRetransmit { true }
+		, RetransmitBackoff { true }
+		, PacketRedundancy { true }
+		, RedundancyCopies { 2 }
+		, AdaptiveRedundancy { true }
+		, RedundantAcks { true }
+		, AdaptiveLatencyDescent { true }
+		, ConnectionTimeoutFloor { 300 }
+		, RenderSkip { true }
+		, RenderSkipMinProcessMs { 20 }
+		, RenderSkipRenderShare { 25 }
+		, NetDiagnostics { true }
 		, ForceMultiplayer { false }
 
 		// Tunnel Options

@@ -163,8 +163,8 @@ namespace ReplaySystem
 			// still has to be told not to wait, which is what the two timers below do.
 			if (ReplaySystem::Seek::IsSeeking())
 			{
-				Unsorted::GameFrameTimer.TimeLeft = 0;
-				Unsorted::NetworkFrameTimer.TimeLeft = 0;
+				GameTimers::GameFrameTimer.TimeLeft = 0;
+				GameTimers::NetFrameTimer.TimeLeft = 0;
 				return;
 			}
 
@@ -194,8 +194,8 @@ namespace ReplaySystem
 				State.NextFrameDue += frameMilliseconds;
 			}
 
-			Unsorted::GameFrameTimer.TimeLeft = 0;
-			Unsorted::NetworkFrameTimer.TimeLeft = 0;
+			GameTimers::GameFrameTimer.TimeLeft = 0;
+			GameTimers::NetFrameTimer.TimeLeft = 0;
 		}
 
 		bool IsPlaybackPaused()
@@ -367,7 +367,7 @@ namespace ReplaySystem
 			if (!TacticalClass::Instance)
 				return;
 
-			TacticalClass::Instance->AI();
+			TacticalClass::Instance->Update();
 			MapClass::Instance.Render();
 		}
 

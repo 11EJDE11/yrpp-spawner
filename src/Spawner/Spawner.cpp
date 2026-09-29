@@ -22,6 +22,11 @@
 #include "NetHack.h"
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
+#include "FrameGate.h"
+#include "FastRetransmit.h"
+#include "NetDiagnostics.h"
+#include "RenderSkip.h"
+#include "PacketRedundancy.h"
 #include <Replay/ReplaySystem.h>
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
@@ -430,10 +435,31 @@ void Spawner::InitNetwork()
 	Game::Network::GameStockKeepingUnit = 0x2901;
 
 	ProtocolZero::Enable = !isReplayPlayback && (pSpawnerConfig->Protocol == 0);
+
+	// Playback has no peers, so none of the netcode features have anything to act on.
+	FastRetransmit::Enabled    = !isReplayPlayback && pSpawnerConfig->FastRetransmit;
+	FastRetransmit::Backoff    = pSpawnerConfig->FastRetransmit && pSpawnerConfig->RetransmitBackoff;
+	PacketRedundancy::Enabled  = !isReplayPlayback && pSpawnerConfig->PacketRedundancy;
+	PacketRedundancy::Copies   = PacketRedundancy::ClampCopies(pSpawnerConfig->RedundancyCopies);
+	PacketRedundancy::Adaptive = pSpawnerConfig->AdaptiveRedundancy;
+	PacketRedundancy::Acks     = pSpawnerConfig->RedundantAcks;
+	FrameGate::Enabled         = !isReplayPlayback && pSpawnerConfig->FrameAwareGate;
+	RenderSkip::Enabled        = !isReplayPlayback && pSpawnerConfig->RenderSkip;
+	RenderSkip::MinProcessMs       = std::clamp(pSpawnerConfig->RenderSkipMinProcessMs, 1, 1000);
+	RenderSkip::RenderSharePercent = std::clamp(pSpawnerConfig->RenderSkipRenderShare, 0, 100);
+	NetDiagnostics::Enabled    = !isReplayPlayback && pSpawnerConfig->NetDiagnostics;
+	FastRetransmit::Reset();
+	PacketRedundancy::Reset();
+	FrameGate::Reset();
+	RenderSkip::Reset();
+	NetDiagnostics::Reset();
 	if (ProtocolZero::Enable)
 	{
 		Game::Network::FrameSendRate = 2;
 		Game::Network::PreCalcMaxAhead = pSpawnerConfig->PreCalcMaxAhead;
+
+		LatencyLevel::AllowDescent = pSpawnerConfig->AdaptiveLatencyDescent;
+		ProtocolZero::ConnectionTimeoutFloor = pSpawnerConfig->ConnectionTimeoutFloor;
 
 		ProtocolZero::NextSendFrame = -1;
 		ProtocolZero::WorstMaxAhead = LatencyLevel::GetMaxAhead(LatencyLevelEnum::LATENCY_LEVEL_6);
