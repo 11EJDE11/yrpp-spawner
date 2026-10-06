@@ -23,30 +23,9 @@
 *  the requested rate if longer) and rendering is at least RenderSharePercent
 *  of that frame. Multiplayer only.
 *
-*  Main_Loop measures ProcessingTicks from before GScreenClass::Input to after
-*  LogicClass::AI, so the render is inside the "Process" figure the multiplayer
-*  debug overlay reports and Queue_AI_Multiplayer ships to the other players.
-*  Network waiting is outside it. In a large battle that figure can reach 60ms
-*  or more. ProtocolZero does not remove the engine's frame-rate negotiation:
-*  Queue_AI_Multiplayer still collects the peers' reported process times and
-*  still emits ordinary timing events, and those events can move the negotiated
-*  rate. What it does is pin PreCalcFrameRate to 60 on every latency change, so
-*  the negotiated rate no longer falls to match the slowest client. A struggling
-*  client therefore falls behind and stalls every peer through the MaxAhead gate
-*  instead of everyone being slowed to its speed. Skipping renders is the local
-*  half of that trade; it also feeds back into the shared negotiation through
-*  the process-time reports, which is intended - a cheaper frame is a lower
-*  report.
-*
-*  Skipping the render is safe by precedent: Main_Loop already skips both Input
-*  and Render whenever the window loses focus, for arbitrarily many consecutive
-*  frames. If that path touched sync-critical state, alt-tabbing out of a
-*  multiplayer game would desync it. RadBeam::Draw_All reads RequestedFPS but is
-*  reached only from Tactical::Render, so it is inside that same skipped path.
-*
-*  The engine already renders MORE when it has slack - Sync_Delay draws an extra
-*  frame when at least 10ms of the NFTTimer budget remains. This is the missing
-*  other half: rendering less when there is none.
+*  A client that can't keep up stalls every peer through the MaxAhead gate.
+*  Skipping renders is sync-safe: the engine already skips rendering whenever
+*  the window loses focus.
 */
 
 #pragma once
@@ -56,28 +35,20 @@ class RenderSkip
 public:
 	static bool Enabled;
 
-	// Floor on the per-frame processing budget, in milliseconds. The budget is
-	// the frame time at the requested frame rate, but never below this: under
-	// it, the client is keeping up and dropping frames costs picture quality
-	// for nothing. Engages at the budget, releases below three quarters of it.
+	// Minimum per-frame budget in milliseconds; the budget is otherwise the
+	// frame time at the requested rate.
 	static int MinProcessMs;
 
-	// Share of the frame, in percent, that rendering must take before the
-	// throttle engages. A client whose time goes to simulation gains nothing
-	// from dropped frames. Zero disables the check.
+	// Percent of the frame rendering must take before throttling. 0 disables the check.
 	static int RenderSharePercent;
 
 	static void Reset();
 
-	// One measured render, in microseconds. Feeds the render-share check and
-	// the estimate of what a fully rendered frame would cost, which is what the
-	// release decision needs.
+	// One measured render, in microseconds.
 	static void NoteRenderCost(int us);
 
 	// Called in place of Main_Loop's render. Advances the throttle state.
 	static bool ShouldRenderThisFrame();
 
-	// Gates Sync_Delay's opportunistic Input/Tactical::AI/Render block, which
-	// the engine enters only when the frame budget has slack left.
 	static bool ThrottleActive();
 };

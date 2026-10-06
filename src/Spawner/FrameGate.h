@@ -20,20 +20,13 @@
 /**
 *  FrameGate - frame-aware advance gate.
 *
-*  Vanilla gates frame advance on a raw per-peer command COUNT
-*  (their[i].CommandsReceived >= their[i].CommandsSent). That test carries no frame
-*  information, so a single lost command packet stalls the whole lobby even
-*  though the missing commands are stamped for a frame nobody has reached yet.
-*
-*  This replaces the count test with the one it was approximating: we may
-*  execute the current frame if, for every peer, all of that peer's commands
-*  stamped for frames <= the current frame are already in hand. We prove that
-*  from the packet stream: a packet stamped F carries the cumulative count C
-*  from BEFORE its own commands. Once CommandsReceived >= C, earlier commands
-*  are in hand; the packet's own commands may still be missing at F. Thus only
-*  frames through F - 1 are safe (while timing remains in the guarded epoch).
-*  If connections change, fall back to vanilla's count test until Reset().
-*
+*  The engine waits until every peer's received command count matches its sent
+*  count, so one lost packet stalls everyone even when the missing commands
+*  are for a later frame. This allows the frame to run once every peer's
+*  commands up to that frame are in hand. A packet stamped F carries the
+*  cumulative count from before its own commands, so frames through F - 1 are
+*  safe once that count is reached. Falls back to the engine's test if
+*  connections change.
 */
 
 #pragma once
@@ -57,10 +50,7 @@ public:
 	// Diagnostic snapshot; never used to change the gate.
 	static int GetSafeThrough(int peer);
 
-	// Called in place of the vanilla command-count loop. Returns true if every
-	// peer's commands for the current frame are in hand (vanilla recv>=send OR
-	// the frame-aware relaxation). On false, *gapIndex is the first blocking
-	// peer, for the engine's existing stall bookkeeping.
+	// Replaces the engine's command-count loop. On false, *gapIndex is the first blocking peer.
 	static bool AllCommandsSatisfied(TheirSync* peers, int* gapIndex);
 
 	// Records the watermark for one received data/framesync packet.

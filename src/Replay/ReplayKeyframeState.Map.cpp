@@ -420,8 +420,7 @@ namespace ReplaySystem::KeyframeState::Detail
 
 	#pragma region Ore growth and spread queues
 
-	// FootClass::Basic_Path (0x4D3920) clears the head of the path list with
-	// mov dword ptr [ebp+5E0h], 0FFFFFFFFh, which pins where the watch has to read it from.
+	// FootClass::Basic_Path (0x4D3920) writes the path list at this offset.
 	static_assert(offsetof(FootClass, PathDirections) == 0x5E0,
 		"FootClass::Basic_Path (0x4D3920) writes the path list at FootClass+0x5E0");
 
@@ -552,8 +551,7 @@ namespace ReplaySystem::KeyframeState::Detail
 		return true;
 	}
 
-	// Not fatal to a seek: ore that thickens in the wrong order is a slow divergence, and dropping the
-	// viewer back to no playback at all over it would be the worse trade.
+	// Not fatal to a seek; at worst ore growth drifts slowly.
 	bool RestoreTiberiumState(const TiberiumSnapshot& snapshot, int keyframeFrame)
 	{
 		if (!snapshot.Captured)

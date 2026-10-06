@@ -47,12 +47,8 @@ namespace
 		int delayTicks;
 	};
 
-	// Jacobson/Karels in fixed point. Round trips are measured in 16 ms ticks, so
-	// the estimate lives in the low single digits, and a plain integer
-	// srtt = (7*srtt + sample)/8 truncates every increment away: srtt can then
-	// only ratchet down, and a link that slows by less than 8 ticks is never
-	// tracked at all. Scaling srtt by 8 and rttvar by 4 keeps the residue, which
-	// is the whole point of the classic scaled form.
+	// Jacobson/Karels in fixed point (srtt * 8, rttvar * 4). Round trips are only
+	// a few ticks, so unscaled integer smoothing would truncate every increase.
 	struct PeerEstimator
 	{
 		const ConnectionClass* connection;
@@ -70,8 +66,7 @@ namespace
 		// Physical queue slots do not move when another entry is removed.
 		const SendQueueType* queueEntries;
 		std::vector<PacketTimer> timers;
-		// Engine time of the last timer backoff, so a queue with several overdue
-		// entries backs off once per round rather than once per entry.
+		// Limits backoff to once per round rather than once per overdue entry.
 		bool backedOff;
 		int lastBackoffTime;
 		int backoffs;
@@ -91,16 +86,12 @@ namespace
 		return value;
 	}
 
-	// How often the vanilla ceiling actually bound, and by how much, so a log
-	// can show whether the backoff was trying to run past stock timing.
+	// How often the RetryDelta ceiling applied, and by how much.
 	int g_vanillaCaps = 0;
 	int g_worstOvershoot = 0;
 	int g_lastUncapped = 0;
 
-	// Last clamped value per connection. One value shared by all connections
-	// made several capped links alternate, so every read counted as new: 163,470
-	// in Game 21 with four connections capped at once. Connections are created
-	// at game start, so the pointer is a stable key for the match.
+	// Last clamped value per connection, so only distinct values are counted.
 	const ConnectionClass* g_capConnection[8] = {};
 	int g_capLast[8] = {};
 
@@ -120,24 +111,9 @@ namespace
 		return g_capLast[0];
 	}
 
-	// Never let an adaptive timer fire LATER than the engine's own RetryDelta.
-	//
-	// Add_Delay stamps a packet's delay sample from FirstTime - the first
-	// transmission - so every tick we spend waiting before a resend lands in
-	// Avg_Response_Time. The engine then recomputes RetryDelta as
-	// Response_Time() + 10, which is the ceiling here, so a timer allowed to
-	// exceed it feeds a loop that ratchets both figures up together: longer
-	// waits produce larger samples, larger samples raise the ceiling, the
-	// higher ceiling permits longer waits. That drives the reported response
-	// toward the wire field's 126-tick limit, inflates the latency level, and
-	// stretches the connection Timeout - all of it strictly worse than the
-	// stock game, which has no such loop because its timer never moves.
-	//
-	// Clamping here makes the guarantee one-directional: this PR can retransmit
-	// sooner than stock, never later. Congestion response does not disappear
-	// with it - RetryDelta is itself derived from the measured response, so the
-	// ceiling still rises on a genuinely bad link, just no faster than vanilla
-	// would have raised it.
+	// Never retransmit later than the engine's RetryDelta. Waiting longer feeds
+	// into the response time that RetryDelta is derived from, so both would
+	// ratchet up together.
 	int CapToVanilla(const ConnectionClass* connection, int ticks)
 	{
 		if (!connection || ticks <= 0)
@@ -147,10 +123,7 @@ namespace
 		if (vanilla <= 0 || ticks <= vanilla)
 			return ticks;
 
-		// Count distinct clamped values, not every read. The ceiling is applied on
-		// each check and again whenever diagnostics inspect a timer, so a plain
-		// increment counted queue traffic rather than ceiling events - it reached
-		// 1.5 million in one match while another client logged 191.
+		// Count distinct clamped values; this runs on every timer check.
 		int& last = LastCapFor(connection);
 		if (ticks != last)
 			++g_vanillaCaps;
@@ -172,9 +145,7 @@ namespace
 		return nconn;
 	}
 
-	// Only live private connections are estimated. The global, router and
-	// multicast channels share ConnectionClass::Service_Send_Queue but are not
-	// in Connection[], so they fall through to the engine's own RetryDelta.
+	// Only private connections are estimated; the global channels keep RetryDelta.
 	bool IsLiveConnection(const ConnectionClass* connection)
 	{
 		if (!connection)
@@ -205,9 +176,7 @@ namespace
 		return nullptr;
 	}
 
-	// Finds this connection's slot, allocating a free one if it has none.
-	// MaxPeers exceeds the engine's connection array, so with dead slots pruned
-	// there is always room and a live peer is never evicted.
+	// MaxPeers exceeds the engine's connection count, so there is always a free slot.
 	PeerEstimator* FindOrCreateSlot(const ConnectionClass* connection)
 	{
 		if (!connection)
@@ -230,8 +199,6 @@ namespace
 		return freeSlot;
 	}
 
-	// Logs a peer's estimate when it moves, at most once a second, so a long
-	// match does not fill the log with noise.
 	void LogEstimate(PeerEstimator* peer, int slot)
 	{
 		const DWORD now = GetTickCount();
@@ -286,8 +253,7 @@ namespace
 			+ (timer->baseTicks * prior * FastRetransmit::BackoffStepHalves) / 2;
 		delay = ClampTicks(delay);
 
-		// Capture the connection-timeout cap as well: subsequent Set_Timing
-		// calls must not move a deadline that is already armed.
+		// Capture the timeout cap too, so later Set_Timing calls don't move an armed deadline.
 		const unsigned int timeout = connection->Timeout;
 		if (timeout != 0xFFFFFFFFu && timeout > 0)
 		{
@@ -326,9 +292,7 @@ namespace
 				|| timer.lastTime != entry->LastTime || timer.baseTicks <= peer->rto)
 				continue;
 
-			// A fresh, unambiguous RTT sample can supersede a base captured
-			// during earlier loss. Keep LastTime anchored to the actual send;
-			// a shortened interval may already be due on the next service pass.
+			// A clean sample replaces a base captured during earlier loss.
 			const int before = timer.delayTicks;
 			timer.baseTicks = peer->rto;
 			ArmTimer(&timer, connection, timer.sendCount, timer.lastTime);
@@ -394,32 +358,17 @@ void FastRetransmit::SampleRTT(const ConnectionClass* connection, int delayTicks
 	if (!peer)
 		return;
 
-	// Delivery delay: the same quantity the engine's own Avg_Response_Time
-	// measures - time from a packet's FIRST send to its acknowledgement, so
-	// retransmit waiting is included - but as a fast EWMA instead of a
-	// 256-sample mean.
-	//
-	// This exists because the Karn-filtered estimate below cannot drive the
-	// latency level. Karn discards every retransmitted sample, so that figure is
-	// true round-trip time and reads 1 tick on a LAN while the engine reports
-	// 25-31 under loss. The difference is not error, it is retransmit cost - and
-	// retransmit cost is exactly what delays a command reaching its peers, so it
-	// belongs in the latency level. Taking max(engine, clean) therefore never
-	// picked the fast figure, and a raise from level 4 to 9 took 4604 frames.
-	//
-	// Sampling the same input the engine samples, at alpha = 1/4, reaches a step
-	// change in about ten acknowledgements rather than a few hundred.
+	// Delivery delay: first send to acknowledgement, retransmits included, as the
+	// engine measures it but with a fast EWMA. Unlike the Karn estimate below it
+	// includes retransmit cost, which is what the latency level needs.
 	if (peer->deliverySamples == 0)
 		peer->scaledDelivery = delayTicks * 4;
 	else
 		peer->scaledDelivery += delayTicks - (peer->scaledDelivery >> 2);
 	++peer->deliverySamples;
 
-	// Karn: an acknowledgement that follows a retransmission cannot be
-	// attributed to a particular transmission, so discard it - unless we have
-	// nothing at all, in which case take it as a provisional upper bound so a
-	// link that is losing its first transmissions is still measurable. The first
-	// clean sample replaces that seed rather than blending with it.
+	// Karn: ignore acknowledgements of retransmitted packets, except as a
+	// provisional first estimate that the first clean sample replaces.
 	if (sendCount != 1)
 	{
 		if (!peer->initialized)
@@ -450,19 +399,15 @@ void FastRetransmit::NoteRetransmit(const ConnectionClass* connection, int captu
 	if (!peer || !peer->initialized)
 		return;
 
-	// Only a packet that actually waited at least this timeout can justify
-	// increasing the allowance for new packets. Loss alone is not an RTT sample.
+	// Only a packet that waited the full timeout justifies backing off.
 	if (capturedTicks < peer->rto)
 		return;
 
-	// A stalled link has several overdue entries in the queue at once and this
-	// runs for each of them. Back off at most once per timeout interval so the
-	// estimate grows one step per retransmission round, not one step per packet.
+	// Once per timeout interval, not once per overdue packet.
 	if (peer->backedOff && (nowTicks - peer->lastBackoffTime) < peer->rto)
 		return;
 
-	// Grow by half; the next clean sample recomputes the estimate from scratch
-	// and discards the growth.
+	// Grow by half; the next clean sample replaces it.
 	peer->rto = ClampTicks(peer->rto + (peer->rto + 1) / 2);
 	peer->backedOff = true;
 	peer->lastBackoffTime = nowTicks;
@@ -491,20 +436,12 @@ int FastRetransmit::PacketRetryTicks(const ConnectionClass* connection, const Se
 		return CapToVanilla(connection, measured);
 	if (!Matches(timer, entry))
 	{
-		// The estimate may first become available with packets already in
-		// flight. Adopt it once; later peer increases cannot delay this packet.
+		// Packet sent before the estimate existed: adopt it once.
 		CaptureTimer(timer, entry, measured, entry->FirstTime);
 		ArmTimer(timer, connection, entry->SendCount, entry->LastTime);
 	}
 
-	// Re-clamp on every check, not just when the timer was armed.
-	//
-	// RetryDelta is recomputed as Response_Time() + 10 and falls quickly once a
-	// link recovers, so a timer that was legal when armed can outlive that drop
-	// and sit above the engine's current figure - measured at 48 ticks against a
-	// live RetryDelta of 17. Vanilla re-reads RetryDelta on every comparison, so
-	// for that packet we really would have been slower than stock, which is the
-	// one thing this option promises never to do.
+	// Re-clamp on every check: RetryDelta can drop after the timer was armed.
 	return CapToVanilla(connection, timer->delayTicks);
 }
 
@@ -519,10 +456,7 @@ void FastRetransmit::NoteSend(const ConnectionClass* connection, const SendQueue
 	if (!Matches(timer, entry))
 		CaptureTimer(timer, entry, measured, entry->SendCount == 0 ? nowTicks : entry->FirstTime);
 
-	// Called after Send(), before the engine increments SendCount. Preserve
-	// the packet's base (which only clean samples can lower): peer RTO growth
-	// is for newly sent packets,
-	// not another multiplier on this packet's retry history.
+	// Called before the engine increments SendCount.
 	ArmTimer(timer, connection, entry->SendCount + 1, nowTicks);
 }
 
@@ -580,8 +514,6 @@ int FastRetransmit::WorstSmoothedRTT()
 	int worst = -1;
 	for (int i = 0; i < MaxPeers; ++i)
 	{
-		// A provisional estimate came from an ambiguous acknowledgement, so it
-		// carries retransmit delay the engine's figure already accounts for.
 		if (!Peers[i].connection || !Peers[i].initialized || Peers[i].provisional)
 			continue;
 		const int srtt = Peers[i].scaledSrtt >> 3;
@@ -613,8 +545,7 @@ int FastRetransmit::CleanSamples()
 	return total;
 }
 
-// ConnectionClass::Service_Send_Queue, at the point an ACK'd PACKET_DATA_ACK
-// entry's round-trip is about to be folded into the queue's response time.
+// An acknowledged packet's round trip, as the engine records it.
 DEFINE_HOOK(0x48C436, ConnectionClass_ServiceSendQueue_RTTSample, 0x8)
 {
 	if (FastRetransmit::Enabled)
@@ -628,18 +559,11 @@ DEFINE_HOOK(0x48C436, ConnectionClass_ServiceSendQueue_RTTSample, 0x8)
 	return 0;
 }
 
-// ConnectionClass::Service_Send_Queue, replacing the two loads that feed the
-// "has RetryDelta elapsed since this entry was last sent" comparison:
-//   48C4AE  mov eax, [edi+28h]   ; this->RetryDelta
-//   48C4B1  mov edx, ebp         ; now
-//   48C4B3  sub edx, ecx / cmp edx, eax / jbe ...
-// We substitute this connection's own measured timeout for the global one.
+// Uses the connection's own timeout in the retransmit check instead of RetryDelta.
 DEFINE_HOOK(0x48C4AE, ConnectionClass_ServiceSendQueue_RetryTimer, 0x5)
 {
 	enum { Compare = 0x48C4B3 };
 
-	// Even with the adaptive timer disabled, actual resends must still
-	// feed the independently configurable packet-redundancy loss gauge.
 	GET(const ConnectionClass*, conn, EDI);
 	GET(const SendQueueType*, entry, ESI);
 	GET(int, now, EBP);
@@ -649,32 +573,17 @@ DEFINE_HOOK(0x48C4AE, ConnectionClass_ServiceSendQueue_RetryTimer, 0x5)
 	const int sendCount = entry->SendCount;
 	const int elapsed = now - lastTime;
 
-	// Zero when this connection has no estimate of its own: the lobby/global
-	// channels, and private peers not measured yet. Those keep vanilla timing
-	// exactly, including its backoff-free behaviour.
+	// No estimate yet: keep the engine's timing, but still feed the loss gauge.
 	const int measured = FastRetransmit::RetryTicks(conn);
 	if (measured <= 0)
 	{
-		// LastTime starts at zero, so a first send also passes the elapsed-time
-		// test. Only an entry already sent is evidence of packet loss.
 		if (sendCount > 0 && elapsed > vanilla)
 			PacketRedundancy::NoteResend(conn);
 		return 0;
 	}
 
-	// The engine's own "connection has gone bad" test, logged with the context it
-	// never prints. Service_Send_Queue marks a connection bad when ONE queued
-	// entry has been unacknowledged for longer than conn->Timeout - it is the age
-	// of a single packet, not a measure of overall silence - and it only
-	// evaluates that test when a retransmit is due, which is exactly here.
-	//
-	// The flag itself does very little: it sets IPXManagerClass::BadConnection,
-	// whose only accessor (Get_Bad_Connection, 0x5422C0) has no callers and is in
-	// no vtable, and it makes IPXManagerClass::Service return 0, which
-	// Queue_AI_Multiplayer discards at 0x647F63. So this is worth recording
-	// precisely because it fires often and costs nothing - without the age and
-	// the timeout printed beside it, a log full of "gone bad" says nothing about
-	// why.
+	// Logs the engine's "connection gone bad" test (one packet unacknowledged
+	// for longer than Timeout) with the packet's age.
 	if (NetDiagnostics::Enabled && sendCount > 0)
 	{
 		const unsigned int connTimeout = conn->Timeout;
@@ -686,8 +595,6 @@ DEFINE_HOOK(0x48C4AE, ConnectionClass_ServiceSendQueue_RetryTimer, 0x5)
 	const int eff = FastRetransmit::PacketRetryTicks(conn, entry);
 	if (sendCount > 0 && elapsed > eff)
 	{
-		// Pass the timeout this packet really waited under, not the peer's
-		// current estimate (which may have changed since the last send).
 		FastRetransmit::NoteRetransmit(conn, eff, now);
 		PacketRedundancy::NoteResend(conn);
 	}
@@ -697,10 +604,7 @@ DEFINE_HOOK(0x48C4AE, ConnectionClass_ServiceSendQueue_RetryTimer, 0x5)
 	return Compare;
 }
 
-// Immediately after the engine's virtual Send call. EBP is the same timestamp
-// the engine is about to store in LastTime; SendCount still has its old value.
-//   48C4E5 mov eax, [esi+0Ch]
-//   48C4E8 mov [esi+8], ebp
+// After a packet is sent, before LastTime and SendCount are updated.
 DEFINE_HOOK(0x48C4E5, ConnectionClass_ServiceSendQueue_ArmRetry, 0x6)
 {
 	GET(const ConnectionClass*, conn, EDI);

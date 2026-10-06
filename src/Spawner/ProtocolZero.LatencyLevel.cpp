@@ -39,8 +39,7 @@ namespace
 	int  g_goodEvaluations = 0;
 	bool g_descentStreak = false;
 
-	// Flap memory: the level a descent was pushed back off, and until when it
-	// stays refused.
+	// The level a descent was undone from, and until when it is refused.
 	int  g_blockedBelow = 0;
 	int  g_blockedUntilFrame = 0;
 	int  g_lastDescentFrame = 0;
@@ -76,11 +75,7 @@ void LatencyLevel::Apply(LatencyLevelEnum newLatencyLevel, int eventFrame)
 	Commit(newLatencyLevel, eventFrame);
 }
 
-// Applies one agreed level. Two engine constraints govern what may be applied:
-// commands are stamped at roundup(Frame + MaxAhead, FrameSendRate) and protocol
-// 2 only executes on frames divisible by the rate (0x647F36), so MaxAhead must
-// stay an exact multiple of FrameSendRate; and a decrease needs the timing
-// window at 0x4C8033 to reschedule what is already queued.
+// Applies one agreed level. MaxAhead must stay a multiple of FrameSendRate.
 void LatencyLevel::Commit(LatencyLevelEnum newLatencyLevel, int eventFrame)
 {
 	const int previousLevel = (int)CurentLatencyLevel;
@@ -89,18 +84,13 @@ void LatencyLevel::Commit(LatencyLevelEnum newLatencyLevel, int eventFrame)
 	CurentLatencyLevel = newLatencyLevel;
 	Game::Network::PreCalcFrameRate = 60;
 
-	// The rate follows the level in both directions. The vanilla ladder is then
-	// self-consistent at every rung - MaxAhead 4/6/12/16/20/24/28/32/36 is an
-	// exact multiple of its own level - which is the invariant the engine needs.
+	// The rate follows the level, so every rung's MaxAhead is a multiple of it.
 	NewFrameSendRate = static_cast<unsigned char>(newLatencyLevel);
 
 	const int rate = NewFrameSendRate < 1 ? 1 : (int)NewFrameSendRate;
 	int target = GetMaxAhead(newLatencyLevel);
 
-	// Westwood's documented floor, from the protocol comment in queue.cpp: the
-	// minimum MaxAhead is "n * 2, to give both sides some breathing room in case
-	// a FRAMEINFO packet gets missed". The ladder already clears it at every
-	// level; this guards the arithmetic, not the table.
+	// Westwood's minimum MaxAhead is twice the send rate.
 	if (target < 2 * rate)
 		target = 2 * rate;
 
@@ -128,9 +118,7 @@ void LatencyLevel::Commit(LatencyLevelEnum newLatencyLevel, int eventFrame)
 	{
 		g_lastRaiseFrame = eventFrame;
 
-		// Undoing a descent this quickly means the level we dropped to was not
-		// actually supportable. Refuse it for a while rather than trying again
-		// on the same evidence.
+		// A descent undone this quickly wasn't supportable; refuse that level for a while.
 		if (g_lastDescentFrame && (eventFrame - g_lastDescentFrame) <= ReversalWindowFrames)
 		{
 			g_blockedBelow = g_lastDescentFrom;
@@ -189,11 +177,7 @@ void LatencyLevel::Update(LatencyLevelEnum desired, int worstResponseTime,
 		return;
 	}
 
-	// The clock is the event stream, never Unsorted::CurrentFrame. This handler
-	// runs when a ResponseTime2 event executes, and a late one is deliberately
-	// let through by the hook at 0x64C598 rather than rejected - so the local
-	// frame at which it runs differs between machines. Gating on that frame is
-	// what let one machine take a descent step the others never took.
+	// Timed by the event stream, not the local frame, so every client decides alike.
 	const int frame = eventFrame;
 	if (g_hasEvaluated && (frame - g_lastEvaluationFrame) < EvaluationIntervalFrames)
 		return;
@@ -201,8 +185,7 @@ void LatencyLevel::Update(LatencyLevelEnum desired, int worstResponseTime,
 	g_hasEvaluated = true;
 	g_lastEvaluationFrame = frame;
 
-	// The improvement must still hold with the measurement inflated, so a
-	// marginal reading never triggers a step. This is what stops oscillation.
+	// The improvement must hold with the measurement inflated, to avoid oscillating.
 	int inflated = worstResponseTime <= 0 ? 0 : (worstResponseTime * HeadroomNumerator) / HeadroomDenominator;
 	if (inflated > 255)
 		inflated = 255;
@@ -231,19 +214,8 @@ void LatencyLevel::Update(LatencyLevelEnum desired, int worstResponseTime,
 	if (g_goodEvaluations < (g_descentStreak ? 1 : GoodEvaluationsRequired))
 		return;
 
-	// One rung per evaluation.
-	//
-	// Descending straight to the level the measurement supports is safe - the
-	// hook at 0x4C8033 repairs a 9->1 transition exactly as it does 9->8 - but
-	// it is not stable. A full-depth drop lands at the bottom of the ladder on a
-	// single good measurement and is then pulled straight back: measured as
-	// 3->1 reversed 238 frames later, and again 3->1 reversed after 641. Each
-	// reversal is a visible MaxAhead swing and a message to every player.
-	//
-	// Stepping one rung costs descent speed - a 9->1 recovery walks down over
-	// several evaluation intervals rather than one - and buys far fewer
-	// reversals. If the slow descent matters more than the churn, the middle
-	// option is a bounded step (two or three rungs) rather than either extreme.
+	// One rung per evaluation. Dropping straight to the measured level tends to be
+	// reversed shortly after.
 	int target = static_cast<int>(CurentLatencyLevel) - 1;
 	if (target < static_cast<int>(headroomLevel))
 		target = static_cast<int>(headroomLevel);

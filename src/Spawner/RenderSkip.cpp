@@ -37,40 +37,25 @@ namespace
 	// Draw two frames, then drop one - two frames in three.
 	const int DrawRun = 2;
 
-	// Engage fast, release slow. Flapping costs more than staying engaged a
-	// little too long, and both inputs sit on coarse integers - at MaxAhead 4
-	// the "behind" figure only takes five distinct values, so a threshold with
-	// no band around it is crossed every frame.
+	// Engage fast, release slow; the inputs are coarse, so a single threshold flaps.
 	const int EngageFrames = 2;
 
-	// Two seconds of sustained slack before letting go. At 30 frames the
-	// throttle chattered 16 times in one match, because the process figure sits
-	// a couple of milliseconds either side of the budget and every crossing
-	// flipped it - which reads as the frame rate surging and dropping.
+	// Two seconds of slack before releasing.
 	const int ReleaseFrames = 120;
 
-	// Render cost on its own, so the release decision can ask what a frame would
-	// cost if every one were rendered. The process figure alone cannot answer
-	// that - throttling is part of what it measures, so a release threshold
-	// below the engage threshold can be permanently unreachable.
+	// Render cost on its own, to project what an unthrottled frame would cost.
 	int   g_renderCostUs = -1;   // EWMA, alpha = 1/4
 
-	// Rendered and skipped frames within the engine's current ProcessingTicks
-	// window, so the skip fraction describes the same frames as the average it
-	// corrects. Queue_AI_Multiplayer zeroes that window every 128 frames; a drop
-	// in ProcessingFrames is how the reset is seen from here.
+	// Rendered and skipped frames in the engine's current 128-frame ProcessingTicks window.
 	int   g_windowRendered = 0;
 	int   g_windowSkipped = 0;
 	int   g_lastWindowFrames = 0;
 
-	// The average is only trusted once the window holds this many frames. At
-	// four frames, one 80ms hitch - an explosion, a stall on disk - averages out
-	// above the budget and engaged the throttle on a machine that keeps up fine.
+	// Only trust the average once the window holds this many frames.
 	const int MinWindowFrames = 32;
 	int   g_engagedAtFrame = 0;
 
-	// Hard ceiling on one engagement. Even if the projection is wrong, the
-	// throttle re-probes reality instead of latching.
+	// Limit on one engagement, so the throttle re-checks instead of latching.
 	const int MaxEngagedFrames = 3600;
 
 	bool  g_active = false;
@@ -124,8 +109,7 @@ namespace
 		return derived < RenderSkip::MinProcessMs ? RenderSkip::MinProcessMs : derived;
 	}
 
-	// Average cost of the frames in the current 128-frame accounting window.
-	// Meaningless for the first few frames after each reset.
+	// Average frame cost in the current window. Unreliable for the first few frames.
 	int AverageProcessMs()
 	{
 		const int frames = Game::Network::ProcessingFrames;
@@ -167,12 +151,8 @@ bool RenderSkip::ThrottleActive()
 
 bool RenderSkip::ShouldRenderThisFrame()
 {
-	// Multiplayer only, and checked here rather than relying on configuration.
-	// The settings are applied from Spawner::InitNetwork, which campaign and
-	// skirmish never reach, so a single-player game would otherwise run on the
-	// compile-time defaults and drop frames even with RenderSkip=no. The feature
-	// exists to stop one slow client stalling its peers through the MaxAhead
-	// gate, which has no meaning outside a network game.
+	// Multiplayer only. Single player never runs InitNetwork, so the settings
+	// would otherwise stay at their defaults.
 	if (!Enabled || SessionClass::IsSingleplayer())
 		return true;
 
@@ -187,31 +167,13 @@ bool RenderSkip::ShouldRenderThisFrame()
 	const int budget = FrameBudgetMs();
 	const int average = AverageProcessMs();
 
-	// Engages when the average frame reaches the budget AND rendering is at
-	// least RenderSharePercent of it; releases on the projected full-render cost
-	// falling below three quarters of the budget.
-	//
-	// Release below the engage point, judged on the projected full-render cost
-	// rather than the throttled figure - the throttle itself lowers the process
-	// figure, so judging that would guarantee oscillation: engage, cost drops,
-	// release, cost rises. Against the projection a quarter-budget band is
-	// enough. Half the budget was unreachable in any large battle, so one
+	// Engages when the average frame reaches the budget and rendering is at least
+	// RenderSharePercent of it. Releases when the projected unthrottled cost falls
+	// below three quarters of the budget.
 	// engagement lasted until the forced re-probe and re-engaged straight after.
 	const int releaseBudget = budget * 3 / 4;
 
-	// There is no "is anyone waiting on us" test. The peers' frames are only
-	// known from FRAMEINFO, sent every FrameSendRate frames and stamped up to
-	// MaxAhead ahead, so our lag behind the slowest peer sits near -MaxAhead
-	// even when every client is healthy (measured -13 to -35 at level 9) and
-	// cannot say who is slow.
-	//
-	// Process time alone is the honest signal, and it is self-limiting: it only
-	// exceeds the budget when this client genuinely cannot render and simulate a
-	// frame inside the target frame time. Under lockstep the slowest simulator
-	// sets the rate for everyone, so cutting our own cost is the one thing that
-	// can raise it - and skipping a render is sync-neutral either way.
-	// What a fully-rendered frame would cost: the measured average plus the
-	// render we are currently not paying for.
+	// What a frame would cost if every frame were rendered.
 	int projectedUs = average * 1000;
 	if (g_renderCostUs > 0)
 	{
@@ -221,18 +183,12 @@ bool RenderSkip::ShouldRenderThisFrame()
 	}
 	const int projected = projectedUs / 1000;
 
-	// Only intervene when rendering is a real share of the frame. A client whose
-	// time goes to simulation gains nothing from dropped frames - measured: a
-	// client at 18-20ms per frame with a render cost rounding to zero. Checked
-	// in microseconds; whole milliseconds read a 4.9ms render as 4 and failed a
-	// 25% share of a 20ms frame. No sample yet (-1) does not block, so the
-	// first engagement can happen before a render is timed.
+	// Only intervene when rendering is a real share of the frame. No sample yet
+	// does not block.
 	const bool renderIsTheCost = g_renderCostUs < 0
 		|| static_cast<long long>(g_renderCostUs) * 100 >= static_cast<long long>(RenderSharePercent) * average * 1000;
 
-	// Early in a window the average is a handful of frames and one hitch
-	// dominates it. Hold both runs there rather than let it decide - neither
-	// counting toward a change nor resetting progress already made.
+	// Only count toward a change once the window has enough frames.
 	if (windowFrames >= MinWindowFrames)
 	{
 		if (!g_active)
@@ -241,8 +197,7 @@ bool RenderSkip::ShouldRenderThisFrame()
 			g_releaseRun = (projectedUs < releaseBudget * 1000) ? g_releaseRun + 1 : 0;
 	}
 
-	// Re-probe rather than latch: if we have been throttling for a long time,
-	// drop it and let the next few frames say whether it is still needed.
+	// Drop the throttle after a long engagement and re-check.
 	if (g_active && (int)Unsorted::CurrentFrame - g_engagedAtFrame > MaxEngagedFrames)
 	{
 		Debug::Log("[Audit] render re-probe frame=%d after %d frames engaged (process=%dms render=%dus projected=%dms budget=%dms)\n"
@@ -294,8 +249,7 @@ bool RenderSkip::ShouldRenderThisFrame()
 	if (g_drawRun < DrawRun)
 	{
 		++g_drawRun;
-		// Counted, or the projection treats every throttled frame as skipped
-		// and overstates the full-render cost by up to the whole render.
+		// Counted, so the projection doesn't treat this frame as skipped.
 		++g_windowRendered;
 		return true;
 	}
@@ -307,12 +261,7 @@ bool RenderSkip::ShouldRenderThisFrame()
 	return false;
 }
 
-// Main_Loop's render. This replaces the call rather than letting Syringe
-// relocate it - the patched region is a relative call, which cannot be moved.
-// ECX already holds &Map from the instruction before.
-//
-// A replay seek also thins out this render, and is handled here because a
-// second hook on the same call would only run if this one ran after it.
+// Replaces Main_Loop's render call. Also thins out rendering during a replay seek.
 DEFINE_HOOK(0x55D8F2, MainLoop_Render_RenderSkip, 0x5)
 {
 	enum { Resume = 0x55D8F7 };
@@ -321,8 +270,7 @@ DEFINE_HOOK(0x55D8F2, MainLoop_Render_RenderSkip, 0x5)
 
 	if (ReplaySystem::Seek::IsSeeking())
 	{
-		// A seek runs frames as fast as it can and drawing is most of what one
-		// costs, so it draws only every so often - enough to read as progress.
+		// Seeking draws only every so often.
 		const bool skip = ReplaySystem::Seek::ShouldSkipRenderThisFrame();
 		ReplaySystem::Seek::CountRenderedFrame();
 
@@ -334,9 +282,7 @@ DEFINE_HOOK(0x55D8F2, MainLoop_Render_RenderSkip, 0x5)
 
 	if (RenderSkip::ShouldRenderThisFrame())
 	{
-		// QueryPerformanceCounter rather than the millisecond clocks: a render
-		// costs single-digit milliseconds, which GetTickCount's ~15ms tick
-		// cannot resolve at all, and timeGetTime would pull in winmm.
+		// QueryPerformanceCounter: GetTickCount is too coarse for a render.
 		LARGE_INTEGER freq {}, before {}, after {};
 		const bool timed = QueryPerformanceFrequency(&freq) && freq.QuadPart > 0
 			&& QueryPerformanceCounter(&before);
@@ -353,19 +299,9 @@ DEFINE_HOOK(0x55D8F2, MainLoop_Render_RenderSkip, 0x5)
 	return Resume;
 }
 
-// Sync_Delay's opportunistic block, entered only when at least 10ms of the
-// frame budget is left over. It is Input + Keyboard_Process + Tactical::AI +
-// Render, and it exists purely to spend that slack on drawing.
-//
-// Suppressing only its Render was wrong. Skipping Main_Loop's render leaves
-// more slack behind, so this block starts being entered on frames where the
-// engine would previously have fallen through to Sleep(0) - meaning
-// Tactical::AI ran more often than before while the screen updated less often.
-// View scrolling stepped faster and was drawn rarer, which is exactly the
-// "jumps a lot more" symptom.
-//
-// Skipping the whole block restores the engine's own no-slack behaviour: jump
-// to the Sleep(0) the `jle` at 0x55E23D would have taken.
+// Sync_Delay's extra Input/Tactical::AI/Render block, used when the frame has
+// slack. Skipped entirely while throttling, otherwise it runs more often and
+// scrolling speeds up while drawing less.
 DEFINE_HOOK(0x55E23F, SyncDelay_Opportunistic_RenderSkip, 0x8)
 {
 	enum { SkipBlock = 0x55E278 };

@@ -93,8 +93,7 @@ namespace Replay
 
 		bool IsActive() const { return this->Decompressor != nullptr; }
 
-		// False when the stream ends, is truncated - the usual shape of a crashed recording - or
-		// is corrupt. Callers cannot tell those apart and do not need to: all three stop playback.
+		// False when the stream ends, is truncated or is corrupt. All three stop playback.
 		bool Read(void* buffer, size_t size);
 
 		void Reset();

@@ -44,11 +44,7 @@ bool NetDiagnostics::Enabled = true;
 
 namespace
 {
-	// Wait_For_Players bumps these once per stalled frame, for the peer it is
-	// waiting on (these are engine accounting counters, not elapsed time).
-	// FrameSyncStalls means "this peer's reported frame is too far
-	// behind us"; CommandCoundStalls means "this peer says it sent commands we
-	// have not received". Stride and bases read out of Wait_For_Players.
+	// Wait_For_Players stall counters, per peer.
 	int StallCount(int connectionIndex, bool commandStall)
 	{
 		if (connectionIndex < 0 || connectionIndex >= 8)
@@ -60,18 +56,13 @@ namespace
 	DWORD g_lastTick = 0;
 	bool  g_headerLogged = false;
 
-	// Frame-dwell tracking. The heartbeat is once a second, which is too coarse
-	// now that freezes should be sub-second, so stall length is measured from
-	// how long CurrentFrame sits unchanged - this runs on every Service call.
+	// Stall length, measured from how long CurrentFrame stays unchanged.
 	int   g_lastFrame = -1;
 	// High-water marks, so a removed connection cannot make totals fall.
 	int g_peakResends = 0, g_peakLost = 0, g_peakSentAck = 0;
 	int g_peakSentNoAck = 0, g_peakRecvAck = 0, g_peakRecvNoAck = 0;
-	// Per-peer inbound silence tracking, for pinning down the exact moment a
-	// link dies. Wall clock, so several logs can be lined up against each other.
-	// Keyed by connection ID, which is stable. Connection[] is compacted when a
-	// player leaves, so an index means a different peer afterwards and the
-	// tracker would silently attribute one player's silence to another.
+	// Per-peer inbound silence, by wall clock. Keyed by connection ID because
+	// Connection[] is compacted when a player leaves.
 	int   g_silenceId[8] = {};
 	int   g_lastRecvTotal[8] = {};
 	DWORD g_lastRecvTick[8] = {};
@@ -91,8 +82,7 @@ namespace
 		return -1;
 	}
 	DWORD g_frameEnteredTick = 0;
-	// Only stalls a player would actually notice and report. Anything shorter
-	// is ordinary network waiting and would fill a release log.
+	// Only stalls a player would notice.
 	const DWORD StallReportMs = 2000;
 
 	int   g_frameSyncCount = 0;
@@ -155,8 +145,7 @@ namespace
 		return nconn;
 	}
 
-	// The spawn.ini player index minus one - the key PacketRedundancy and
-	// NetHack use. Spawner writes each node's address as its player index.
+	// The spawn.ini player index minus one.
 	int SpawnSlot(const IPXConnClass* conn)
 	{
 		DWORD slot = 0;
@@ -169,8 +158,7 @@ namespace
 		return static_cast<int>(Unsorted::CurrentFrame);
 	}
 
-	// Logs the per-player identity and the connection-index -> house/spawn-slot
-	// mapping once, so heartbeats from different machines can be matched up.
+	// Logs the connection to house/slot mapping once, to match logs across machines.
 	void LogHeader()
 	{
 		const auto* cfg = Spawner::GetConfig();
@@ -183,8 +171,7 @@ namespace
 			(int)PacketRedundancy::Adaptive, (int)PacketRedundancy::Acks,
 			(int)FrameGate::Enabled, cfg ? cfg->Protocol : -1);
 
-		// Every option this build can change, on one line, so a baseline run and a
-		// configured run can be diffed without guessing what was active.
+		// Every option this build can change, on one line.
 		Debug::Log("[Audit] config protocolzero=%d descent=%d timeoutfloor=%d maxlatency=%d"
 			" | retransmit=%d backoff=%d"
 			" | redundancy=%d copies=%d adaptive=%d acks=%d"
@@ -199,9 +186,7 @@ namespace
 			RenderSkip::MinProcessMs, RenderSkip::RenderSharePercent);
 
 		{
-			// GetTickCount is machine uptime; it cannot align two logs. A UTC
-			// stamp taken once, next to the tick it corresponds to, lets every
-			// later tick value be converted to a common timeline.
+			// A UTC stamp beside the tick count, so logs from different machines line up.
 			SYSTEMTIME utc {};
 			GetSystemTime(&utc);
 			Debug::Log("[Audit] clock utc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ tick=%u\n",
@@ -291,7 +276,7 @@ void NetDiagnostics::NoteNoAckPacket(const ConnectionClass* connection, int pack
 
 	++t->received;
 
-	// Only forward progress tells us anything; a repeat or reorder does not.
+	// Only forward progress counts.
 	if (t->lastId >= 0 && packetId > t->lastId + 1)
 	{
 		const int run = packetId - t->lastId - 1;
@@ -335,9 +320,7 @@ void NetDiagnostics::LogEvent(const ConnectionClass* connection, const char* wha
 
 void NetDiagnostics::Tick()
 {
-	// Periodic scorecard. Every 5000 frames is roughly every 80 seconds of
-	// simulation - frequent enough to bracket an incident, rare enough to stay
-	// out of the way.
+	// Periodic summary, every 5000 frames.
 	{
 		static int lastSummaryFrame = 0;
 		const int frame = CurrentFrame();
@@ -381,11 +364,7 @@ void NetDiagnostics::Tick()
 	g_lastTick = now;
 
 
-	// Live engine state against what this client intended, every tick. Catches a
-	// bad pair however it arose - including one produced by a path we do not
-	// hook - and catches our own intent drifting away from what the engine
-	// actually holds, which is exactly how Game 31 broke: MaxAhead came from our
-	// timing-event hook while FrameSendRate was still the engine's stale local.
+	// Engine timing state against what this client intended.
 	{
 		const int liveMaxAhead = Game::Network::MaxAhead;
 		const int liveRate = Game::Network::FrameSendRate;
@@ -394,9 +373,7 @@ void NetDiagnostics::Tick()
 		const bool divides = liveRate > 0 && (liveMaxAhead % liveRate) == 0;
 		const bool agreed = liveMaxAhead == intendedMaxAhead && liveRate == intendedRate;
 
-		// Before the first Commit there is no intent to compare against, so the
-		// mismatch at startup is meaningless - it fired six times a match saying
-		// nothing.
+		// Nothing to compare before the first Commit.
 		if (intendedMaxAhead > 0 && (!divides || !agreed))
 		{
 			Debug::Log("[Audit] state frame=%d engine maxahead=%d fsr=%d | intended maxahead=%d fsr=%d | divides=%d agreed=%d%s\n",
@@ -418,10 +395,7 @@ void NetDiagnostics::Tick()
 
 		const int slot = SpawnSlot(conn);
 
-		// Inbound silence watchdog. Says, with a wall clock, the exact moment this
-		// client stopped hearing from a peer and the moment it resumed - which is
-		// what lets six logs be lined up to see whether one machine went quiet or
-		// everyone stopped talking to it at once.
+		// Logs when this client stops and resumes hearing from a peer.
 		{
 			const int recvTotal = conn->NumRecAck + conn->NumRecNoAck;
 			const DWORD nowTick = GetTickCount();
@@ -448,23 +422,17 @@ void NetDiagnostics::Tick()
 				}
 			}
 		}
-		// Per-connection detail was removed for release: it logged every service
-		// call and walked each send queue to do it. What remains below fires only
-		// when something is actually wrong.
 	}
 }
 
-// IPXManagerClass::Service. Runs once per frame and on every iteration of the
-// Wait_For_Players stall spin, so the heartbeat keeps ticking while frames do not.
+// Runs every frame and during the Wait_For_Players stall loop.
 void NetDiagnostics::LogResponseDecision(int engineTicks, int cleanTicks, int chosenTicks,
 	int wireTicks, int engineLevel, int sentLevel, bool fastWon)
 {
 	if (!Enabled)
 		return;
 
-	// headroom is what remains before the signed byte saturates at 126. A run
-	// of games that never gets near it says the saturation guard is insurance;
-	// a run that reaches it says the reported figure itself is the problem.
+	// Headroom before the response time byte saturates at 126.
 }
 
 namespace
@@ -504,8 +472,7 @@ void NetDiagnostics::LogBadConnection(const ConnectionClass* connection, int pac
 	if (packetAgeTicks > g_badConnWorstAge)
 		g_badConnWorstAge = packetAgeTicks;
 
-	// At most one line a second: this trips hundreds of times in a bad match and
-	// the totals in the summary are what actually matter.
+	// At most one line a second.
 	const DWORD now = GetTickCount();
 	if (g_badConnLastLog != 0 && (now - g_badConnLastLog) < 1000)
 		return;
@@ -525,9 +492,7 @@ void NetDiagnostics::LogBadConnection(const ConnectionClass* connection, int pac
 		g_badConnTrips, g_badConnWorstAge);
 }
 
-// One block per client that can be diffed run to run. This is the primary
-// artefact for comparing a configured run against a baseline: totals only, no
-// per-frame noise.
+// Totals for this client, to compare runs.
 void NetDiagnostics::LogSummary(const char* reason)
 {
 	if (!Enabled)
@@ -538,10 +503,7 @@ void NetDiagnostics::LogSummary(const char* reason)
 	int extraDatagrams = 0, extraFailed = 0;
 	PacketRedundancy::GetCostStats(extraDatagrams, extraFailed);
 
-	// Totals are high-water marks, not a live sum. The engine compacts
-	// Connection[] when a player is removed, so summing the surviving entries
-	// makes cumulative counters go DOWN mid-match and silently discards
-	// everything the departed peer contributed.
+	// High-water marks: Connection[] is compacted when a player leaves.
 	int resends = 0, lost = 0, sentAck = 0, sentNoAck = 0, recvAck = 0, recvNoAck = 0;
 	const int nconn = ConnectionCount();
 	for (int i = 0; i < nconn; ++i)
@@ -562,8 +524,7 @@ void NetDiagnostics::LogSummary(const char* reason)
 	if (recvAck   > g_peakRecvAck)   g_peakRecvAck   = recvAck;   else recvAck   = g_peakRecvAck;
 	if (recvNoAck > g_peakRecvNoAck) g_peakRecvNoAck = recvNoAck; else recvNoAck = g_peakRecvNoAck;
 
-	// Real game speed since the previous summary, by wall clock, so MaxAhead can
-	// be read in time rather than frames: 36 frames is 0.6s at 60fps, 1.2s at 30.
+	// Real game speed since the last summary.
 	static DWORD s_lastTick = 0;
 	static int s_lastFrame = 0;
 	const DWORD tick = GetTickCount();
@@ -574,10 +535,7 @@ void NetDiagnostics::LogSummary(const char* reason)
 	s_lastTick = tick;
 	s_lastFrame = frame;
 
-	// Each player's reported average frame cost (NodeNameType::Time, 0x73; the
-	// PROCESS_TIME event every 128 frames, -1 before the first). The same table
-	// on every client, and what Queue_AI_Multiplayer divides into 1000 for the
-	// frame rate the slowest machine can sustain.
+	// Each player's reported average frame cost (NodeNameType::Time).
 	char proc[160] = "";
 	int procLen = 0;
 	int procMax = -1;
@@ -612,12 +570,8 @@ DEFINE_HOOK(0x541820, IPXManagerClass_Service_NetDiagnostics, 0x6)
 	return 0;
 }
 
-// ConnectionClass::Receive_Packet entry. __thiscall, so ECX is the connection
-// and the packet sits at [esp+4] before the prologue runs. IPXGlobalConnClass
-// routes through here too; TrackerFor keys on the connection so the global and
-// private channels are counted separately.
-// The 0x48C040 hook now lives in PacketRedundancy.cpp, which calls
-// NoteNoAckPacket below: the loss signal must outlive these diagnostics.
+// ConnectionClass::Receive_Packet. Global and private channels are counted
+// separately. The 0x48C040 hook is in PacketRedundancy.cpp.
 
 
 

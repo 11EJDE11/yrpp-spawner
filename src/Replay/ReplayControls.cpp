@@ -259,8 +259,7 @@ namespace ReplaySystem
 			if (!ReplayState.Playback || Seek::IsSeeking())
 				return;
 
-			// Stepping out of a running replay freezes it on the next frame rather than the one
-			// after, which is what a viewer reaching for the button is asking for.
+			// Stepping freezes on the next frame.
 			State.SingleStepTargetFrame = static_cast<int>(Unsorted::CurrentFrame) + 1;
 			State.ResumePending = false;
 			SetPausedState(true);

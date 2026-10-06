@@ -20,16 +20,8 @@
 /**
 *  PacketRedundancy - outbound redundancy for reliable command packets.
 *
-*  Reliable command packets (CommHeader Code == PACKET_DATA_ACK) are sent twice
-*  on the wire so an isolated loss can be recovered without waiting for ARQ
-*  retransmit. The duplicate is byte-identical and rides below the engine's
-*  reliable/in-order layer, which acknowledges duplicate PacketIDs without
-*  delivering commands twice.
-*
-*  Acknowledgements (PACKET_ACK) are duplicated on the same terms. Re-marking an
-*  already-acknowledged send entry is idempotent, and a lost ACK is as expensive
-*  as a lost command: it costs the sender a full retransmit timeout and a
-*  usable RTT sample.
+*  Reliable command packets and their acknowledgements are sent twice, so a
+*  single loss doesn't wait for a retransmit. The engine ignores the duplicate.
 */
 
 #pragma once
@@ -52,25 +44,22 @@ public:
 	static void Reset();
 	static int ClampCopies(int copies);
 
-	// Number of times this outbound datagram should be sent to peer (1 == send
-	// once, no duplication). buf points at the on-wire game bytes
-	// ([CRC(4)][CommHeader...]).
+	// How many times to send this datagram (1 = no duplication). buf is the
+	// on-wire game data.
 	static int CopiesFor(const char* buf, size_t len, int peer);
 
 	// Loss signal for adaptive mode.
 	static void NoteResend(const ConnectionClass* connection);
 
-	// Feeds one received unreliable packet id. A forward gap tops up that peer's
-	// loss gauge immediately, without waiting for a retransmit timeout.
+	// Feeds one received unreliable packet id; a gap raises that peer's loss gauge.
 	static void NoteInboundPacket(const ConnectionClass* connection, int packetId);
 	static int LossGauge(int peer);
-	// Total duplicate datagrams emitted for this peer, for diagnostics.
+	// Duplicate datagrams sent to this peer.
 	static int Duplicates(int peer);
 
 	// Logs failed duplicate sends at most once per second.
 	static void NoteExtraSend(int sendResult);
 
-	// Extra datagrams this feature has put on the wire beyond what vanilla
-	// would have sent, and how many of those sends failed.
+	// Extra datagrams sent, and how many of those failed.
 	static void GetCostStats(int& extraDatagrams, int& extraFailed);
 };

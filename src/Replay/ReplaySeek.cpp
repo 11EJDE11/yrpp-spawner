@@ -834,8 +834,7 @@ namespace ReplaySystem
 		{
 			const int played = std::max(ReplayState.HighestPlayedFrame, CurrentFrame());
 
-			// A recording that died with the process never got its length stamped in, so the only
-			// honest answer is how far playback has got.
+			// A recording that died with the process has no length; use how far playback has got.
 			const int recorded = ReplayState.HasPlaybackHeader
 				? static_cast<int>(ReplayState.PlaybackHeader.TotalFrames)
 				: 0;

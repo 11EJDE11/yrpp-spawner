@@ -101,9 +101,8 @@ namespace Replay
 
 	constexpr int32_t MaxMoneyInPerFrame = 1024;
 
-	// Where everything on the map is, for readers outside the game: every ObjectSnapshotIntervalFrames,
-	// the objects that appeared (with where they appeared) and the ones that left. Movement is not
-	// recorded: it was most of a long game's replay size.
+	// Objects that appeared (with where they appeared) and objects that left, every
+	// ObjectSnapshotIntervalFrames. Movement is not recorded.
 	constexpr int ObjectSnapshotIntervalFrames = 30;
 	constexpr int32_t MaxObjectRecordsPerFrame = 16384;
 	// ObjectUpdateRecord::X/Y are leptons / 16: sixteenths of a cell, 0..8191 on the 512-cell grid.
@@ -121,8 +120,7 @@ namespace Replay
 	{
 		ObjectRecordFlag_Veteran = 1u << 0,
 		ObjectRecordFlag_Elite = 1u << 1,
-		// Bit 2 is unused: it was "in the air", which cost a ground-height lookup per object and which
-		// no reader used - Height carries the altitude.
+		// Bit 2 is unused.
 		ObjectRecordFlag_Cloaked = 1u << 3,
 	};
 
@@ -274,10 +272,8 @@ namespace Replay
 		uint32_t Flags;           // HouseStatsFlags
 	};
 
-	// One payment into a house's balance through HouseClass::Refund_Money (0x4F9950), recorded raw:
-	// who received it, how much, and the address the call returns to. Which kind of income a caller
-	// is - harvest, oil derrick, sale - is decided by readers, so the recorder never has to follow
-	// Ares or Phobos moving it. Payments to the same house from the same caller in one frame are summed.
+	// One payment through HouseClass::Refund_Money (0x4F9950): who received it, how much, and the
+	// caller's return address, which readers map to the kind of income. Summed per house and caller per frame.
 	struct MoneyInRecord
 	{
 		uint8_t House;

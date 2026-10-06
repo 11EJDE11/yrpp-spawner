@@ -361,19 +361,15 @@ DEFINE_HOOK(0x685670, DoWin_FinishReplayRecording, 0x5)
 
 #pragma region Statistics
 
-// Send_Statistics_Packet clears every house's built counts and refills them with what the house still
-// owns before it packs them, so the replay's end-of-game snapshot is taken on its first instruction.
-// That is mov eax, 8394h - position independent, so returning 0 re-executes it safely.
+// Send_Statistics_Packet resets every house's built counts before packing them, so the
+// end-of-game snapshot is taken on entry.
 DEFINE_HOOK(0x6C6F50, SendStatisticsPacket_ReplayFinalSnapshot, 0x5)
 {
 	ReplaySystem::OnStatisticsPacketStarting();
 	return 0;
 }
 
-// Clear_Scenario deletes every house. Its callers - Read_Scenario_INI for a new game, the random map
-// generator and savegame loading - normally run with no recording open, since Select_Game's reset
-// closes it first; this keeps a recording that is still open from losing its end-of-game record.
-// The stolen bytes are mov eax, [Scen]: an absolute load, position independent.
+// Clear_Scenario deletes every house, so close out a recording that is still open first.
 DEFINE_HOOK(0x6851F0, ClearScenario_ReplayFinalSnapshot, 0x5)
 {
 	if (ReplaySystem::IsRecordingActive())
@@ -381,9 +377,7 @@ DEFINE_HOOK(0x6851F0, ClearScenario_ReplayFinalSnapshot, 0x5)
 	return 0;
 }
 
-// HouseClass::Refund_Money is the one function every kind of income reaches the balance through,
-// so the call site it will return to says where the money came from. The stolen bytes are
-// mov eax, [esp+4] and mov edx, [ecx+30Ch], both position independent; nothing here writes.
+// Every kind of income goes through HouseClass::Refund_Money; the return address says which.
 DEFINE_HOOK(0x4F9950, HouseClass_RefundMoney_ReplayIncome, 0xA)
 {
 	GET(HouseClass*, pHouse, ECX);
@@ -394,10 +388,8 @@ DEFINE_HOOK(0x4F9950, HouseClass_RefundMoney_ReplayIncome, 0xA)
 	return 0;
 }
 
-// Both functions that count HouseClass's units/buildings-lost totals. They open with
-// push ecx; push ebp; push esi; mov esi, ecx; push edi - position independent. Both are __thiscall
-// with one argument, the killer: an ObjectClass for Record_The_Kill_Object, whose owner the function
-// itself credits, and a HouseClass for Record_The_Kill_House. Either can be null.
+// Both functions that count a house's units and buildings lost. The argument is the killer:
+// an ObjectClass for Record_The_Kill_Object, a HouseClass for Record_The_Kill_House. Either can be null.
 DEFINE_HOOK(0x702D40, TechnoClass_RecordTheKillObject_ReplayLosses, 0x6)
 {
 	GET(TechnoClass*, pTechno, ECX);
@@ -550,13 +542,8 @@ DEFINE_HOOK(0x69AF0F, WaitForPlayers_ReplaySkipNetworkSyncDance, 0x7)
 {
 	if (ReplaySystem::IsPlaybackRequested())
 	{
-		// Scenario_Load_Wait (0x684370) holds the load until every slot reads complete, and a replay
-		// has no peers to report in, so the peers are declared finished here.
-		//
-		// Slot 0 is the local player and is deliberately left alone. Session_Callback advances and
-		// repaints the bar a few bytes above this hook, and only while Get_Player_Progress(0) is
-		// still behind the percentage it was handed - so writing slot 0 here satisfies that test
-		// forever and freezes the loading bar wherever it happened to be.
+		// Scenario_Load_Wait waits until every slot reports complete, and a replay has no peers, so they
+		// are marked finished here. Slot 0, the local player, is left alone, or the loading bar freezes.
 		auto& progresses = ProgressScreenClass::Instance.PlayerProgresses;
 		for (size_t i = 1; i < std::size(progresses); ++i)
 			progresses[i] = 100.0;
@@ -738,9 +725,7 @@ DEFINE_HOOK(0x752480, Speak_SilenceDuringSpectatorPlayback, 0x5)
 	return 0;
 }
 
-// Save_Game's success epilogue, after IStorage has been released; only the success path jumps here.
-// BL holds the Put_All result, and ESP+0x2C is the wide filename it saved to, after
-// SaveGame_SGInSubdir prefixed SavedGameDir.
+// Save_Game's success path. ESP+0x2C is the wide filename it saved to.
 DEFINE_HOOK(0x67D2F1, SaveGame_RecordReplayCheckpoint, 0x6)
 {
 	if (ReplayState.Recording && R->BL())

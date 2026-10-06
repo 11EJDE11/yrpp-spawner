@@ -71,8 +71,7 @@ namespace
 		if (nconn < 0) nconn = 0;
 		if (nconn > FrameGate::MaxPeers) nconn = FrameGate::MaxPeers;
 
-		// Wait for the initial connections. Delete_Connection later compacts
-		// this array; its indices are not stable player identities.
+		// Connection[] is compacted later, so indices aren't stable player identities.
 		if (peerCount < 0)
 		{
 			if (!nconn)
@@ -96,8 +95,7 @@ namespace
 		}
 		if (topologyChanged)
 		{
-			// Fail closed for the rest of this match. Never let a surviving
-			// player inherit another player's safe-through watermark.
+			// Fall back to the engine's test for the rest of the match.
 			ClearWatermarks();
 			Debug::Log("[FrameGate] connections changed; using vanilla command-count gate until reset\n");
 		}
@@ -196,8 +194,6 @@ void FrameGate::OnReceive(unsigned int theirEntry, const unsigned char* evBytes)
 	if (topologyChanged)
 		return;
 
-	// Derive the array base from the YRpp binding rather than repeating its
-	// address, so the two cannot drift apart.
 	const auto theirBase = reinterpret_cast<unsigned>(Peers());
 	if (theirEntry < theirBase)
 		return;

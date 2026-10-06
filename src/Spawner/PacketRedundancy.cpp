@@ -41,27 +41,17 @@ namespace
 	constexpr size_t HeaderOffset = 4;
 	constexpr size_t CodeOffset = HeaderOffset + offsetof(CommHeaderType, Code);
 
-	// Milliseconds of protection remaining, decayed in real time and topped up
-	// by evidence of loss. A resend is strong evidence but arrives one RTO late;
-	// an inbound sequence gap is weaker but immediate.
+	// Milliseconds of protection left, decaying over time and topped up by loss.
 	const int  GaugeBump = 4000;
 	const int  GaugeCap = 20000;
 	const int  GaugeMsPerUnit = 1;
 
-	// An inbound gap is weaker evidence than a resend (it proves the path is
-	// lossy, not that this peer missed something we sent) so it buys less, but
-	// it arrives an entire retransmit timeout earlier. A longer run of missing
-	// ids means a worse burst and buys proportionally more.
-	// Deliberately much weaker than a resend: a gap proves loss coming TOWARD
-	// us, while redundancy protects what we SEND. It stays as a trigger because
-	// it is the only evidence available before a retransmit timeout, but
-	// sustained coverage has to be earned by an actual resend.
+	// An inbound gap shows incoming loss, not that the peer missed what was sent, so it
+	// buys much less than a resend. It is the earliest signal available.
 	const int  InboundGapBump = 500;
 	const int  InboundGapRunCap = 3;
 
-	// Last NOACK packet id seen from each peer, for gap detection. Tracked here
-	// rather than borrowed from NetDiagnostics so redundancy keeps working when
-	// the diagnostics are stripped.
+	// Last NOACK packet id seen from each peer, for gap detection.
 	int g_lastNoAckId[PacketRedundancy::MaxPeers];
 	bool g_lastNoAckValid[PacketRedundancy::MaxPeers];
 
@@ -105,14 +95,8 @@ namespace
 			g_gauge[peer] = GaugeCap;
 	}
 
-	// Maps a connection to the peer index CopiesFor() is keyed by - the
-	// ListAddress slot, i.e. the spawn.ini player index minus one. Spawner sets
-	// each node's address to its player index, so the first four bytes of
-	// NodeAddress hold that index.
-	//
-	// Returns -1 for anything that is not a live private connection, including
-	// the global, router and multicast channels, which share
-	// ConnectionClass::Service_Send_Queue but do not belong to any one peer.
+	// The peer index for a connection (spawn.ini player index minus one), or -1
+	// for the global channels.
 	int PeerIndexForConnection(const ConnectionClass* connection)
 	{
 		if (!connection)
@@ -164,9 +148,7 @@ int PacketRedundancy::ClampCopies(int copies)
 	return copies == 1 ? 1 : 2;
 }
 
-// Bumps the loss gauge for the peer this resend belongs to. A connection that
-// does not resolve to a peer is a shared channel, not evidence about any one
-// player, so it is ignored rather than raising every peer's gauge.
+// Shared channels are ignored.
 void PacketRedundancy::NoteResend(const ConnectionClass* connection)
 {
 	const int peer = PeerIndexForConnection(connection);
@@ -179,7 +161,7 @@ int PacketRedundancy::Duplicates(int peer)
 	return ValidPeer(peer) ? g_duplicates[peer] : 0;
 }
 
-// Current loss gauge for peer, decayed up to now.
+// Current loss gauge for peer.
 int PacketRedundancy::LossGauge(int peer)
 {
 	if (!ValidPeer(peer))
@@ -191,11 +173,7 @@ int PacketRedundancy::LossGauge(int peer)
 
 void PacketRedundancy::NoteExtraSend(int sendResult)
 {
-	// Every extra datagram this feature puts on the wire that vanilla would not
-	// have sent. The reviewer's arithmetic is worth confirming in the field:
-	// with ACK duplication on, one delivered command can cost two data
-	// datagrams plus up to four ACKs where stock sends one of each, so this
-	// counter is the honest bandwidth price of the loss recovery.
+	// Extra datagrams sent beyond what the engine would send.
 	++g_extraDatagrams;
 	if (sendResult == -1)
 	{
@@ -210,13 +188,6 @@ void PacketRedundancy::NoteExtraSend(int sendResult)
 	}
 }
 
-// Decides how many times to send this outbound datagram. Only reliable
-// (PACKET_DATA_ACK) packets and, when enabled, their acknowledgements
-// duplicate, and only while enabled and - if Adaptive - actual loss is being
-// observed for this peer.
-// One received unreliable packet. A forward jump in the id means the packets in
-// between were lost on the way here, which is the earliest loss signal
-// available anywhere in the stack - it costs no timeout and no retransmit.
 void PacketRedundancy::NoteInboundPacket(const ConnectionClass* connection, int packetId)
 {
 	if (!Enabled || packetId < 0)
@@ -228,7 +199,7 @@ void PacketRedundancy::NoteInboundPacket(const ConnectionClass* connection, int 
 
 	if (g_lastNoAckValid[peer] && packetId > g_lastNoAckId[peer] + 1)
 	{
-		// Only forward progress is evidence; a repeat or a reorder is not.
+		// Only forward progress counts.
 		int run = packetId - g_lastNoAckId[peer] - 1;
 		if (run > InboundGapRunCap)
 			run = InboundGapRunCap;
@@ -241,10 +212,7 @@ void PacketRedundancy::NoteInboundPacket(const ConnectionClass* connection, int 
 
 	else if (g_lastNoAckValid[peer] && packetId < g_lastNoAckId[peer])
 	{
-		// The missing id turning up late means it was reordered, not lost. Give
-		// back what the gap charged for it, otherwise a path that merely
-		// reorders - which costs the game nothing, since the engine sequences
-		// these itself - reads as loss and pins redundancy on permanently.
+		// A late id was reordered, not lost: refund what the gap charged.
 		DecayGauge(peer);
 		g_gauge[peer] -= InboundGapBump;
 		if (g_gauge[peer] < 0)
@@ -258,9 +226,7 @@ void PacketRedundancy::NoteInboundPacket(const ConnectionClass* connection, int 
 	}
 }
 
-// ConnectionClass::Receive_Packet. Owned here rather than by the diagnostics so
-// the loss signal survives stripping them; NetDiagnostics is still fed for its
-// run-length histogram when it is compiled in.
+// ConnectionClass::Receive_Packet.
 DEFINE_HOOK(0x48C040, ConnectionClass_ReceivePacket_Redundancy, 0x8)
 {
 	GET(const ConnectionClass*, conn, ECX);
@@ -286,10 +252,7 @@ int PacketRedundancy::CopiesFor(const char* buf, size_t len, int peer)
 
 	const auto* header = reinterpret_cast<const CommHeaderType*>(buf + HeaderOffset);
 
-	// A lost ACK costs as much as a lost command: the sender waits out its whole
-	// retransmit timeout and resends a packet that already arrived, which also
-	// destroys the RTT sample for it. An ACK is 18 bytes on the wire, so
-	// duplicating one is far cheaper than the retransmission it prevents.
+	// A lost ACK costs a full retransmit timeout, and an ACK is small.
 	const bool reliable = header->Code == ConnectionEnum::PACKET_DATA_ACK;
 	const bool ack = Acks && header->Code == ConnectionEnum::PACKET_ACK;
 	if (!reliable && !ack)

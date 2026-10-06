@@ -89,11 +89,9 @@ namespace Replay
 		bool SyncFlush();
 		bool FinishRecording();
 
-		// Optional independent checkpoint archive after the finished frame deflate stream, streamed
-		// from the sources' files so no save is ever held in memory. Sources must be in ascending frame
-		// order. One that cannot be read, or that would take the archive past maxBytes, is left out
-		// and the rest still written. Returns how many were written; the header only points at the
-		// archive when that is at least one.
+		// Writes the checkpoint archive after the frame stream, streaming each save from disk. Sources
+		// must be in frame order; unreadable ones, or ones over maxBytes, are skipped. Returns how many
+		// were written.
 		int WriteCheckpointArchive(const std::vector<CheckpointSource>& sources, uint32_t maxBytes, int probes);
 		bool ReadCheckpointArchive(std::vector<unsigned char>& bytes);
 

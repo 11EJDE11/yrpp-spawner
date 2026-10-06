@@ -126,8 +126,7 @@ namespace ReplaySystem
 					&& record.Aux >= 0 && record.Aux < MaxBeaconSlots;
 
 			case SideChannelEventType::Taunt:
-				// PlayTaunt range-checks the command itself, but a value that came off disk should
-				// not be bounded only by a function we do not own.
+				// Validated here too, since the value came from disk.
 				return VoxClass::IsValidTauntCommand(record.Aux);
 
 			default:

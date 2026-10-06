@@ -204,10 +204,8 @@ namespace ReplaySystem::Objects
 
 			if ((isNew || !SameAppearance(known.Appear, appear)) && appeared.size() < limit)
 			{
-				// TechnoClass::Captured (0x7014A0) calls Record_The_Kill_Object on the object it hands
-				// over (0x7015A8, through vtable +0xE0, with no killer), so a capture or mind control
-				// leaves a death behind for an object that lives on. Its owner changing is the tell:
-				// Captured returns early when the owner is unchanged, and a real death leaves the map.
+				// A capture or mind control calls Record_The_Kill_Object without a killer, leaving a death
+				// for an object that lives on. An owner change tells them apart.
 				if (!isNew && known.Appear.Owner != appear.Owner)
 					State.Deaths.erase(appear.UniqueID);
 				appeared.push_back(appear);
@@ -260,8 +258,8 @@ namespace ReplaySystem::Objects
 	}
 }
 
-// Both Record_The_Kill functions run as an object is destroyed, before it leaves TechnoClass::Array,
-// so the next snapshot finds it gone and reports it destroyed, where it died and who killed it.
+// Runs before the object leaves TechnoClass::Array, so the next snapshot reports where it died
+// and who killed it.
 void ReplaySystem::RecordObjectDestroyed(TechnoClass* pTechno, HouseClass* pKiller)
 {
 	if (!ReplaySystem::IsRecordingActive() || !pTechno)

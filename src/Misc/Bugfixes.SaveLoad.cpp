@@ -69,8 +69,7 @@ static_assert(offsetof(TiberiumClass, SpreadLogic) + offsetof(TiberiumLogic, Tim
 static_assert(offsetof(TiberiumClass, GrowthLogic) + offsetof(TiberiumLogic, Timer) == 0x11C,
 	"TiberiumClass::Load (0x721E80) resets the growth timer at TiberiumClass+0x11C");
 
-// The tail of CDTimerClass::operator=, which is its retn 4. Reaching it without having written
-// anything leaves the timer as the load found it and still balances the caller's argument.
+// The end of CDTimerClass::operator=, skipping the assignment.
 constexpr DWORD CDTimerClass_operator_assign_Return = 0x46B651;
 
 DEFINE_HOOK(0x46B640, CDTimerClass_Assign_KeepValueAcrossLoad, 0x6)

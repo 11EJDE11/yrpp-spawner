@@ -32,10 +32,8 @@ namespace Replay
 	// How many saves the recording keeps on disk while the game runs, the newest included.
 	constexpr size_t MaxStagedCheckpoints = 8;
 
-	// Where the embedded checkpoints go, in thousandths of the recording. A frame costs more to
-	// simulate the more there is on the map, so seeking is cheap early and dear late, and the
-	// points sit where they save the most simulating: these minimise the expected cost of a seek
-	// to anywhere when a frame's cost grows with the frame number.
+	// Where the embedded checkpoints go, in thousandths of the recording. Later frames cost more
+	// to simulate, so they are placed to minimise the expected seek cost.
 	constexpr std::array<int, MaxRecordedCheckpoints> RecordedCheckpointTargetsPerMille { 375, 575, 725, 875 };
 
 	// The dictionary probes they are compressed with. They are compressed as the recording closes,
@@ -50,10 +48,8 @@ namespace Replay
 		std::vector<unsigned char> Compressed;
 	};
 
-	// Which staged save to drop once there are more than MaxStagedCheckpoints, given their frames in
-	// ascending order: the one whose removal leaves the smallest gap, measured from frame 0 for the
-	// first. The newest is never dropped - the game may end at any point after it - so the rest stay
-	// close to evenly spread over however long the game has run so far.
+	// Which staged save to drop when there are too many: the one leaving the smallest gap. The
+	// newest is never dropped.
 	inline size_t ChooseStagedCheckpointToEvict(const std::vector<int32_t>& frames)
 	{
 		size_t victim = 0;
@@ -70,9 +66,7 @@ namespace Replay
 		return victim;
 	}
 
-	// The staged saves to embed, as ascending indices into frames (ascending), for a recording whose
-	// last frame is lastFrame: for each target in turn, the unused save nearest it, the earlier one
-	// on a tie. Saves past the last recorded frame cannot be resumed from and are never chosen.
+	// The staged saves nearest each target, as indices into frames. Saves past lastFrame are never chosen.
 	inline std::vector<size_t> ChooseRecordedCheckpoints(const std::vector<int32_t>& frames, int32_t lastFrame)
 	{
 		std::vector<size_t> chosen;

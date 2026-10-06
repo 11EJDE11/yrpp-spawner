@@ -57,24 +57,13 @@ void ProtocolZero::SendResponseTime2()
 
 	int ipxResponseTime = engineResponseTime;
 
-	// Keep both sources separate so the audit log can attribute an inflated
-	// report to either one. They fail in opposite directions: the engine's mean
-	// lags minutes behind a change, this PR's estimator reacts in seconds but is
-	// noisier, and the fix differs depending on which produced the figure.
+	// Use the measured delivery delay when it is worse than the engine's slow mean.
 	const int cleanResponseTime = FastRetransmit::WorstDeliveryDelay();
 	if (cleanResponseTime > ipxResponseTime)
 		ipxResponseTime = cleanResponseTime;
 
-	// Both wire fields are single bytes and the raw response time is unbounded,
-	// so it used to wrap: 155 ticks arrived as -100, and 255 arrived as 0.
-	// HandleResponseTime2 discards zero outright, and its running maximum starts
-	// at zero so a negative can never win - meaning the slowest link's report was
-	// thrown away precisely when it was the one that mattered. That shortens the
-	// RetryDelta and, worse, the connection Timeout derived from it, which risks
-	// dropping a player who is merely slow.
-	//
-	// Saturate instead. The packet layout is untouched, and a peer running an
-	// unfixed build still reads a valid figure from us.
+	// Both fields are single bytes; saturate rather than wrap, since a wrapped
+	// value is discarded by the receiver.
 	const int cappedForField = ipxResponseTime > 126 ? 126 : ipxResponseTime;
 	const int cappedForLevel = ipxResponseTime > 255 ? 255 : ipxResponseTime;
 
@@ -128,14 +117,8 @@ void ProtocolZero::HandleResponseTime2(EventExt* event)
 	int worstRttSlot = -1;
 	int worstLevelSlot = -1;
 
-	// Age against the newest frame the reports themselves carry, never against
-	// Unsorted::CurrentFrame. This handler runs when a ResponseTime2 event
-	// executes, and a late one is let through by the hook at 0x64C598 instead of
-	// being rejected, so the local frame at execution time differs between
-	// machines. Ageing on that frame made the table - and therefore the descent
-	// decision - machine-dependent: in Game 25 one client aged every entry out,
-	// read rtt 0, and stepped to level 1 while the other two stayed at 3.
-	// Every input below is now a pure function of the event stream.
+	// Age against the newest frame in the reports, not the local frame, so every
+	// client reaches the same result.
 	int newestReportFrame = 0;
 	for (char i = 0; i < (char)std::size(PlayerLastTimingFrame); ++i)
 	{

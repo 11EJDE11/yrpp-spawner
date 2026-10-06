@@ -17,26 +17,11 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
-// Ares and Phobos both replace the engine's AI production picker, and both index three rules lists
-// with the house's AI difficulty without checking the list is that long:
-//
-//   Ares    Ext/House/Hooks.100.cpp:50-51,62   Phobos  Ext/House/Body.cpp:167-168,180
-//     pRules->HarvestersPerRefinery[AIDiff]
-//     pRules->AISlaveMinerNumber[AIDiff]
-//     RulesClass::Instance->FillEarliestTeamProbability[AIDiff]
-//
-// A YR ruleset gives all three an entry per difficulty and the index is fine. An RA2 one does not:
-// on RA2 rules HarvestersPerRefinery is a single value and AISlaveMinerNumber - slave miners being
-// a Yuri unit - is absent altogether, so a house at difficulty 1 or 2 reads off the end of the
-// array. AISlaveMinerNumber is worse than out of range: an empty TypeList has a null Items, so the
-// read is through a null pointer.
-// The lists are made long enough that the index they use is always in range.
-// Entries the ruleset actually defines are never touched, so a YR ruleset with a
-// full set of three sees no change at all; only the indices that were previously read out of bounds
-// gain a defined value. A short list is extended by repeating its last entry, which is the usual
-// reading of a ruleset that gives one value for every difficulty. An empty one is filled with zero,
-// which makes the comparisons it feeds fail closed - the AI declines to queue something rather than
-// deciding at random.
+// Ares and Phobos index HarvestersPerRefinery, AISlaveMinerNumber and
+// FillEarliestTeamProbability by AI difficulty without a bounds check. RA2 rules
+// define fewer than three entries (AISlaveMinerNumber none at all), so normal and
+// hard AI read out of bounds. Short lists are padded with their last entry, or
+// zero if empty; entries the rules define are unchanged.
 
 #include <Utilities/Debug.h>
 #include <Utilities/Macro.h>

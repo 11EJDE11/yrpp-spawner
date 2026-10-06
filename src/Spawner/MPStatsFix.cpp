@@ -20,15 +20,8 @@
 /**
 *  MPStatsFix - correct the command-count stall counter in Wait_For_Players.
 *
-*  Vanilla increments MPStats[v79].CommandCoundStalls (0x6497DC) whenever a
-*  peer's command count is behind, but indexes the write with v79 - the
-*  lowest-frame peer from an unrelated loop - instead of the actual culprit.
-*  When there is still frame runway (the common packet-loss case: a peer's
-*  commands lag but MaxAhead has not run out), v79 is forced to -1 just before
-*  this write, so the increment lands on MPStats[-1].CommandCoundStalls, which
-*  is exactly &ProcessingFrames (0xA8B564) - the frame-timing accumulator used
-*  elsewhere for frame-rate negotiation.
-*
+*  The engine indexes this counter with the wrong peer, often -1, which writes
+*  into ProcessingFrames and corrupts the frame rate negotiation.
 */
 
 #include <Helpers/Macro.h>
@@ -37,10 +30,8 @@
 #include "FrameGate.h"
 #include <Unsorted.h>
 
-// Replaces the mis-indexed "++MPStats[v79].CommandCoundStalls" at 0x6497DC.
-// Recomputes the real culprit - the first peer whose received command count
-// is behind its sent count, instead of trusting v79 (often -1) or a clobbered register.
-// Skips the write entirely if no peer is actually behind.
+// Replaces the mis-indexed CommandCoundStalls increment with the peer that is
+// actually behind. Skipped if no peer is behind.
 DEFINE_HOOK(0x6497DC, WaitForPlayers_CommandStallStat_Fix, 0x7)
 {
 	enum { Continue = 0x6497E3 };
@@ -51,13 +42,8 @@ DEFINE_HOOK(0x6497DC, WaitForPlayers_CommandStallStat_Fix, 0x7)
 
 	const TheirSync* their = FrameGate::Peers();
 
-	// A count gap alone does not identify the blocker. FrameGate deliberately
-	// lets a peer run with CommandsReceived < CommandsSent while the missing
-	// commands belong to frames we have not reached yet, so the first peer with
-	// a gap is often one that is not holding anybody up. Prefer a peer that is
-	// both behind on count and not covered by its SafeThrough; fall back to the
-	// first peer with a gap only when none qualifies, which keeps the stat
-	// populated and still avoids the vanilla negative index.
+	// Prefer a peer that is behind and not covered by FrameGate; otherwise the
+	// first peer behind.
 	int culprit = -1;
 	int fallback = -1;
 	for (int i = 0; i < nconn; ++i)
@@ -68,9 +54,6 @@ DEFINE_HOOK(0x6497DC, WaitForPlayers_CommandStallStat_Fix, 0x7)
 		if (fallback < 0)
 			fallback = i;
 
-		// SafeThrough is FrameGate's watermark for how far this peer's commands
-		// are known good. Covering the current frame means the gap is entirely
-		// in the future and this peer is not what anyone is waiting on.
 		if (FrameGate::GetSafeThrough(i) < (int)Unsorted::CurrentFrame)
 		{
 			culprit = i;

@@ -23,14 +23,10 @@
 #include <PlanningTokenClass.h>
 #include <TechnoClass.h>
 
-// A unit joins PlanningTokenClass::ActiveRouteOwners, and its house's HouseRouteCounts goes up,
-// when its first planned order is queued. Every path that clears a route with orders still in it
-// undoes both. PlanningTokenClass::Remove_Node (0x636B50) does not: it is what the main loop
-// (0x637270) uses to drop planned orders whose target has died, and what deleting a waypoint
-// (0x639BC0) uses. When it removes the last order the unit stays in the list with an empty route,
-// is added again by its next plan, and becomes a dangling pointer when it dies. The inflated count
-// eventually refuses planning mode with "MSG:PlannerMaximum" (0x639130).
-// Nothing in the simulation reads either, so finishing the bookkeeping cannot desync.
+// PlanningTokenClass::Remove_Node (0x636B50) removes a unit's last planned order without
+// removing it from ActiveRouteOwners or decrementing HouseRouteCounts, as other route clears do.
+// The unit is left in the list and becomes a dangling pointer when it dies. Nothing in the
+// simulation reads either, so this cannot desync.
 DEFINE_HOOK(0x636CCC, PlanningTokenClass_RemoveNode_ClearActiveOwner, 0x6)
 {
 	GET(PlanningTokenClass* const, pToken, EDI);

@@ -43,58 +43,33 @@ public:
 	static LatencyLevelEnum CurentLatencyLevel;
 	static uint8_t NewFrameSendRate;
 
-	// The MaxAhead this client wants in force. The periodic timing event carries
-	// it, so a descent actually reaches the engine instead of being overwritten
-	// by the next event re-broadcasting the current value.
+	// The MaxAhead this client wants in force, carried by the periodic timing event.
 	static int TargetMaxAhead;
 
-	// Vanilla only ever climbs, so one bad stretch pins a whole match at the
-	// worst rung. This allows stepping back down, on the pattern OpenTS settled
-	// on (nettiming.cpp, BalancedTimingPolicy::Evaluate): worsening is immediate,
-	// improvement must clear a headroom margin, a cooldown and several
-	// consecutive agreeing evaluations, and then descends one rung at a time.
-	//
-	// Every input is taken from the event stream and every deadline from the
-	// game frame, never from local counters or wall clock - each client must
-	// reach the identical decision on the identical frame or they diverge.
+	// Vanilla only ever raises the level. This also lowers it: raises are
+	// immediate, a descent needs headroom, a cooldown and several agreeing
+	// evaluations, and goes one rung at a time. Everything is driven by the event
+	// stream and game frame so all clients decide identically.
 	static bool AllowDescent;
 
 	static const int EvaluationIntervalFrames = 256;
 	static const int ChangeCooldownFrames = 256;
 	static const int GoodEvaluationsRequired = 3;
-	// The improvement has to survive inflating the measurement. Measured at 5/4
-	// this cost roughly a whole rung of delay per step, because the engine's
-	// Avg_Response_Time unwinds over minutes - it is a 256-sample mean fed only
-	// by acknowledged reliable packets, which are sparse, and vanilla's periodic
-	// Reset_Response_Time only runs for GAME_INTERNET so it never fires here.
-	// 50% headroom, not 12.5%. A descent must be justified by a measurement
-	// inflated by half before it is allowed, because the delivery-delay
-	// estimator now tracks a step change in about ten acknowledgements - it is
-	// far more responsive, and correspondingly noisier, than the 256-sample mean
-	// this gate was originally tuned against. At 12.5% a third of all level
-	// changes were reversals.
+	// Headroom: the improvement must still hold with the measurement inflated by half.
 	static const int HeadroomNumerator = 3;
 	static const int HeadroomDenominator = 2;
 
-	// A raise is evidence the link is bad, so it blocks the next descent for
-	// longer than an ordinary change does.
+	// A raise blocks the next descent for longer than other changes.
 	static const int RaiseCooldownFrames = 1024;
 
 	// A descent undone within this many frames counts as a failed attempt.
 	static const int ReversalWindowFrames = 2048;
-	// ...and that level is then refused for this long, so the same rung is not
-	// retried on the same evidence that just failed.
+	// ...and that level is then refused for this long.
 	static const int FlapCooldownFrames = 4096;
 
-	// Descent steps one rung per evaluation, and any rung is legal. FrameSendRate
-	// follows the level in both directions, so every rung's MaxAhead is an exact
-	// multiple of its own rate, and the hook at 0x4C8033 opens the rescheduling
-	// window on a decrease too, so commands already queued on the old cadence
-	// are moved rather than dropped.
 
-	// Called once per timing report with the worst level and worst response time
-	// any player has reported, and the house slots that reported them (logging
-	// only). Raises immediately, descends only on the gates.
+	// Called with the worst reported level and response time. The house slots are
+	// for logging only.
 	static void Update(LatencyLevelEnum desired, int worstResponseTime,
 		int worstRttSlot, int worstLevelSlot, int eventFrame);
 	static void ResetDescent();

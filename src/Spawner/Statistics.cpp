@@ -164,9 +164,8 @@ DEFINE_HOOK(0x6C882A, RegisterGameEndTime_CorrectDuration, 0x6)
 	return 0;
 }
 
-// The captured-building and collected-crate counts are only kept in an Internet game. A recording
-// counts them too, so its statistics show them for LAN, skirmish and campaign games as well. The
-// counts are score tracking only - Send_Statistics_Packet is their one reader.
+// The engine only counts captured buildings and crates in Internet games; count them in every
+// recorded game. Score tracking only.
 bool __forceinline ShouldCountForStatistics()
 {
 	return IsStatisticsEnabled()
@@ -183,7 +182,7 @@ DEFINE_HOOK(0x448524, BuildingClass_Captured_SendStatistics, 0x7)
 		: DontSend;
 }
 
-// cmp Session, 4 ahead of CollectedCrates.Increment_Unit_Total in CellClass::Goodie_Check.
+// CellClass::Goodie_Check, before the crate count is incremented.
 DEFINE_HOOK(0x481D6B, CellClass_GoodieCheck_CountCrate, 0x7)
 {
 	enum { Count = 0x481D74, DontCount = 0x481D86 };

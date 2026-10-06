@@ -59,10 +59,7 @@ int WINAPI NetHack::SendTo(
 	int ret = Tunnel::SendTo(sockfd, buf, len, flags, &tempDest, addrlen);
 	const int firstError = ret == SOCKET_ERROR ? WSAGetLastError() : 0;
 
-	// A failing sendto is the one signal that distinguishes "this machine lost
-	// its link" from "the packets left but never arrived". Without it, a client
-	// whose NIC has gone down looks identical to one being silently dropped
-	// upstream - both just stop hearing from everyone.
+	// A failed sendto means this machine lost its link, rather than packets being dropped upstream.
 	if (ret == SOCKET_ERROR)
 		NetDiagnostics::LogSendFailure(index, firstError);
 	for (int i = 1; i < copies; ++i)

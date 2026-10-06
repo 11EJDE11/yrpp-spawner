@@ -99,10 +99,8 @@ namespace ReplaySystem::Statistics
 			std::vector<TypeList> Types;
 			std::vector<HouseSnapshot> Houses;
 			std::vector<HouseCounters> Counters;
-			// Send_Statistics_Packet clears the built counts and refills them with what each house
-			// still owns (0x6C7D98-0x6C7EA8) - that is where the packet's UNL/INL/PLL/BLL "left"
-			// arrays come from - and hands the arrays back byte-swapped. After that they describe the
-			// packet rather than the game, so the snapshot is taken just before and then held.
+			// Send_Statistics_Packet overwrites the built counts with what each house still owns, so the
+			// snapshot is taken just before.
 			bool Frozen = false;
 			std::vector<unsigned char> StatsPacket;
 			std::vector<int32_t> ArmyValue;
@@ -300,9 +298,7 @@ namespace ReplaySystem::Statistics
 			record.HarvestedCredits = pHouse->HarvestedCredits;
 			record.PowerOutput = pHouse->PowerOutput;
 			record.PowerDrain = pHouse->PowerDrain;
-			// YRpp names these TotalKilledUnits/TotalKilledBuildings, but TechnoClass::Record_The_Kill_Object
-			// (0x702D40) increments them on the house that *lost* the object. The per-house arrays next
-			// to them are the kills, credited to the killer and indexed by the victim's house.
+			// YRpp calls these TotalKilledUnits/TotalKilledBuildings, but they count the house's losses.
 			record.UnitsLost = pHouse->TotalKilledUnits;
 			record.BuildingsLost = pHouse->TotalKilledBuildings;
 			record.Score = pHouse->PointTotal;
@@ -634,9 +630,6 @@ namespace ReplaySystem::Statistics
 
 	void WriteSection(File& file)
 	{
-		// The houses are still alive on every path that closes a recording (docs/replay-format.md,
-		// "When the end-of-game snapshot is taken"). Should one ever close after Clear_Scenario has
-		// deleted them, OnScenarioClearing took the snapshot on the way in, and that one stands.
 		if (HouseClass::Array.Count > 0)
 			RefreshSnapshot();
 
@@ -679,9 +672,7 @@ void ReplaySystem::RecordStatisticsPacket(const void* data, int length)
 	Statistics::State.StatsPacket.assign(bytes, bytes + length);
 }
 
-// Mirrors the condition both Record_The_Kill functions count UnitsLost/BuildingsLost on: a building
-// only when it is not Insignificant and its OwnerCountryIndex (+0x53C) is set, and - in
-// Record_The_Kill_Object, whose whole tally sits inside it - only for a type that scores.
+// The same condition Record_The_Kill_Object and Record_The_Kill_House count losses on.
 void ReplaySystem::RecordObjectLost(TechnoClass* pTechno, bool scoringTypesOnly)
 {
 	if (!ReplaySystem::IsRecordingActive() || !pTechno || !pTechno->Owner || pTechno->Owner->ArrayIndex < 0)
