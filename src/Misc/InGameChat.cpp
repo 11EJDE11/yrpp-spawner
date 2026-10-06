@@ -23,10 +23,8 @@
 #include <Unsorted.h>
 #include <Replay/ReplaySystem.h>
 
-#ifdef IS_CNCNET_YR_VER
 #include <MessageListClass.h>
 #include <Windows.h>
-#endif
 
 // This corrects the processing of Unicode player names
 // and prohibits incoming messages from players with whom chat is disabled
@@ -47,7 +45,6 @@ struct GlobalPacket_NetMessage
 
 #pragma pack(pop)
 
-#ifdef IS_CNCNET_YR_VER
 static bool inline IsDisableChatEnabled()
 {
 	return Spawner::Enabled && Spawner::GetConfig()->DisableChat;
@@ -131,7 +128,6 @@ DEFINE_HOOK(0x55DDA5, MainLoop_AfterRender_DisableChat, 0x5)
 
 	return 0x55DDAA;
 }
-#endif
 
 DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 {
@@ -152,10 +148,8 @@ DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 			GlobalPacket_NetMessage::Instance.Message, pRecordHouse->ColorSchemeIndex);
 	}
 
-#ifdef IS_CNCNET_YR_VER
 	if (IsDisableChatEnabled())
 		return SkipMessage;
-#endif
 
 	if (houseIndex < 8 && Game::ChatMask[houseIndex])
 	{
