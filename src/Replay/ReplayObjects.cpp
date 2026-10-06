@@ -214,11 +214,11 @@ namespace ReplaySystem::Objects
 				known.Appear = appear;
 			}
 
-			if ((isNew || memcmp(&known.Update, &update, sizeof(update)) != 0) && updated.size() < limit)
-			{
+			// Only where an object first appears is written. Movement and state changes were most of
+			// a long game's replay size; the position is still kept so a removal reports where it was.
+			if (isNew && updated.size() < limit)
 				updated.push_back(update);
-				known.Update = update;
-			}
+			known.Update = update;
 
 			known.SeenInSnapshot = snapshot;
 		}

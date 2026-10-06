@@ -590,9 +590,9 @@ Verified in the binary; worth writing down because the names mislead.
 
 Nothing in the event stream says where anything is: a `MEGAMISSION` names the object and where it
 was sent, never where it stood, and nothing records a death's location. So a reader that wants a map -
-units moving, bases growing, where the fighting was - gets one from `src/Replay/ReplayObjects.cpp`,
-which writes the Objects block every `ObjectSnapshotIntervalFrames` (30) frames: half a second at the
-fastest speed, about a cell of a tank's movement, fine enough for a reader to ease between snapshots.
+bases growing, where things were built and where the fighting was - gets one from
+`src/Replay/ReplayObjects.cpp`, which writes the Objects block every `ObjectSnapshotIntervalFrames` (30)
+frames. Units are placed where they appeared; their movement is not recorded.
 
 It is taken at the frame's hash site with `HouseStats`, and like it only reads object state: it walks
 `TechnoClass::Array` once, reading fields and the const queries `GetTechnoType`, `IsInAir` and the
@@ -612,8 +612,9 @@ The block is a delta against what the previous snapshot told a reader, so a stil
   sixteenths of a cell; for a building, inside its top-left cell), `uint8 Health` (0-255 of the type's
   `Strength`), `uint8 Mission` (`CurrentMission`, 0xFF for none), `uint8 Flags` (bit 0 veteran, bit 1
   elite, bit 3 cloaked; bit 2 unused - it was "in the air", which cost a ground-height lookup per
-  object and no reader used), `uint8 Height` (`Location.Z >> 4`, clamped). Written with every appearance and
-  whenever any of it changes.
+  object and no reader used), `uint8 Height` (`Location.Z >> 4`, clamped). Written once, when the object comes
+  onto the map (not again on an owner change). Movement and state changes are not recorded - they
+  were about 60% of a long game's replay - so a unit's position is where it appeared.
 - **`ObjectGoneRecord`** - `uint32 UniqueID`, `uint16 X`, `uint16 Y`, `uint8 Reason` (0 removed, 1
   destroyed), `uint8 KillerHouse` (0xFF for none), `uint16` reserved. An object alive and out of limbo
   at the previous snapshot and not at this one.

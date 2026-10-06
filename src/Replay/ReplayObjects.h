@@ -25,7 +25,7 @@
 
 // Where every unit, infantryman, aircraft and building is, for readers outside the game - the
 // analyser's map. Written as changes every ObjectSnapshotIntervalFrames: objects that appeared or
-// changed owner, objects that moved or changed state, and objects that left, with who destroyed them.
+// changed owner, where each new one appeared, and objects that left, with who destroyed them.
 // Everything is a plain read of object state; nothing here calls into the simulation.
 namespace ReplaySystem::Objects
 {

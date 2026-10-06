@@ -102,8 +102,8 @@ namespace Replay
 	constexpr int32_t MaxMoneyInPerFrame = 1024;
 
 	// Where everything on the map is, for readers outside the game: every ObjectSnapshotIntervalFrames,
-	// the objects that appeared, moved or changed, and the ones that left. Half a second at the fastest
-	// speed; a unit crosses about a cell in that time, so a reader can ease between snapshots.
+	// the objects that appeared (with where they appeared) and the ones that left. Movement is not
+	// recorded: it was most of a long game's replay size.
 	constexpr int ObjectSnapshotIntervalFrames = 30;
 	constexpr int32_t MaxObjectRecordsPerFrame = 16384;
 	// ObjectUpdateRecord::X/Y are leptons / 16: sixteenths of a cell, 0..8191 on the 512-cell grid.
@@ -307,7 +307,7 @@ namespace Replay
 		uint16_t Reserved;
 	};
 
-	// Where an object is, written only when it moved or its state changed since the last snapshot.
+	// Where an object was when it came onto the map. Not written again as it moves or changes.
 	struct ObjectUpdateRecord
 	{
 		uint32_t UniqueID;
