@@ -22,6 +22,7 @@
 // Runtime state and the entry points the replay hooks drive. Only src/Replay includes this; the
 // public surface is ReplaySystem.h.
 
+#include "ReplayCanonical.h"
 #include "ReplayFrameCodec.h"
 #include "ReplayFile.h"
 
@@ -68,7 +69,8 @@ namespace ReplaySystem
 			int ExpectedEventsThisFrame = 0;
 			int LastSyncFlushFrame = 0;
 
-			uint32_t ExpectedGameCRC = 0;
+			// The low 16 bits of the recorded hash, which is all the file keeps.
+			uint16_t ExpectedGameCRC = 0;
 			bool HasExpectedGameCRC = false;
 			bool DivergenceReported = false;
 
@@ -111,6 +113,11 @@ namespace ReplaySystem
 
 			// Payments made after the current frame's capture was written; they go into the next one.
 			std::vector<MoneyInRecord> CarriedMoneyIn;
+
+			// The recording's canonical hash chain, and the buffer each frame's canonical bytes are
+			// built in.
+			Replay::SealChain Seals;
+			std::vector<uint8_t> CanonicalScratch;
 		};
 
 		extern ReplayRuntimeState ReplayState;

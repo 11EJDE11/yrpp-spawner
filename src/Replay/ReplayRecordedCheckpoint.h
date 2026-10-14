@@ -29,6 +29,12 @@ namespace Replay
 	constexpr size_t MaxRecordedCheckpoints = 4;
 	constexpr size_t MaxRecordedCheckpointBytes = 16u * 1024u * 1024u;
 
+	// The checkpoints are the one optional part of a recording, so they give way to keep the whole file
+	// under the 20 MB that Discord accepts without Nitro and that the ladder takes as an upload.
+	constexpr uint64_t MaxReplayFileBytes = 19'000'000u;
+	// Kept back for the statistics section, which is written after the checkpoints.
+	constexpr uint64_t StatisticsSectionReserveBytes = 256u * 1024u;
+
 	// How many saves the recording keeps on disk while the game runs, the newest included.
 	constexpr size_t MaxStagedCheckpoints = 8;
 

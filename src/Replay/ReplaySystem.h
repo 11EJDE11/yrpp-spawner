@@ -47,7 +47,6 @@ namespace ReplaySystem
 
 	// Recording taps for chat, beacons and taunts, which bypass EventClass::DoList. Safe to call
 	// when not recording.
-	void RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex);
 	void RecordTaunt(int tauntCommand);
 	void RecordBeaconPlace(int houseIndex, const CoordStruct& coord, int beaconSlot);
 	void RecordBeaconDelete(int houseIndex, int beaconSlot);
@@ -64,6 +63,12 @@ namespace ReplaySystem
 	// TechnoClass::Record_The_Kill_Object / Record_The_Kill_House: the object is being lost.
 	// The first only counts a loss for a type that scores; the second counts it regardless.
 	void RecordObjectLost(TechnoClass* pTechno, bool scoringTypesOnly);
-	// The same two functions, for the recording's object snapshots: where it died and who is credited.
-	void RecordObjectDestroyed(TechnoClass* pTechno, HouseClass* pKiller);
+
+	// Chat fingerprints, multiplayer only: the sender puts a fresh salt in the chat packet and queues a
+	// ChatFingerprint event of the message, and the message is recorded with the salt it was sent with
+	// on both sides. pSalt is null for a message that carried none. See docs/replay-format.md.
+	bool GenerateChatSalt(uint8_t (&salt)[16]);
+	void QueueChatFingerprint(const uint8_t (&salt)[16], int houseIndex, const wchar_t* message);
+	void RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex,
+		const uint8_t* pSalt);
 }

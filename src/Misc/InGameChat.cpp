@@ -26,6 +26,10 @@
 #include <MessageListClass.h>
 #include <Windows.h>
 
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
 // This corrects the processing of Unicode player names
 // and prohibits incoming messages from players with whom chat is disabled
 
@@ -41,9 +45,36 @@ struct GlobalPacket_NetMessage
 	wchar_t Message[112];
 	byte Color;
 	byte CRC;
+	// Past the vanilla fields. The packet goes out at the full GlobalPacketType size (455 bytes) and
+	// arrives whole in this buffer, so the salt of the message's ChatFingerprint rides along here.
+	uint32_t SaltMagic;
+	uint8_t Salt[16];
 };
 
 #pragma pack(pop)
+
+static_assert(offsetof(GlobalPacket_NetMessage, SaltMagic) == 274);
+static_assert(sizeof(GlobalPacket_NetMessage) <= 455);
+
+namespace
+{
+	constexpr uint32_t ChatSaltMagic = 0x53435259; // 'YRCS'
+
+	// Message_Input's chat scope, set by the key that opened the prompt (0x55E550): 1 the ChatMask
+	// houses, 2 allies, 3 everyone. Zero once the observer check has refused the send.
+	int& ChatScope = *reinterpret_cast<int*>(0xABCE18);
+
+	// Set between the send loop and the local print of the same message.
+	bool HasOutgoingSalt = false;
+	uint8_t OutgoingSalt[16] = {};
+
+	const uint8_t* ReceivedSalt()
+	{
+		return GlobalPacket_NetMessage::Instance.SaltMagic == ChatSaltMagic
+			? GlobalPacket_NetMessage::Instance.Salt
+			: nullptr;
+	}
+}
 
 static bool inline IsDisableChatEnabled()
 {
@@ -69,8 +100,18 @@ DEFINE_HOOK(0x55EF38, MessageSend_DisableChat, 0x6)
 			LastDisableChatFeedbackFrame = currentFrame;
 		}
 
+		HasOutgoingSalt = false;
+		GlobalPacket_NetMessage::Instance.SaltMagic = 0;
 		return 0x55F056; // skip the send
 	}
+
+	// The message is about to go out: give it a fresh salt, for its ChatFingerprint.
+	HasOutgoingSalt = ChatScope != 0 && !ReplaySystem::IsPlaybackRequested()
+		&& ReplaySystem::GenerateChatSalt(OutgoingSalt);
+
+	GlobalPacket_NetMessage::Instance.SaltMagic = HasOutgoingSalt ? ChatSaltMagic : 0;
+	if (HasOutgoingSalt)
+		memcpy(GlobalPacket_NetMessage::Instance.Salt, OutgoingSalt, sizeof(OutgoingSalt));
 
 	return 0; // execute original: cmp edi, ebx; mov [esp+0x14], ebx
 }
@@ -145,7 +186,7 @@ DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 	if (pRecordHouse)
 	{
 		ReplaySystem::RecordChatMessage(houseIndex, pRecordHouse->UIName,
-			GlobalPacket_NetMessage::Instance.Message, pRecordHouse->ColorSchemeIndex);
+			GlobalPacket_NetMessage::Instance.Message, pRecordHouse->ColorSchemeIndex, ReceivedSalt());
 	}
 
 	if (IsDisableChatEnabled())
@@ -193,9 +234,14 @@ DEFINE_HOOK(0x55F0A8, MessageInput_Print, 0x5)
 	// The local player's own message, which never comes back round through NetworkCallBack
 	if (HouseClass* pHouse = HouseClass::CurrentPlayer)
 	{
+		if (HasOutgoingSalt)
+			ReplaySystem::QueueChatFingerprint(OutgoingSalt, pHouse->ArrayIndex, GlobalPacket_NetMessage::Instance.Message);
+
 		ReplaySystem::RecordChatMessage(pHouse->ArrayIndex, GlobalPacket_NetMessage::Instance.PlayerName,
-			GlobalPacket_NetMessage::Instance.Message, pHouse->ColorSchemeIndex);
+			GlobalPacket_NetMessage::Instance.Message, pHouse->ColorSchemeIndex, HasOutgoingSalt ? OutgoingSalt : nullptr);
 	}
+
+	HasOutgoingSalt = false;
 
 	R->EAX(GlobalPacket_NetMessage::Instance.PlayerName);
 	return 0x55F0B2;

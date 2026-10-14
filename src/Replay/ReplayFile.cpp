@@ -69,6 +69,10 @@ namespace Replay
 				|| header.RandomNext2 < 0 || header.RandomNext2 >= 250
 				|| header.SpawnIniSize > MaxEmbeddedFileBytes
 				|| header.SpawnMapSize > MaxEmbeddedFileBytes
+				|| header.SpawnIniRawSize > MaxEmbeddedFileBytes
+				|| header.SpawnMapRawSize > MaxEmbeddedFileBytes
+				|| (header.SpawnIniSize == 0) != (header.SpawnIniRawSize == 0)
+				|| (header.SpawnMapSize == 0) != (header.SpawnMapRawSize == 0)
 				|| !IsReplayGameSpeedIndexValid(header.RecordedGameSpeed))
 			{
 				return ReplayOpenFailure::Malformed;
@@ -511,7 +515,24 @@ namespace Replay
 			== offsetof(ReplayHeader, StatisticsOffset) + sizeof(uint64_t),
 			"The statistics fields are stamped back to back and have to stay adjacent");
 
-		return this->AppendSection(bytes, MaxStatisticsSectionBytes, offsetof(ReplayHeader, StatisticsOffset));
+		if (bytes.empty() || bytes.size() > MaxStatisticsSectionBytes)
+			return false;
+
+		// Compressed in one go: it is a few hundred kilobytes at most, written as the game closes.
+		size_t compressedSize = 0;
+		void* const compressed = tdefl_compress_mem_to_heap(bytes.data(), bytes.size(), &compressedSize,
+			TDEFL_DEFAULT_MAX_PROBES);
+		if (!compressed)
+			return false;
+
+		const auto* pCompressed = static_cast<const unsigned char*>(compressed);
+		const std::vector<unsigned char> stored(pCompressed, pCompressed + compressedSize);
+		mz_free(compressed);
+
+		// The inflated size first, so the section never points at data whose size is not yet known.
+		const uint32_t rawSize = static_cast<uint32_t>(bytes.size());
+		return this->WriteAt(offsetof(ReplayHeader, StatisticsRawSize), &rawSize, sizeof(rawSize))
+			&& this->AppendSection(stored, MaxStatisticsSectionBytes, offsetof(ReplayHeader, StatisticsOffset));
 	}
 
 	bool File::ReadCheckpointArchive(std::vector<unsigned char>& bytes)

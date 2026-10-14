@@ -628,7 +628,7 @@ namespace ReplaySystem::Statistics
 		RefreshSnapshot();
 	}
 
-	void WriteSection(File& file)
+	void WriteSection(File& file, const std::vector<SealRecord>& seals)
 	{
 		if (HouseClass::Array.Count > 0)
 			RefreshSnapshot();
@@ -646,6 +646,14 @@ namespace ReplaySystem::Statistics
 		{
 			const size_t chunk = out.Begin(StatisticsChunk_StatsPacket);
 			out.Raw(State.StatsPacket.data(), State.StatsPacket.size());
+			out.End(chunk);
+		}
+
+		if (!seals.empty())
+		{
+			const size_t chunk = out.Begin(StatisticsChunk_Seals);
+			out.Value(static_cast<uint32_t>(seals.size()));
+			out.Raw(seals.data(), seals.size() * sizeof(SealRecord));
 			out.End(chunk);
 		}
 

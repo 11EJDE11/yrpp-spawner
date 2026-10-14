@@ -51,9 +51,10 @@ namespace Replay
 	// Read the uncompressed header without opening a playback stream.
 	bool ReadReplayHeaderFromPath(const char* replayPath, ReplayHeader& outHeader);
 
-	// Recording setup reads the current engine state and embeds the launch INIs.
+	// Recording setup reads the current engine state and embeds the launch INIs. Also builds the
+	// canonical description the recording's seal chain starts from.
 	const char* GetRecordingOutputPath(const SpawnerConfig* pConfig);
-	bool WriteInitialReplayFile(const SpawnerConfig* pConfig);
+	bool WriteInitialReplayFile(const SpawnerConfig* pConfig, std::vector<uint8_t>& outSealDescriptor);
 
 	// A save to embed as a checkpoint: the game's own .SAV and the sidecar captured with it, both on disk.
 	struct CheckpointSource
@@ -63,8 +64,8 @@ namespace Replay
 		std::filesystem::path Sidecar;
 	};
 
-	// Owns the file handle and compression state. The header and embedded files are
-	// uncompressed; frame bytes use one deflate stream beginning just after them.
+	// Owns the file handle and compression state. The header is uncompressed and the embedded files
+	// are deflated on their own; frame bytes use one deflate stream beginning just after them.
 	// An optional checkpoint archive follows the completed deflate stream.
 	class File
 	{
@@ -95,9 +96,12 @@ namespace Replay
 		int WriteCheckpointArchive(const std::vector<CheckpointSource>& sources, uint32_t maxBytes, int probes);
 		bool ReadCheckpointArchive(std::vector<unsigned char>& bytes);
 
-		// Optional statistics section, appended after the checkpoint archive. Nothing in the game
-		// reads it back; it is for readers outside the game.
+		// Optional statistics section, appended after the checkpoint archive as raw deflate. Nothing in
+		// the game reads it back; it is for readers outside the game.
 		bool WriteStatisticsSection(const std::vector<unsigned char>& bytes);
+
+		// The file's length so far.
+		bool CurrentSize(uint64_t& size) { return this->EndOffset(size); }
 
 		// Call only after writing the end marker and finishing compression successfully.
 		bool StampCleanShutdown(int lastWrittenFrame);

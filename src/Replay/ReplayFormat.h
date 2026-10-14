@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace Replay
 {
@@ -41,7 +42,8 @@ namespace Replay
 		ReplayHeaderFlag_CleanShutdown = 1u << 0
 	};
 
-	// Which optional blocks follow a frame record's header, written and read in this order.
+	// Which blocks a decoded frame record carried. In memory only: on disk each block is a tagged,
+	// length-prefixed FrameBlockTag, and the hash is a bit of the record's first varint.
 	enum FrameRecordFlags : uint32_t
 	{
 		FrameRecordFlag_None = 0u,
@@ -49,34 +51,61 @@ namespace Replay
 		FrameRecordFlag_Selection = 1u << 1,
 		FrameRecordFlag_SideChannel = 1u << 2,
 		FrameRecordFlag_GameCRC = 1u << 3,
-		FrameRecordFlag_Extensions = 1u << 4,
-		FrameRecordFlag_ObjectCensus = 1u << 5,
-		FrameRecordFlag_GameSpeed = 1u << 6,
-		FrameRecordFlag_RandomState = 1u << 7,
-		FrameRecordFlag_SelectionTriggers = 1u << 8,
-		FrameRecordFlag_HouseStats = 1u << 9,
-		FrameRecordFlag_MoneyIn = 1u << 10,
-		FrameRecordFlag_Objects = 1u << 11
+		FrameRecordFlag_GameSpeed = 1u << 4,
+		FrameRecordFlag_SelectionTriggers = 1u << 5,
 	};
 
-	constexpr uint32_t KnownFrameRecordFlags = FrameRecordFlag_TacticalPos
-		| FrameRecordFlag_Selection
-		| FrameRecordFlag_SideChannel
-		| FrameRecordFlag_GameCRC
-		| FrameRecordFlag_Extensions
-		| FrameRecordFlag_ObjectCensus
-		| FrameRecordFlag_GameSpeed
-		| FrameRecordFlag_RandomState
-		| FrameRecordFlag_SelectionTriggers
-		| FrameRecordFlag_HouseStats
-		| FrameRecordFlag_MoneyIn
-		| FrameRecordFlag_Objects;
+	// A frame record's blocks. Each is written as varint tag, varint length, then that many bytes, and
+	// tag 0 ends the list. A reader skips a tag it does not know by its length, so a block can be added
+	// without invalidating anything already recorded.
+	enum FrameBlockTag : uint32_t
+	{
+		FrameBlock_End = 0,
+		FrameBlock_TacticalPos = 1,       // zigzag dx, zigzag dy from the last recorded position
+		FrameBlock_Selection = 2,         // varint count, then that many varint unique IDs
+		FrameBlock_SideChannel = 3,       // varint count, then that many side-channel records
+		FrameBlock_GameSpeed = 4,         // uint8 game speed index
+		FrameBlock_SelectionTriggers = 5, // varint count, then that many varint unique IDs
+		FrameBlock_HouseStats = 6,        // varint count, then that many HouseStatsSample
+		FrameBlock_MoneyIn = 7,           // varint count, then that many MoneyInRecord
+		FrameBlock_Seal = 8,              // SealRecord: the canonical hash chain so far
+	};
 
-	constexpr uint32_t MaxFrameExtensionBytes = 1u << 20;
+	constexpr uint32_t MaxFrameBlockBytes = 1u << 20;
 	constexpr uint32_t MaxEmbeddedFileBytes = 32u * 1024u * 1024u;
 	constexpr int32_t MaxEventsPerFrame = 128 * 128;
 
 	constexpr int32_t MaxSelectionTriggersPerFrame = 4096;
+	constexpr int32_t MaxSelectedObjects = 4096;
+
+	// EventClass::EventLength (0x8208EC): the payload bytes the network carries for each vanilla event
+	// type, and so the bytes a received event holds. The rest of the 104-byte union is zero on a
+	// receiver and leftover stack on the sender, so only these bytes are recorded.
+	constexpr int VanillaEventTypeCount = 47;
+	constexpr uint8_t VanillaEventLength[VanillaEventTypeCount] = {
+		0, 5, 5, 4, 23, 24, 5, 5, 0, 5, 5, 16, 0, 4, 12, 12,
+		12, 5, 8, 0, 16, 5, 5, 4, 4, 0, 0, 1, 7, 0, 10, 4,
+		5, 2, 0, 4, 4, 104, 64, 0, 4, 5, 10, 0, 5, 4, 12,
+	};
+	constexpr size_t EventPayloadOffset = 7;
+	constexpr size_t MaxEventPayload = 104;
+
+	// FRAMEINFO's CRC is replaced on disk by the outcome of the check the engine makes with it: the
+	// value is the same as the recorder's own hash unless that peer was out of sync.
+	enum FrameInfoCheck : uint8_t
+	{
+		FrameInfoCheck_Mismatch = 0,
+		FrameInfoCheck_Match = 1,
+		FrameInfoCheck_NotChecked = 2,
+	};
+
+	// The canonical hash chain: a SHA-256 over the part of the recording every player's copy shares,
+	// sealed every SealIntervalFrames. See docs/replay-format.md.
+	constexpr int SealIntervalFrames = 900;
+	constexpr size_t SealHashBytes = 32;
+	// The salted fingerprint a chat message's ChatFingerprint event carries.
+	constexpr size_t ChatSaltBytes = 16;
+	constexpr size_t ChatFingerprintBytes = 16;
 
 	// One economy/army sample per house every this many frames: a second of game time at the
 	// fastest speed, which is finer than any end-of-game chart needs and costs 84 bytes a house.
@@ -98,41 +127,11 @@ namespace Replay
 	constexpr uint32_t StatisticsChunk_StatsPacket = MakeChunkTag('S', 'T', 'A', 'T');
 	constexpr uint32_t StatisticsChunk_Game = MakeChunkTag('G', 'A', 'M', 'E');
 	constexpr uint32_t StatisticsChunk_Modules = MakeChunkTag('M', 'O', 'D', 'S');
+	// uint32 count, then that many SealRecord: every seal the frame stream carries, and a last one
+	// over whatever followed the final full interval.
+	constexpr uint32_t StatisticsChunk_Seals = MakeChunkTag('S', 'E', 'A', 'L');
 
 	constexpr int32_t MaxMoneyInPerFrame = 1024;
-
-	// Objects that appeared (with where they appeared) and objects that left, every
-	// ObjectSnapshotIntervalFrames. Movement is not recorded.
-	constexpr int ObjectSnapshotIntervalFrames = 30;
-	constexpr int32_t MaxObjectRecordsPerFrame = 16384;
-	// ObjectUpdateRecord::X/Y are leptons / 16: sixteenths of a cell, 0..8191 on the 512-cell grid.
-	constexpr int ObjectPositionShift = 4;
-
-	enum ObjectRecordKind : uint8_t
-	{
-		ObjectRecordKind_Unit = 0,      // UnitClass, ships included
-		ObjectRecordKind_Infantry = 1,
-		ObjectRecordKind_Aircraft = 2,
-		ObjectRecordKind_Building = 3,
-	};
-
-	enum ObjectRecordFlags : uint8_t
-	{
-		ObjectRecordFlag_Veteran = 1u << 0,
-		ObjectRecordFlag_Elite = 1u << 1,
-		// Bit 2 is unused.
-		ObjectRecordFlag_Cloaked = 1u << 3,
-	};
-
-	enum ObjectGoneReason : uint8_t
-	{
-		// Off the map without being destroyed: sold, deployed, into a transport or building, grinded.
-		ObjectGoneReason_Removed = 0,
-		// Record_The_Kill_Object or Record_The_Kill_House ran for it.
-		ObjectGoneReason_Destroyed = 1,
-	};
-
-	constexpr uint8_t ObjectNoHouse = 0xFF;
 
 	// HouseStatsSample::Flags and StatisticsHouseRecord::Flags.
 	enum HouseStatsFlags : uint32_t
@@ -201,8 +200,8 @@ namespace Replay
 	// The cell grid is a fixed 512x512, at 256 leptons per cell.
 	constexpr int32_t MaxMapLeptonCoord = 512 * 256;
 
-#pragma pack(push, 1)
-
+	// In memory. On disk: uint8 type, zigzag house, zigzag aux, zigzag X/Y/Z, varint length + UTF-8
+	// sender name, varint length + UTF-8 text, then for chat uint8 salt flag and, when set, the salt.
 	struct SideChannelRecord
 	{
 		int32_t FrameNumber = 0;
@@ -213,6 +212,17 @@ namespace Replay
 		CoordStruct Coord = {}; // BeaconPlace only
 		wchar_t SenderName[SideChannelNameLength] = {}; // ChatMessage only
 		wchar_t Text[SideChannelTextLength] = {}; // ChatMessage and BeaconText only
+		// ChatMessage only: the salt the sender's ChatFingerprint event was computed with.
+		bool HasSalt = false;
+		uint8_t Salt[ChatSaltBytes] = {};
+	};
+
+#pragma pack(push, 1)
+
+	struct SealRecord
+	{
+		int32_t ThroughFrame;          // the last frame the chain covers
+		uint8_t Hash[SealHashBytes];
 	};
 
 	struct ReplayHeader
@@ -228,6 +238,8 @@ namespace Replay
 		int RandomNext2;
 		uint32_t RandomizerTable[250];
 
+		// Bytes on disk. Both files are raw deflate; their inflated sizes are SpawnIniRawSize and
+		// SpawnMapRawSize.
 		uint32_t SpawnIniSize;
 		uint32_t SpawnMapSize;
 		uint32_t RecordedGameSpeed;
@@ -240,9 +252,12 @@ namespace Replay
 		uint64_t CheckpointArchiveOffset;
 		uint32_t CheckpointArchiveSize;
 		// Absolute file offset and size of the statistics section, likewise stamped only once the
-		// whole section is on disk.
+		// whole section is on disk. The section is raw deflate; StatisticsRawSize is its inflated size.
 		uint64_t StatisticsOffset;
 		uint32_t StatisticsSize;
+		uint32_t SpawnIniRawSize;
+		uint32_t SpawnMapRawSize;
+		uint32_t StatisticsRawSize;
 	};
 
 	// One house's economy and army at a sampled frame. Every field is a plain read of engine state;
@@ -282,50 +297,6 @@ namespace Replay
 		int32_t Amount;
 	};
 
-	// The Objects block: this header, then AppearCount appear, UpdateCount update and GoneCount gone records.
-	struct ObjectsBlockHeader
-	{
-		uint16_t AppearCount;
-		uint16_t UpdateCount;
-		uint16_t GoneCount;
-		uint16_t Reserved;
-	};
-
-	// An object came onto the map, or its owner or type changed (capture, mind control, deploy).
-	struct ObjectAppearRecord
-	{
-		uint32_t UniqueID;        // AbstractClass::UniqueID, the ID the selection block and events use
-		uint16_t TypeIndex;       // position in the Kind's type array, as in the statistics TYPE chunk
-		uint8_t Kind;             // ObjectRecordKind
-		uint8_t Owner;            // HouseClass::ArrayIndex
-		uint8_t FoundationWidth;  // buildings only; 1 otherwise
-		uint8_t FoundationHeight;
-		uint16_t Reserved;
-	};
-
-	// Where an object was when it came onto the map. Not written again as it moves or changes.
-	struct ObjectUpdateRecord
-	{
-		uint32_t UniqueID;
-		uint16_t X;               // ObjectClass::Location >> ObjectPositionShift
-		uint16_t Y;
-		uint8_t Health;           // 0..255 of the type's Strength
-		uint8_t Mission;          // MissionClass::CurrentMission, 0xFF for none
-		uint8_t Flags;            // ObjectRecordFlags: veteran, elite, cloaked
-		uint8_t Height;           // Location.Z >> ObjectPositionShift, clamped
-	};
-
-	// An object left the map. X/Y are where it was destroyed, or where it was last seen.
-	struct ObjectGoneRecord
-	{
-		uint32_t UniqueID;
-		uint16_t X;
-		uint16_t Y;
-		uint8_t Reason;           // ObjectGoneReason
-		uint8_t KillerHouse;      // the house credited with the kill, or ObjectNoHouse
-		uint16_t Reserved;
-	};
-
 	// The fixed part of one house's end-of-game record in StatisticsChunk_Houses.
 	struct StatisticsHouseRecord
 	{
@@ -361,60 +332,32 @@ namespace Replay
 		uint8_t Reserved[2];
 	};
 
-	// The randomiser's two table cursors. Enough to tell a drifted randomiser from a drifted
-	// simulation, without putting a kilobyte of table in every frame.
-	struct FrameRandomState
-	{
-		int32_t Next1;
-		int32_t Next2;
-	};
-
-	struct FrameObjectCensus
-	{
-		int32_t AbstractCount;
-		int32_t ScenarioUniqueID;
-	};
-
-	struct FrameRecordHeader
-	{
-		int32_t FrameNumber;         // -1 marks the end of the stream
-		int32_t EventCountThisFrame;
-		uint32_t Flags;              // FrameRecordFlags
-	};
-
 #pragma pack(pop)
 
-	static_assert(sizeof(ReplayHeader) == 1084, "ReplayHeader layout changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(sizeof(ReplayHeader) == 1096, "ReplayHeader layout changed; update YRReplayGame.cs and docs/replay-format.md");
 	static_assert(sizeof(HouseStatsSample) == 84, "HouseStatsSample layout changed; update docs/replay-format.md");
 	static_assert(sizeof(StatisticsHouseRecord) == 282, "StatisticsHouseRecord layout changed; update docs/replay-format.md");
 	static_assert(sizeof(MoneyInRecord) == 12, "MoneyInRecord layout changed; update docs/replay-format.md");
-	static_assert(sizeof(ObjectsBlockHeader) == 8, "ObjectsBlockHeader layout changed; update docs/replay-format.md");
-	static_assert(sizeof(ObjectAppearRecord) == 12, "ObjectAppearRecord layout changed; update docs/replay-format.md");
-	static_assert(sizeof(ObjectUpdateRecord) == 12, "ObjectUpdateRecord layout changed; update docs/replay-format.md");
-	static_assert(sizeof(ObjectGoneRecord) == 12, "ObjectGoneRecord layout changed; update docs/replay-format.md");
 	static_assert(sizeof(StatisticsGameRecord) == 20, "StatisticsGameRecord layout changed; update docs/replay-format.md");
-	static_assert(sizeof(FrameRecordHeader) == 12, "FrameRecordHeader layout changed; update docs/replay-format.md");
-	static_assert(sizeof(FrameObjectCensus) == 8, "FrameObjectCensus layout changed; update docs/replay-format.md");
-	static_assert(sizeof(FrameRandomState) == 8, "FrameRandomState layout changed; update docs/replay-format.md");
-	static_assert(sizeof(SideChannelRecord) == 329, "SideChannelRecord layout changed; update docs/replay-format.md");
+	static_assert(sizeof(SealRecord) == 36, "SealRecord layout changed; update docs/replay-format.md");
 
-	static_assert(offsetof(ReplayHeader, Magic) == 0, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, Version) == 4, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, HeaderSize) == 8, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, SpawnIniSize) == 1032, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, SpawnMapSize) == 1036, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, RecordedGameSpeed) == 1040, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, RecordedUnixTime) == 1044, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, TotalFrames) == 1052, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, Flags) == 1056, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, CheckpointArchiveOffset) == 1060, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, CheckpointArchiveSize) == 1068, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, StatisticsOffset) == 1072, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
-	static_assert(offsetof(ReplayHeader, StatisticsSize) == 1080, "Replay header offsets changed; update ReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, Magic) == 0, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, Version) == 4, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, HeaderSize) == 8, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, SpawnIniSize) == 1032, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, SpawnMapSize) == 1036, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, RecordedGameSpeed) == 1040, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, RecordedUnixTime) == 1044, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, TotalFrames) == 1052, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, Flags) == 1056, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, CheckpointArchiveOffset) == 1060, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, CheckpointArchiveSize) == 1068, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, StatisticsOffset) == 1072, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, StatisticsSize) == 1080, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, SpawnIniRawSize) == 1084, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, SpawnMapRawSize) == 1088, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
+	static_assert(offsetof(ReplayHeader, StatisticsRawSize) == 1092, "Replay header offsets changed; update YRReplayGame.cs and docs/replay-format.md");
 
-	static_assert(offsetof(FrameRecordHeader, FrameNumber) == 0, "FrameRecordHeader layout changed; update docs/replay-format.md");
-	static_assert(offsetof(FrameRecordHeader, EventCountThisFrame) == 4, "FrameRecordHeader layout changed; update docs/replay-format.md");
-	static_assert(offsetof(FrameRecordHeader, Flags) == 8, "FrameRecordHeader layout changed; update docs/replay-format.md");
 
 	inline bool IsReplayGameSpeedIndexValid(uint32_t gameSpeedIndex)
 	{
@@ -433,6 +376,28 @@ namespace Replay
 			return 45;
 
 		return std::max(1, 60 / gameSpeed);
+	}
+
+	// LEB128: seven bits a byte, low first, the top bit set on every byte but the last.
+	inline void AppendVarint(std::vector<uint8_t>& out, uint32_t value)
+	{
+		while (value >= 0x80u)
+		{
+			out.push_back(static_cast<uint8_t>(value | 0x80u));
+			value >>= 7;
+		}
+		out.push_back(static_cast<uint8_t>(value));
+	}
+
+	// Small signed values as small varints: 0, -1, 1, -2, 2 ... become 0, 1, 2, 3, 4 ...
+	inline uint32_t ZigZagEncode(int32_t value)
+	{
+		return (static_cast<uint32_t>(value) << 1) ^ static_cast<uint32_t>(value >> 31);
+	}
+
+	inline int32_t ZigZagDecode(uint32_t value)
+	{
+		return static_cast<int32_t>(value >> 1) ^ -static_cast<int32_t>(value & 1u);
 	}
 
 }

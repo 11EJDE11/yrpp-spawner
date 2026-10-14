@@ -18,8 +18,10 @@
 */
 
 #include "ReplaySideChannels.h"
+#include "ReplayCanonical.h"
 #include "ReplaySystem.h"
 
+#include <Ext/Event/Body.h>
 #include <Utilities/Debug.h>
 
 #include <BeaconManagerClass.h>
@@ -30,6 +32,9 @@
 #include <VocClass.h>
 #include <VoxClass.h>
 
+#include <bcrypt.h>
+
+#include <cstring>
 #include <deque>
 #include <utility>
 
@@ -181,7 +186,8 @@ namespace ReplaySystem
 	}
 }
 
-void ReplaySystem::RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex)
+void ReplaySystem::RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex,
+	const uint8_t* pSalt)
 {
 	if (!ReplaySystem::IsRecordingActive())
 		return;
@@ -194,8 +200,32 @@ void ReplaySystem::RecordChatMessage(int houseIndex, const wchar_t* senderName, 
 		wcsncpy_s(record.SenderName, senderName, _TRUNCATE);
 	if (message)
 		wcsncpy_s(record.Text, message, _TRUNCATE);
+	if (pSalt)
+	{
+		record.HasSalt = true;
+		std::memcpy(record.Salt, pSalt, sizeof(record.Salt));
+	}
 
 	ReplaySystem::SideChannels::Push(std::move(record));
+}
+
+bool ReplaySystem::GenerateChatSalt(uint8_t (&salt)[16])
+{
+	static_assert(sizeof(salt) == ChatSaltBytes);
+	return BCryptGenRandom(nullptr, salt, sizeof(salt), BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0;
+}
+
+// Sent whether or not this game is being recorded: every player's recording carries every
+// fingerprint, which is what lets a recipient's copy of the text be checked against anyone's.
+void ReplaySystem::QueueChatFingerprint(const uint8_t (&salt)[16], int houseIndex, const wchar_t* message)
+{
+	EventExt event {};
+	event.Type = EventTypeExt::ChatFingerprint;
+	event.HouseIndex = static_cast<char>(houseIndex);
+	event.Frame = Unsorted::CurrentFrame + Game::Network::MaxAhead;
+
+	if (!ComputeChatFingerprint(salt, houseIndex, message, event.ChatFingerprint.Hash) || !event.AddEvent())
+		Debug::Log("[Replay] Could not queue the fingerprint of a chat message.\n");
 }
 
 void ReplaySystem::RecordTaunt(int tauntCommand)

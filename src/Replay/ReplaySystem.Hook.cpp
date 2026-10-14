@@ -388,23 +388,18 @@ DEFINE_HOOK(0x4F9950, HouseClass_RefundMoney_ReplayIncome, 0xA)
 	return 0;
 }
 
-// Both functions that count a house's units and buildings lost. The argument is the killer:
-// an ObjectClass for Record_The_Kill_Object, a HouseClass for Record_The_Kill_House. Either can be null.
+// Both functions that count a house's units and buildings lost.
 DEFINE_HOOK(0x702D40, TechnoClass_RecordTheKillObject_ReplayLosses, 0x6)
 {
 	GET(TechnoClass*, pTechno, ECX);
-	GET_STACK(ObjectClass*, pSource, 0x4);
 	ReplaySystem::RecordObjectLost(pTechno, true);
-	ReplaySystem::RecordObjectDestroyed(pTechno, pSource ? pSource->GetOwningHouse() : nullptr);
 	return 0;
 }
 
 DEFINE_HOOK(0x703230, TechnoClass_RecordTheKillHouse_ReplayLosses, 0x6)
 {
 	GET(TechnoClass*, pTechno, ECX);
-	GET_STACK(HouseClass*, pSource, 0x4);
 	ReplaySystem::RecordObjectLost(pTechno, false);
-	ReplaySystem::RecordObjectDestroyed(pTechno, pSource);
 	return 0;
 }
 

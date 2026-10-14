@@ -20,7 +20,7 @@
 #include "ReplayControls.h"
 #include "ReplayFile.h"
 #include "ReplayFrameCodec.h"
-#include "ReplayObjects.h"
+#include "ReplayCanonical.h"
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplaySideChannels.h"
@@ -106,7 +106,7 @@ namespace ReplaySystem
 			ReplayState.CarriedMoneyIn.clear();
 			SideChannels::Reset();
 			Statistics::Reset();
-			Objects::Reset();
+			ReplayState.Seals.Reset();
 			ReplayState.CapturedFrameEventsFrame = -1;
 			ReplayState.CapturedFrameEvents.clear();
 			ReplayState.HasPlaybackHeader = false;
@@ -243,9 +243,9 @@ namespace ReplaySystem
 		// Network/timing events are recorded for diagnostics but not replayed.
 		bool IsTimingEvent(EventType eventType)
 		{
-			// Keep extension timing events out of playback without guessing numeric ranges.
+			// The spawner's own events: ResponseTime2 is timing, a ChatFingerprint is part of the game.
 			if (EventExt::IsValidType(static_cast<EventTypeExt>(eventType)))
-				return true;
+				return static_cast<EventTypeExt>(eventType) != EventTypeExt::ChatFingerprint;
 
 			switch (eventType)
 			{
@@ -475,6 +475,24 @@ namespace ReplaySystem
 				const auto& sideChannelForFrame = SideChannels::DrainThroughFrame(pendingFrame);
 
 				const int eventCount = pendingFrame == frameNumber ? currentFrameEventCount : 0;
+
+				// The canonical chain takes the frames with a hash or a canonical event. Only the current
+				// frame ever has events.
+				capture.Seals.clear();
+				if (ReplayState.Seals.IsActive())
+				{
+					auto& canonical = ReplayState.CanonicalScratch;
+					canonical.clear();
+					if (Replay::AppendCanonicalFrame(canonical, pendingFrame, capture.HasGameCRC,
+						static_cast<uint16_t>(capture.GameCRC & 0xFFFFu),
+						eventCount > 0 ? ReplayState.CapturedFrameEvents.data() : nullptr,
+						static_cast<size_t>(eventCount))
+						&& !ReplayState.Seals.AddFrame(pendingFrame, canonical, capture.Seals))
+					{
+						Debug::Log("[Replay] The canonical hash chain failed at frame %d; no further seals.\n", pendingFrame);
+					}
+				}
+
 				if (!ReplayState.FrameWriter.WriteFrame(ReplayState.File, capture, eventCount, sideChannelForFrame))
 				{
 					Debug::Log("[Replay] Failed to write frame capture.\n");
@@ -482,8 +500,6 @@ namespace ReplaySystem
 					return;
 				}
 
-				if (capture.HasObjects)
-					Objects::RecycleBuffers(capture.ObjectsAppeared, capture.ObjectsUpdated, capture.ObjectsGone);
 				ReplayState.PendingFrameStates.pop_front();
 			}
 		}
@@ -730,13 +746,6 @@ namespace ReplaySystem
 						Statistics::FillHouseStats(capture.HouseStats);
 						capture.HasHouseStats = !capture.HouseStats.empty();
 					}
-
-					// Every object on the map, as changes since the last snapshot. Also only reads.
-					if (frameNumber % ObjectSnapshotIntervalFrames == 0 && !capture.HasObjects)
-					{
-						Objects::FillSnapshot(capture.ObjectsAppeared, capture.ObjectsUpdated, capture.ObjectsGone);
-						capture.HasObjects = true;
-					}
 				}
 				return;
 			}
@@ -747,7 +756,10 @@ namespace ReplaySystem
 			ReplayState.HasExpectedGameCRC = false;
 			++ReplayState.CheckedFrameCount;
 
-			if (ReplayState.ExpectedGameCRC == gameCRC)
+			// The file keeps the low 16 bits. A simulation that has come apart stays apart, so a frame
+			// that matches by chance one time in 65536 does not hide it.
+			const uint16_t playbackCRC = static_cast<uint16_t>(gameCRC & 0xFFFFu);
+			if (ReplayState.ExpectedGameCRC == playbackCRC)
 				return;
 
 			++ReplayState.MismatchedFrameCount;
@@ -758,8 +770,8 @@ namespace ReplaySystem
 			if (ReplayState.LoggedMismatchCount < MaxLoggedDivergences)
 			{
 				++ReplayState.LoggedMismatchCount;
-				Debug::Log("[Replay] Playback diverged on frame %d (recorded CRC %08X, playback CRC %08X).\n",
-					frameNumber, ReplayState.ExpectedGameCRC, gameCRC);
+				Debug::Log("[Replay] Playback diverged on frame %d (recorded CRC %04X, playback CRC %04X).\n",
+					frameNumber, ReplayState.ExpectedGameCRC, playbackCRC);
 			}
 
 			if (!ReplayState.DivergenceReported)
@@ -850,8 +862,14 @@ namespace ReplaySystem
 
 					if (wroteEnd && finishedStream)
 					{
+						// The frame stream carries every full interval's seal; the last one, over whatever
+						// followed, only goes into the statistics section with the rest.
+						SealRecord finalSeal {};
+						if (ReplayState.Seals.IsActive())
+							ReplayState.Seals.Finish(ReplayState.FrameWriter.LastFrameNumber(), finalSeal);
+
 						Seek::FinishRecordingCheckpoints();
-						Statistics::WriteSection(ReplayState.File);
+						Statistics::WriteSection(ReplayState.File, ReplayState.Seals.Seals());
 					}
 
 					if (wroteEnd && finishedStream && !ReplayState.File.StampCleanShutdown(ReplayState.FrameWriter.LastFrameNumber()))
@@ -1019,6 +1037,20 @@ namespace ReplaySystem
 			auto& recorded = ReplayState.CapturedFrameEvents.emplace_back(*pEvent);
 			// Events are stored unexecuted so the same event is always the same bytes on disk.
 			recorded.IsExecuted = false;
+
+			// A peer's FRAMEINFO carries its hash of an earlier frame. The file keeps whether that matched
+			// this machine's own - the check Execute_DoList makes with it (0x64C6F2) - not the hash.
+			if (recorded.Type == EventType::FrameInfo)
+			{
+				const int checkedFrame = static_cast<int>(recorded.Frame) - recorded.FrameInfo.Delay;
+				const int age = static_cast<int>(Unsorted::CurrentFrame) - checkedFrame;
+				const bool comparable = recorded.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame)
+					&& age >= 0 && age < static_cast<int>(std::size(EventClass::LatestFramesCRC));
+
+				recorded.FrameInfo.CRC = !comparable ? FrameInfoCheck_NotChecked
+					: EventClass::LatestFramesCRC[checkedFrame & 0xFF] == recorded.FrameInfo.CRC
+						? FrameInfoCheck_Match : FrameInfoCheck_Mismatch;
+			}
 		}
 
 		void RecordCapturedEventsForCurrentFrame()
@@ -1129,12 +1161,17 @@ namespace ReplaySystem
 				return;
 			}
 
-			if (!Replay::WriteInitialReplayFile(pConfig))
+			std::vector<uint8_t> sealDescriptor;
+			if (!Replay::WriteInitialReplayFile(pConfig, sealDescriptor))
 			{
 				Debug::Log("[Replay] Failed to write replay header.\n");
 				StopReplaySystem();
 				return;
 			}
+
+			// The recording still goes ahead without its seals if the hash is unavailable.
+			if (!ReplayState.Seals.Begin(sealDescriptor))
+				Debug::Log("[Replay] Could not start the canonical hash chain; this recording has no seals.\n");
 
 			if (!ReplayState.File.OpenRecording(Replay::GetRecordingOutputPath(pConfig)))
 			{

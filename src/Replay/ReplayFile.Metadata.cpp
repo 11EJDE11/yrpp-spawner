@@ -18,9 +18,11 @@
 */
 
 #include "ReplayFile.h"
+#include "ReplayCanonical.h"
 
 #include <Spawner/Spawner.Config.h>
 #include <Utilities/Debug.h>
+#include <Vendor/miniz/miniz.h>
 
 #include <GameOptionsClass.h>
 #include <ScenarioClass.h>
@@ -109,6 +111,25 @@ namespace Replay
 			return true;
 		}
 
+		// The launch INIs are stored as raw deflate. miniz's level 6: they are written once, at the start.
+		bool Deflate(const std::vector<char>& input, std::vector<char>& output)
+		{
+			output.clear();
+			if (input.empty())
+				return true;
+
+			size_t compressedSize = 0;
+			void* const compressed = tdefl_compress_mem_to_heap(input.data(), input.size(), &compressedSize,
+				TDEFL_DEFAULT_MAX_PROBES);
+			if (!compressed)
+				return false;
+
+			const auto* bytes = static_cast<const char*>(compressed);
+			output.assign(bytes, bytes + compressedSize);
+			mz_free(compressed);
+			return true;
+		}
+
 		ReplayHeader BuildReplayHeader(uint32_t spawnIniSize, uint32_t spawnMapSize)
 		{
 			ReplayHeader header {};
@@ -147,7 +168,7 @@ namespace Replay
 		return DefaultRecordingPath;
 	}
 
-	bool WriteInitialReplayFile(const SpawnerConfig* pConfig)
+	bool WriteInitialReplayFile(const SpawnerConfig* pConfig, std::vector<uint8_t>& outSealDescriptor)
 	{
 		std::vector<char> spawnIni;
 		std::vector<char> spawnMap;
@@ -170,11 +191,23 @@ namespace Replay
 		if (!scenarioIsSpawnMap)
 			spawnMap.clear();
 
+		std::vector<char> storedSpawnIni, storedSpawnMap;
+		if (!Deflate(spawnIni, storedSpawnIni) || !Deflate(spawnMap, storedSpawnMap))
+		{
+			Debug::Log("[Replay] Could not compress the launch INIs.\n");
+			return false;
+		}
+
 		// Embed the launch INIs
-		const ReplayHeader header = BuildReplayHeader(
-			static_cast<uint32_t>(spawnIni.size()),
-			static_cast<uint32_t>(spawnMap.size())
+		ReplayHeader header = BuildReplayHeader(
+			static_cast<uint32_t>(storedSpawnIni.size()),
+			static_cast<uint32_t>(storedSpawnMap.size())
 		);
+		header.SpawnIniRawSize = static_cast<uint32_t>(spawnIni.size());
+		header.SpawnMapRawSize = static_cast<uint32_t>(spawnMap.size());
+
+		outSealDescriptor = BuildCanonicalDescriptor(header, spawnMap.data(), spawnMap.size(),
+			ReadCanonicalPlayers(spawnIni.data(), spawnIni.size()));
 
 		const char* const outputPath = GetRecordingOutputPath(pConfig);
 		const std::wstring wideOutputPath = Utf8ToWide(outputPath);
@@ -197,10 +230,10 @@ namespace Replay
 		}
 
 		bool ok = WriteRawToHandle(file, &header, sizeof(header));
-		if (ok && !spawnIni.empty())
-			ok = WriteRawToHandle(file, spawnIni.data(), spawnIni.size());
-		if (ok && !spawnMap.empty())
-			ok = WriteRawToHandle(file, spawnMap.data(), spawnMap.size());
+		if (ok && !storedSpawnIni.empty())
+			ok = WriteRawToHandle(file, storedSpawnIni.data(), storedSpawnIni.size());
+		if (ok && !storedSpawnMap.empty())
+			ok = WriteRawToHandle(file, storedSpawnMap.data(), storedSpawnMap.size());
 
 		CloseHandle(file);
 		return ok;

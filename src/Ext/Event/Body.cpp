@@ -22,6 +22,7 @@
 
 #include <Helpers/Macro.h>
 #include <EventClass.h>
+#include <ScenarioClass.h>
 
 bool EventExt::AddEvent()
 {
@@ -35,6 +36,19 @@ void EventExt::RespondEvent()
 	case EventTypeExt::ResponseTime2:
 		ProtocolZero::HandleResponseTime2(this);
 		break;
+
+	case EventTypeExt::ChatFingerprint:
+		// Draws from the synchronised randomiser, so the fingerprint is part of the simulation: a
+		// replay with one removed or altered no longer plays back the way it was recorded, and its
+		// per-frame hashes say so. Every peer runs this on the same frame in the same order. The salt
+		// makes the count unpredictable, so no one can steer the game with what they type.
+		if (ScenarioClass::Instance)
+		{
+			const int draws = 1 + (this->ChatFingerprint.Hash[0] & 3);
+			for (int i = 0; i < draws; ++i)
+				ScenarioClass::Instance->Random.Random();
+		}
+		break;
 	}
 }
 
@@ -44,6 +58,9 @@ size_t EventExt::GetDataSize(EventTypeExt type)
 	{
 	case EventTypeExt::ResponseTime2:
 		return sizeof(EventExt::ResponseTime2);
+
+	case EventTypeExt::ChatFingerprint:
+		return sizeof(EventExt::ChatFingerprint);
 	}
 
 	return 0;

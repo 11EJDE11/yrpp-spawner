@@ -660,9 +660,17 @@ namespace ReplaySystem
 				chosen.push_back(item);
 			}
 
+			// What is left of the file's size limit once the frame stream and the statistics are in.
+			uint64_t fileBytes = 0;
+			ReplayState.File.CurrentSize(fileBytes);
+			const uint64_t room = Replay::MaxReplayFileBytes > fileBytes + Replay::StatisticsSectionReserveBytes
+				? Replay::MaxReplayFileBytes - fileBytes - Replay::StatisticsSectionReserveBytes
+				: 0;
+			const auto budget = static_cast<uint32_t>(std::min<uint64_t>(room, Replay::MaxRecordedCheckpointBytes));
+
 			// A payload deflates to under half its size, so a set that could not fit even at half is
 			// thinned first - from the start, where a seek costs least without a checkpoint.
-			while (chosen.size() > 1 && rawBytes / 2 > Replay::MaxRecordedCheckpointBytes)
+			while (chosen.size() > 1 && rawBytes / 2 > budget)
 			{
 				std::error_code error {};
 				rawBytes -= std::filesystem::file_size(chosen.front().Save, error)
@@ -670,8 +678,8 @@ namespace ReplaySystem
 				chosen.erase(chosen.begin());
 			}
 
-			const int written = chosen.empty() ? 0 : ReplayState.File.WriteCheckpointArchive(
-				chosen, Replay::MaxRecordedCheckpointBytes, Replay::RecordedCheckpointProbes);
+			const int written = chosen.empty() || budget == 0 ? 0 : ReplayState.File.WriteCheckpointArchive(
+				chosen, budget, Replay::RecordedCheckpointProbes);
 
 			Debug::Log("[Replay] Embedded %d of %u staged saves as checkpoints (the recording ends at frame %d).\n",
 				written, static_cast<unsigned int>(StagedCheckpoints.size()), lastFrame);

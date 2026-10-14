@@ -1,15 +1,21 @@
 # Replay file format (`.yrrp`)
 
 Defined in `src/Replay/ReplayFormat.h`. `ReplayFile.cpp` owns file I/O and compression-stream lifetime;
-`ReplayFile.Metadata.cpp` captures the header and embeds the launch INIs verbatim.
-`ReplayFrameCodec.cpp` encodes and decodes frame blocks and gameplay-event bytes through the file API.
-`ReplaySystem.cpp` coordinates engine capture and applies playback state. The hooks
-that drive it live in `src/Replay/ReplaySystem.Hook.cpp`. The CnCNet client mirrors the header by hand in
-`DXMainClient/Domain/ReplayGame.cs` — there is no compile-time link between the two, so **any
-change here must be made in both repos in the same change**. A size mismatch does not error; it
-silently mis-parses every field after the point of divergence.
+`ReplayFile.Metadata.cpp` captures the header and embeds the launch INIs.
+`ReplayFrameCodec.cpp` encodes and decodes frame records and gameplay events through the file API.
+`ReplayCanonical.cpp` builds the canonical form and its seals. `ReplaySystem.cpp` coordinates engine
+capture and applies playback state. The hooks that drive it live in `src/Replay/ReplaySystem.Hook.cpp`.
 
-`GetReplayFPSFromGameSpeed` is duplicated the same way, as `ReplayGame.GetFramesPerSecond`. The
+Three readers outside the game mirror parts of this by hand, with no compile-time link to it:
+
+- the CnCNet client, `DXMainClient/Domain/YRReplayGame.cs`: the header and the two embedded INIs;
+- the replay analyser, `yrrp-analyser`: everything, including the canonical hash;
+- the Quick Match ladder's upload check: the magic number and the version.
+
+**Any change here must be made in all of them in the same change.** A size mismatch does not error;
+it silently mis-parses every field after the point of divergence.
+
+`GetReplayFPSFromGameSpeed` is duplicated the same way, as `YRReplayGame.GetFramesPerSecond`. The
 client uses it to turn `TotalFrames` into a displayed duration, so the two have to agree.
 
 The client does not hide a replay it cannot read. A file with the right magic and a version outside
@@ -20,22 +26,24 @@ without the magic number - would look to the player like the update had deleted 
 ## Layout
 
 ```
-[ReplayHeader]        HeaderSize bytes (1084 today), #pragma pack(1)
-[spawn.ini]           SpawnIniSize bytes, verbatim text
-[spawnmap.ini]        SpawnMapSize bytes, verbatim text
+[ReplayHeader]        HeaderSize bytes (1096 today), #pragma pack(1), uncompressed
+[spawn.ini]           SpawnIniSize bytes, raw deflate of SpawnIniRawSize bytes
+[spawnmap.ini]        SpawnMapSize bytes, raw deflate of SpawnMapRawSize bytes
 --- start of the raw deflate frame stream ---
-[frame records]       repeated, one per simulated frame, monotonic
-[end-of-stream]       FrameRecordHeader with FrameNumber == -1
+[frame records]       repeated, one per recorded frame, monotonic
+[end-of-stream]       a single zero byte
 --- end of the raw deflate frame stream ---
 [checkpoint archive]  optional; independent compressed saves and sidecars
-[statistics section]  optional; type table, end-of-game house records, the game's statistics packet
+[statistics section]  optional; raw deflate of StatisticsRawSize bytes of chunks
 ```
 
 Both trailing sections are located by their header offset and size, never by position: each is
 stamped into the header only once all of it is on disk, and either can be absent.
 
-The header and the two embedded INIs are never compressed, so a reader can pull them out with a
-plain seek and read. That is what the client does, and why it needs no decompressor.
+The header is never compressed, so a reader gets everything it needs to find the rest with a plain
+read. The two INIs are each deflated on their own, so the client - which reads only the header and
+spawn.ini to list a replay, and both INIs to launch one - inflates them with `DeflateStream` and needs
+nothing of the frame stream.
 
 Readers seek to the embedded spawn.ini by the header's own `HeaderSize`, never by their compiled
 `sizeof(ReplayHeader)`. The two are equal for a file this build wrote and differ the moment a later
@@ -43,26 +51,25 @@ build appends a header field, which is the whole point of the field.
 
 ## Changing the format
 
-During private development, update the spawner and client together without bumping the format
-version or maintaining compatibility with older recordings. The current header omits the DLL
-version metadata; recordings made with that earlier layout do not need to remain readable.
+During private development, update the spawner and every reader together without bumping the format
+version or maintaining compatibility with older recordings.
 
-For a future public release, three mechanisms can preserve existing recordings. All
-three only work because the *reading* side of them shipped before anything used them. They cost
-nothing until then.
+For a future public release, three mechanisms can preserve existing recordings. All three only work
+because the *reading* side of them shipped before anything used them. They cost nothing until then.
 
 | Want to add | Use | Version |
 |---|---|---|
 | A header field | append and grow `HeaderSize` | stays |
-| Per-frame data | an `Extensions` block | stays |
+| Per-frame data | a new frame block tag | stays |
+| A statistics section chunk | a new chunk tag | stays |
 | Anything that changes the meaning or position of an existing field | — | bump |
 
-An **additive** change keeps `Version` at 1. Older readers skip what they do not recognize:
-header bytes past their own `sizeof` and the length-prefixed extension block. They keep playing
-the file.
+An **additive** change keeps `Version` at 1. Older readers skip what they do not recognize: header
+bytes past their own `sizeof`, a frame block whose tag they do not know (every block carries its own
+length), and a statistics chunk likewise. They keep playing the file.
 
-After a public release, an **incompatible** change would bump `ReplayVersion`. The client rejects unsupported versions
-before launching playback; the spawner does not check version compatibility.
+After a public release, an **incompatible** change would bump `ReplayVersion`. The client rejects
+unsupported versions before launching playback; the spawner does not check version compatibility.
 
 The first twelve bytes - `Magic`, `Version`, `HeaderSize` - are fixed. Nothing may be inserted
 ahead of them. The client uses `Version` to decide whether it can read the remaining layout.
@@ -79,14 +86,14 @@ the two questions are answered separately and independently.
 | 0 | 4 | `Magic` | `0x50525259` (`YRRP` in file order) |
 | 4 | 4 | `Version` | `1` |
 | 8 | 4 | `HeaderSize` | bytes from the start of the file to the embedded spawn.ini; what readers seek by |
-| 12 | 4 | `GameMode` | `SessionClass::GameMode` — Campaign 0, LAN 3, Internet 4, Skirmish 5. Written for future use; nothing reads it back yet |
+| 12 | 4 | `GameMode` | `SessionClass::GameMode` — Campaign 0, LAN 3, Internet 4, Skirmish 5 |
 | 16 | 4 | `UniqueIDCounter` | `ScenarioClass::UniqueID` at recording start |
 | 20 | 4 | `Seed` | `Game::Seed` |
 | 24 | 4 | `RandomNext1` | |
 | 28 | 4 | `RandomNext2` | |
 | 32 | 1000 | `RandomizerTable[250]` | full RNG table snapshot |
-| 1032 | 4 | `SpawnIniSize` | bytes of embedded spawn.ini |
-| 1036 | 4 | `SpawnMapSize` | bytes of embedded spawnmap.ini |
+| 1032 | 4 | `SpawnIniSize` | bytes of embedded spawn.ini on disk |
+| 1036 | 4 | `SpawnMapSize` | bytes of embedded spawnmap.ini on disk |
 | 1040 | 4 | `RecordedGameSpeed` | 0–6; validated on load |
 | 1044 | 8 | `RecordedUnixTime` | `time()` at recording start |
 | 1052 | 4 | `TotalFrames` | last frame that carried a record |
@@ -94,14 +101,16 @@ the two questions are answered separately and independently.
 | 1060 | 8 | `CheckpointArchiveOffset` | absolute offset of the [checkpoint archive](#optional-checkpoint-archive); 0 when there is none |
 | 1068 | 4 | `CheckpointArchiveSize` | archive bytes; 0 when there is none |
 | 1072 | 8 | `StatisticsOffset` | absolute offset of the [statistics section](#statistics); 0 when there is none |
-| 1080 | 4 | `StatisticsSize` | section bytes; 0 when there is none |
+| 1080 | 4 | `StatisticsSize` | section bytes on disk; 0 when there is none |
+| 1084 | 4 | `SpawnIniRawSize` | spawn.ini inflated; 0 exactly when `SpawnIniSize` is |
+| 1088 | 4 | `SpawnMapRawSize` | spawnmap.ini inflated; 0 exactly when `SpawnMapSize` is (a campaign) |
+| 1092 | 4 | `StatisticsRawSize` | the statistics section inflated |
 
 The map name and the game client version are deliberately not header fields: the client already
 writes both into the embedded spawn.ini (`UIMapName`, `GameClientVersion`) and reads them back from
 there for display, the same way it already does for `UIGameMode` (which was never in the header
-either). Duplicating them into the fixed, hand-mirrored header would just be more fields the two
-repos have to keep in step for no benefit — the embedded spawn.ini is already read on every listing,
-uncompressed, with a plain seek.
+either). Duplicating them into the fixed, hand-mirrored header would just be more fields the
+readers have to keep in step for no benefit.
 
 `TotalFrames` counts the last frame a record was *written* for. Every simulated frame carries a
 record now that each one records a hash (see [Frame records](#frame-records)), so the two are the
@@ -112,29 +121,35 @@ with the process leaves both fields zero. That flag - not `TotalFrames > 0` - is
 truncated recording apart from one that was quit on frame 0.
 
 `IsReplayHeaderValid` checks the magic, minimum header size, RNG cursors, object ID counter,
-embedded file size limits, and game speed. A larger `HeaderSize` is accepted and the surplus is
-skipped. Playback also checks that `HeaderSize + SpawnIniSize + SpawnMapSize` fits the file
-before seeking. Version compatibility belongs to the client; there is no checksum.
+embedded file size limits (stored and inflated, and that the two agree on whether a file is there),
+and game speed. A larger `HeaderSize` is accepted and the surplus is skipped. Playback also checks
+that `HeaderSize + SpawnIniSize + SpawnMapSize` fits the file before seeking. Version compatibility
+belongs to the client.
 
 `ClassifyReplayHeader` retains distinct errors for unreadable input, a non-replay file, and malformed
 headers. Playback failure is fatal because `StartScenario` has already skipped `CreateConnections`.
 
-`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1084`, `sizeof(FrameRecordHeader) == 12`,
-`sizeof(SideChannelRecord) == 329`, `sizeof(HouseStatsSample) == 84`, `sizeof(MoneyInRecord) == 12`,
-`sizeof(StatisticsHouseRecord) == 282` and `sizeof(StatisticsGameRecord) == 20`, **and** the
-individual `offsetof` of every header field the
+`ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1096`, `sizeof(HouseStatsSample) == 84`,
+`sizeof(MoneyInRecord) == 12`, `sizeof(StatisticsHouseRecord) == 282`, `sizeof(StatisticsGameRecord)
+== 20` and `sizeof(SealRecord) == 36`, **and** the individual `offsetof` of every header field the
 client hardcodes. Size alone does not pin a layout: swapping two fields of the same width, or
 shortening one array while lengthening another, leaves `sizeof` untouched and mis-parses everything
 from the point of divergence onward. The per-field asserts are what catch that. None of them can
-see `ReplayGame.cs` - the messages point at it, but keeping the two in step is still manual.
+see the readers outside the game - the messages point at them, but keeping them in step is still manual.
 
 ## Compression
 
-The frame records are a single raw deflate stream (RFC 1951, no zlib wrapper), produced by
-upstream miniz 3.0.2, vendored byte-identical in `src/Vendor/miniz/` and configured through the
-`MINIZ_NO_*` defines on its `ClCompile` entry in `Spawner.vcxproj` (deflate and inflate only). It is
-driven by `Replay::DeflateWriter` / `Replay::InflateReader` in `src/Replay/ReplayStream.{h,cpp}`.
-See `src/Vendor/miniz/README.md` for provenance and how to verify it.
+Everything compressed in the file is raw deflate (RFC 1951, no zlib wrapper), produced by upstream
+miniz 3.0.2, vendored byte-identical in `src/Vendor/miniz/` and configured through the `MINIZ_NO_*`
+defines on its `ClCompile` entry in `Spawner.vcxproj` (deflate and inflate only). The frame stream is
+driven by `Replay::DeflateWriter` / `Replay::InflateReader` in `src/Replay/ReplayStream.{h,cpp}`; the
+INIs and the statistics section are each compressed in one call, at miniz's level 6. See
+`src/Vendor/miniz/README.md` for provenance and how to verify it.
+
+zstd was measured and is not worth a second codec. It wins on padded data - the frame stream as it
+used to be, 111 bytes an event - but once records only hold what they carry, deflate at level 6
+comes out level with zstd at 3 to 12 and costs the game about 50 ms over a 40-minute recording. Only
+zstd at 19 does clearly better, around a fifth, at seconds of CPU per game.
 
 A truncated stream is detected by clearing `TINFL_FLAG_HAS_MORE_INPUT` once the file runs out and
 treating the resulting `TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS` as end of data. Do not reinstate
@@ -157,7 +172,7 @@ complete.
 
 ## Embedded spawn.ini
 
-The spawner embeds spawn.ini byte for byte and sets `SpawnIniSize` to the byte count written.
+The spawner embeds spawn.ini byte for byte, deflated, and sets `SpawnIniSize` and `SpawnIniRawSize`.
 It does not rewrite addresses or other values. Sanitization is the client's responsibility.
 
 ## Campaigns: one mission per recording
@@ -221,46 +236,68 @@ or was taken over (see *Taking over*).
 ## Frame records
 
 The frame writer owns the previous viewport, selection, and speed values used to omit unchanged
-state. The frame reader owns the last decoded frame number and resets it when the stream rewinds.
-Frame metadata is read in the main loop; gameplay-event bytes remain unread until the queue hook
-consumes them, or seeking skips them. The codec checks block sizes and ordering; engine-dependent
-side-channel checks are supplied by the caller.
+state. The frame reader owns the last decoded frame number and camera position and resets them when
+the stream rewinds. Frame metadata is read in the main loop; gameplay events remain unread until the
+queue hook consumes them, or seeking skips them. The codec checks block sizes and ordering;
+engine-dependent side-channel checks are supplied by the caller.
 
-`FrameRecordHeader` (12 bytes):
+All integers are little-endian. A *varint* is LEB128 - seven bits a byte, low first, the top bit set
+on every byte but the last - and a *zigzag* varint maps 0, -1, 1, -2 ... to 0, 1, 2, 3 ... first.
+
+A record:
 
 ```
-int32  FrameNumber          // -1 = end of stream
-int32  EventCountThisFrame
-uint32 Flags                // 1 = TacticalPos, 2 = Selection, 4 = SideChannel, 8 = GameCRC,
-                            // 16 = Extensions
+varint  (frameDelta << 1) | hasHash   frameDelta >= 1 from the previous record (the first from -1);
+                                      a single 0 instead is the end of the stream
+uint16  hash                          when hasHash: the low 16 bits of the engine's state hash
+varint  eventCount
+blocks                                varint tag, varint length, that many bytes; tag 0 ends them
+events                                eventCount of them
 ```
 
-Then, in order, whichever blocks the flags select:
+The blocks, in the order the writer emits them. Every one is optional, and a reader skips a tag it
+does not know by its length, which is what lets a block be added later without invalidating
+recordings made before it:
 
-- **TacticalPos** — `Point2D` (two `int32`).
-- **Selection** — `int32 SelectedObjectCount`, then that many `uint32` unique IDs. Readers
-  reject counts above 4096.
-- **SideChannel** — `int32 count` (max 64), then that many `SideChannelRecord` (329 bytes each).
-- **GameCRC** — `uint32`, the engine's own state hash for the frame. See
-  [Desync detection](#desync-detection).
-- **HouseStats** (bit 9, `FrameRecordFlag_HouseStats`) — `int32 count` (1-32), then that many
-  `HouseStatsSample` (84 bytes each). Written every `HouseStatsIntervalFrames` (60) frames. It sits
-  after `SelectionTriggers` in the written order below; playback skips it.
-  See [Statistics](#statistics).
-- **MoneyIn** (bit 10, `FrameRecordFlag_MoneyIn`) — `int32 count` (1-1024), then that many
-  `MoneyInRecord` (12 bytes: `uint8 House`, 3 reserved bytes, `uint32 Caller`, `int32 Amount`): every
-  payment through `HouseClass::Refund_Money` this frame, summed per house and caller. After
-  HouseStats, before Extensions; playback skips it. See [Income by source](#income-by-source).
-- **Objects** (bit 11, `FrameRecordFlag_Objects`) — an 8-byte `ObjectsBlockHeader` (`uint16`
-  appear, update and gone counts, each 0-16384 and not all zero, then a reserved `uint16`), then that
-  many 12-byte `ObjectAppearRecord`, `ObjectUpdateRecord` and `ObjectGoneRecord`, in that order. Written
-  every `ObjectSnapshotIntervalFrames` (30) frames; after MoneyIn, before Extensions; playback skips it.
-  See [Object snapshots](#object-snapshots).
-- **Extensions** — `uint32 length` (max 1 MiB), then that many opaque bytes. Nothing writes one
-  yet; see below.
-- **Events** — `EventCountThisFrame` × `sizeof(EventClass)` (111 bytes, static-asserted in
-  `YRpp/EventClass.h`). The events that *executed* on this frame, which is not the same as the
-  events stamped with it - see below.
+| Tag | Block | Contents |
+|---:|---|---|
+| 1 | TacticalPos | zigzag dx, zigzag dy: the change in `TacticalCoord1` since the last one recorded (from 0, 0) |
+| 2 | Selection | varint count (max 4096), then that many varint unique IDs |
+| 3 | SideChannel | varint count (max 64), then that many side-channel records, below |
+| 4 | GameSpeed | uint8 game speed index, on the frames it changes |
+| 5 | SelectionTriggers | varint count (1-4096), then that many varint unique IDs |
+| 6 | HouseStats | varint count (1-32), then that many `HouseStatsSample` (84 bytes); every `HouseStatsIntervalFrames` (60) |
+| 7 | MoneyIn | varint count (1-1024), then that many `MoneyInRecord` (12 bytes) |
+| 8 | Seal | a `SealRecord` (36 bytes); see [Canonical hash](#canonical-hash). One block per seal |
+
+Playback reads the first five and skips the rest, which are for readers outside the game.
+
+A side-channel record: uint8 type, zigzag house, zigzag aux, zigzag X, Y and Z, a varint length and
+that many bytes of UTF-8 sender name, the same for the text, then for a chat message a uint8 salt flag
+and, when it is 1, the 16-byte salt of its [fingerprint](#chat-fingerprints).
+
+An event: uint8 type, uint8 house, zigzag (`Frame` - the record's frame), then its payload:
+
+- for a vanilla type, the `EventClass::EventLength` (0x8208EC) bytes the network carries for it -
+  `VanillaEventLength` in `ReplayFormat.h`;
+- for the spawner's own types, `EventExt::GetDataSize`;
+- for `FRAMEINFO`, `CommandCount` (2 bytes), `Delay` (1) and a `FrameInfoCheck` (1) in place of the
+  CRC: whether the peer's hash of the frame matched the recorder's own (`LatestFramesCRC`), the check
+  `Execute_DoList` makes with it at 0x64C6F2, or 2 where it was not comparable. The CRC itself is
+  the recorder's own hash unless that peer was out of sync, which is what the flag keeps;
+- for any other type - another module's, whose length is not known here - a varint length and the
+  whole 104-byte union.
+
+Only the payload bytes go in because they are the only ones an event has. A received event's union
+is zeroed before the network bytes are copied in (`Breakup_Receive_Packet`, 0x64BDD0), but the
+`EventClass` constructors never clear it, so the recording player's own events carry leftover stack
+past their payload. Nothing reads it - a receiver never has it - and storing it would make each
+player's copy of the same order different bytes. Playback rebuilds the event zeroed, with `Frame`
+put back from the delta. For a gameplay event that delta is always 0: `Execute_DoList` runs an event
+only on the frame it is stamped with.
+
+Every simulated frame carries a record, because every frame records a hash. Frame numbers are
+still only guaranteed monotonic rather than contiguous: a reader must not assume it can index them.
 
 ### Which events a frame holds
 
@@ -312,29 +349,6 @@ Hooking `EventClass::Execute` (0x4C6CB0) is the other trap, in the opposite dire
 and never calls `Execute` for them, so that recording would lose every network timing sample and
 every remote quit. `0x64CAC0` is reached by all of them.
 
-Events are written unexecuted, so the same event is always the same bytes on disk.
-
-Blocks are stored bare, so a reader that meets a flag it does not know cannot find the end of that
-block - the length is written down nowhere - and `FrameReader::ReadFrame` rejects the record.
-
-They are written in the order listed above, which is *not* the numeric order of their flag bits:
-`ObjectCensus` (bit 5) and `GameSpeed` (bit 6) are written ahead of `Extensions` (bit 4), because
-the extension block has to stay physically last. Read them in the written order, not by walking the
-flag bits.
-
-The extension block is the exception, and the only way per-frame data gets added later without
-invalidating recordings made before it. It carries its own length, so a reader skips it whole
-without knowing anything about what is inside. It is always the last block in the record: anything
-appended after it would be unreachable to a reader that skipped it. Nothing writes one today —
-shipping the *skip* now, ahead of any use, is what buys the freedom later.
-
-Adding a per-frame block that is *not* carried inside the extension block is an incompatible
-change. It would have to take a lower flag bit to stay in flag order, and no reader in the field
-could step over it, so it means bumping `ReplayVersion`.
-
-Every simulated frame carries a record, because every frame records a hash. Frame numbers are
-still only guaranteed monotonic rather than contiguous: a reader must not assume it can index them.
-
 `SideChannelRecord` carries chat, beacons and taunts, which travel over the game's global channel
 rather than the deterministic event queue and so are reproduced directly rather than re-injected.
 `Type` is `1 = ChatMessage, 2 = BeaconPlace, 3 = BeaconDelete, 4 = BeaconText, 5 = Taunt`; `Aux` is
@@ -362,8 +376,8 @@ player sent or was addressed to receive. A message between two other players nev
 recording machine and is absent from the file rather than filtered on read.
 
 Replays get shared, so these records are treated as untrusted on read.
-`SanitizeSideChannelRecord` terminates `SenderName` and `Text` - the arrays are copied verbatim
-off disk and need not be - and range-checks `House` against `BeaconManagerClass::Beacons[8][3]`
+`SanitizeSideChannelRecord` terminates `SenderName` and `Text` - the codec decodes them from
+untrusted UTF-8 into fixed arrays - and range-checks `House` against `BeaconManagerClass::Beacons[8][3]`
 and `Aux` against the beacon slot count, `ColorScheme::Array`, or the 16 taunt commands. Records
 that fail are still read, to keep the stream aligned, and then dropped.
 
@@ -381,8 +395,8 @@ and stores the result into `CRC[Frame & 0xFF]` for the network sync check. The r
 that same value and never hashes anything itself.
 
 `Queue_AI_Multiplayer_ReplayGameCRC` (0x647689) sits on the instruction straight after that call.
-Recording stores the hash on the frame's pending capture; playback compares it against what the
-recording wrote for the same frame. Both modes read it at that one site, which is what makes the
+Recording stores the hash on the frame's pending capture; playback compares its low 16 bits against
+what the recording wrote for the same frame. Both modes read it at that one site, which is what makes the
 two values comparable: it is the same instant in the frame, after `LogicClass::AI` and before
 `Execute_DoList` (0x64822F) applies the frame's events.
 
@@ -424,8 +438,10 @@ functions - `Compute_Game_CRC` (0x64DCCA), `HouseClass::Compute_CRC` (0x502FFF) 
 `MakeObserver` is clear of the hash too; it only sets `HouseClass::Observer`. Anything added here
 that writes house state must be checked against `HouseClass+0x241` specifically.
 
-A hash costs 4 bytes plus, on frames that would otherwise have gone unrecorded, a 12-byte frame
-header. The hashes themselves do not compress; the headers do.
+Only the low 16 bits of the hash are stored. A hash does not compress, so on a long game they were the
+largest single part of the file at 32 bits, and 16 lose nothing that matters: a simulation that has
+come apart stays apart, so a frame that matches by chance - one time in 65,536 - cannot hide it, and
+the first divergent frame is found exactly with the same odds. Comparing costs the same either way.
 
 ## Statistics
 
@@ -512,9 +528,10 @@ when it is not `Insignificant` and its `OwnerCountryIndex` (+0x53C) is not -1; a
 
 ### The statistics section
 
-Written by `StopReplaySystem` after the checkpoint archive. A list of chunks, each `uint32 tag`,
-`uint32 length`, then that many bytes; tags are four ASCII characters with the first in the low
-byte (`MakeChunkTag`). A reader skips tags it does not know.
+Written by `StopReplaySystem` after the checkpoint archive, as one raw deflate block of
+`StatisticsRawSize` bytes. Inflated, a list of chunks, each `uint32 tag`, `uint32 length`, then that
+many bytes; tags are four ASCII characters with the first in the low byte (`MakeChunkTag`). A reader
+skips tags it does not know.
 
 - **`TYPE`** - `uint32 listCount`, then per list `uint32 AbstractType` (BuildingType, InfantryType,
   UnitType, AircraftType), `uint32 count`, and per type: `char ID[24]`, `char Cameo[25]` (art
@@ -539,6 +556,8 @@ byte (`MakeChunkTag`). A reader skips tags it does not know.
   TimeDateStamp` (from its PE header: which build it is), `uint16 nameLength` and that many UTF-16
   characters of the file name. Taken with a Toolhelp32 snapshot at close. This is what turns a
   `MoneyIn` caller back into a module and offset, since Ares.dll and Phobos.dll are relocated.
+- **`SEAL`** - `uint32 count`, then that many `SealRecord`: every seal of the
+  [canonical hash](#canonical-hash), the last one over whatever followed the final full interval.
 - **`STAT`** - the game's own statistics packet, byte for byte what `stats.dmp` holds, when the game
   built one. Captured in `SendStatisticsPacket_WriteStatisticsDump` (0x6C856C) whether or not
   `stats.dmp` is written.
@@ -586,58 +605,139 @@ Verified in the binary; worth writing down because the names mislead.
   so LAN, skirmish and campaign recordings have them. The trackers are score keeping only -
   `Send_Statistics_Packet` is their one reader - so counting them changes nothing a game does.
 
-## Object snapshots
+## Canonical hash
 
-Nothing in the event stream says where anything is: a `MEGAMISSION` names the object and where it
-was sent, never where it stood, and nothing records a death's location. So a reader that wants a map -
-bases growing, where things were built and where the fighting was - gets one from
-`src/Replay/ReplayObjects.cpp`, which writes the Objects block every `ObjectSnapshotIntervalFrames` (30)
-frames. Units are placed where they appeared; their movement is not recorded.
+Every player who records a game writes a different file: their own camera and selection, the chat
+and taunts addressed to them, the network events their own peers sent them. But underneath all of
+that, every copy holds the same game. The *canonical form* is that shared part, and the recorder seals
+a SHA-256 chain over it as it goes. Two copies of one game carry the same seals; a copy that was
+edited carries different ones, however carefully the edit was made, because the seals of the other
+copies - and any the ladder or a replay site kept - do not move with it.
 
-It is taken at the frame's hash site with `HouseStats`, and like it only reads object state: it walks
-`TechnoClass::Array` once, reading fields and the const queries `GetTechnoType`, `IsInAir` and the
-foundation size. Nothing calls into the simulation or draws from the RNG. The walk and a hash map
-lookup per object, every 30 frames, is noise beside `Compute_Game_CRC`, which walks every object on
-every frame.
+The seals do not stop anyone editing a file: the algorithm is public, and someone who edits the game
+and recomputes the chain gets a file that passes its own check. What they cannot do is make it agree
+with anyone else's copy. That is the point of comparing seals between copies, and of keeping just the
+seals of an old game once its files are gone.
 
-The block is a delta against what the previous snapshot told a reader, so a still object costs nothing:
+It is built in `src/Replay/ReplayCanonical.cpp` and mirrored in the analyser's `Canonical.cs`, which
+`yrrp --verify` (a file against itself) and `yrrp --compare-seals` (two files) use.
 
-- **`ObjectAppearRecord`** - `uint32 UniqueID`, `uint16 TypeIndex` (the position in that kind's type
-  array, the same indices as the statistics `TYPE` chunk), `uint8 Kind` (0 unit - ships included, 1
-  infantry, 2 aircraft, 3 building), `uint8 Owner` (`HouseClass::ArrayIndex`), `uint8
-  FoundationWidth`/`FoundationHeight` (buildings; 1 otherwise), `uint16` reserved. Written when an
-  object comes onto the map, and again when its owner, type or kind changes - a capture, mind control,
-  a deploy.
-- **`ObjectUpdateRecord`** - `uint32 UniqueID`, `uint16 X`, `uint16 Y` (`ObjectClass::Location >> 4`:
-  sixteenths of a cell; for a building, inside its top-left cell), `uint8 Health` (0-255 of the type's
-  `Strength`), `uint8 Mission` (`CurrentMission`, 0xFF for none), `uint8 Flags` (bit 0 veteran, bit 1
-  elite, bit 3 cloaked; bit 2 unused - it was "in the air", which cost a ground-height lookup per
-  object and no reader used), `uint8 Height` (`Location.Z >> 4`, clamped). Written once, when the object comes
-  onto the map (not again on an owner change). Movement and state changes are not recorded - they
-  were about 60% of a long game's replay - so a unit's position is where it appeared.
-- **`ObjectGoneRecord`** - `uint32 UniqueID`, `uint16 X`, `uint16 Y`, `uint8 Reason` (0 removed, 1
-  destroyed), `uint8 KillerHouse` (0xFF for none), `uint16` reserved. An object alive and out of limbo
-  at the previous snapshot and not at this one.
+### Why every copy is the same
 
-Limbo objects are left out - a factory's unfinished product, and anything inside a transport, a
-garrison or a bunker - so they leave and come back as a fresh appearance. A reader should treat an ID
-that reappears as the same object.
+- **Events run in the same order everywhere.** `Execute_DoList` (0x64C380) walks the houses in
+  `HouseClass::Array` order and runs each house's events in the order that house sent them. The
+  recorder captures them in exactly that order (see [Which events a frame holds](#which-events-a-frame-holds)).
+- **The state hash is the same everywhere** - that is what the game's own sync check relies on.
+- **The start state is the same everywhere**: the header's seed, randomizer and object ID counter, and
+  the map, which the client writes byte for byte the same for every player.
 
-**Destroyed** comes from the same two hooks the loss counts use, `TechnoClass::Record_The_Kill_Object`
-(0x702D40) and `Record_The_Kill_House` (0x703230). Both are `__thiscall` with the killer as their one
-stack argument - an `ObjectClass*` whose `GetOwningHouse()` the engine itself credits, and a
-`HouseClass*` - so the hook reads `[esp+4]` and stores the victim's position and the killer's house by
-unique ID until the next snapshot finds the object gone. An object that leaves without either
-function running - sold, grinded, deployed, loaded into a transport - is **removed**, at the position
-the last snapshot gave it.
+Two things are not, and the canonical form leaves them out or normalises them:
 
-A capture is not a death, although the engine books it like one: `TechnoClass::Captured` (0x7014A0)
-calls `Record_The_Kill_Object` on the object it hands over (0x7015A8, through vtable +0xE0, with no
-killer) before changing its owner - which is also why a captured building counts in the old owner's
-lost totals. So a pending death is dropped when the next snapshot finds the object still on the map
-under a new owner; `Captured` returns early when the owner would not change, and a real death leaves
-the map. Without that, a captured or mind-controlled object that later left the map alive - sold,
-loaded into a transport - would be reported destroyed.
+- **The network's own events.** Each peer sees its own set - the local `FRAMEINFO` never even enters
+  `DoList` - so `EMPTY`, `FRAMESYNC`, `MESSAGE`, `RESPONSE_TIME`, `FRAMEINFO`, `ADDPLAYER`, `TIMING`,
+  `PROCESS_TIME`, `PAGEUSER`, `REMOVEPLAYER`, `LATENCYFUDGE`, `MEGAFRAMEINFO`, `PACKETTIMING`,
+  `ABOUTTOEXIT`, `FALLBACKHOST`, `ADDRESSCHANGE` and `ResponseTime2` are not part of it, nor is any
+  type whose length this build does not know. A `ChatFingerprint` is.
+- **Two bytes of a `MEGAMISSION`.** A group order travels as one full order followed by the other
+  units' `Whom` alone, so every receiver gives the rest of the group the first order's `Follow`
+  (payload bytes 17-21) while the sender has each unit's own; and payload byte 6 is the receiving
+  side's unit-list slot (0x64BE75), which the sender's own copy never has. The canonical form zeroes
+  byte 6 of every `MEGAMISSION`, and the `Follow` of every one that continues a group: same house,
+  immediately after another `MEGAMISSION`, and equal to it in payload bytes 5-16 and 22.
+
+Measured on a pair of copies of the same Quick Match game, raw events differed on 108 of 5,645 shared
+frames and the canonical form on none.
+
+### The descriptor
+
+The chain starts from SHA-256 of a description of the game:
+
+```
+"YRRPSEAL"                   8 bytes
+uint32 1                     descriptor version
+uint32 GameMode, int32 UniqueIDCounter, int32 Seed, int32 RandomNext1, int32 RandomNext2,
+uint32 RandomizerTable[250], uint32 RecordedGameSpeed      as in the header
+SHA-256 of the map           the inflated spawnmap.ini; of zero bytes for a campaign
+uint32 count, then that many player entries, sorted as byte strings
+```
+
+A player entry is uint8 human, uint8 observer, int32 colour, int32 country, int32 difficulty, uint32
+name length and the UTF-8 name. Each copy's spawn.ini lists its own player first and the others
+after, so the entries are sorted to make the order nobody's. They are read from spawn.ini with a
+deliberately small INI reader, so that a reader outside the game can reproduce it exactly: `[section]`
+and `key=value` lines, section and key names without case, values trimmed of spaces, tabs and
+carriage returns, the first occurrence of a key kept. For each of `[Settings]`, `[Other1]` ...
+`[Other7]` with a non-empty `Name`: human, `IsSpectator` (true when it starts with 1, t, T, y or Y),
+`Color` and `Side` (read as `strtol` does, -1 when absent), difficulty -1. Otherwise an AI slot from
+`[HouseColors]`, `[HouseCountries]` and `[HouseHandicaps]` `Multi1` ... `Multi8`, left out when all
+three are absent.
+
+### The chain
+
+A frame belongs to the canonical form when it has a hash or at least one canonical event - which the
+file always records, so the chain can be rebuilt from the file alone. Its bytes are:
+
+```
+varint frame number, uint8 hasHash, uint16 hash (when there is one),
+varint count, then per canonical event: uint8 type, uint8 house, the normalised payload
+```
+
+The chain runs in intervals of `SealIntervalFrames` (900) frames of game time: the first is frames 0
+to 899. With H0 = SHA-256(descriptor), each interval's seal is SHA-256 of the previous seal followed
+by the bytes of every canonical frame in the interval. An interval with no frames in it is still
+sealed, over the previous seal alone. A `SealRecord` is the interval's last frame and its hash.
+
+Each seal is written as a `Seal` block on the record of the first frame after its interval, so a
+recording cut short by a crash keeps every seal up to the last sync flush. When the recording closes
+cleanly the chain is finished with one more seal, over whatever followed the last full interval and
+through the last frame recorded, and the statistics section's `SEAL` chunk lists them all.
+
+Two copies of a game disagree only on that final seal, because each player's recording ends on its
+own frame. Every full interval both reached is the same.
+
+### What it is for
+
+- **Telling which copy is genuine.** Copies that agree are the same unedited game; the first interval
+  where two disagree is where one was changed, or where the two machines desynced.
+- **Keeping evidence cheaply.** A replay site or the ladder can keep a game's seals - 36 bytes per 15
+  seconds of game at full speed, under 10 KB for an hour - long after the files are deleted, and check
+  any copy someone produces later against them.
+- **A canonical file.** A tool can strip a recording down to the header, the INIs and its canonical
+  frames, dropping the camera, selection, chat, statistics and checkpoints, and still verify it.
+
+## Chat fingerprints
+
+Chat does not go through the game's lockstep at all: each message goes to its recipients over the
+global channel (`Message_Input`, 0x55E420), so it is in nobody's event stream and on no fixed frame,
+and nothing in a replay could tell a real line from an edited one. A fingerprint puts a trace of every
+message into the lockstep stream, where every player's copy holds it on the same frame.
+
+When a player sends a message, `MessageSend_DisableChat` (0x55EF38, just before the send loop) gives
+it a fresh 16-byte random salt and puts it in the chat packet after the vanilla fields, behind a
+`YRCS` magic. The packet goes out at the full `GlobalPacketType` size (455 bytes) and arrives whole in
+`GPacket` (0xA8D638, 456 bytes long), so the salt reaches every recipient. When the message is
+printed locally (`MessageInput_Print`, 0x55F0A8), the sender queues a `ChatFingerprint` event
+(`EventTypeExt` 0x31) holding the first 16 bytes of
+
+```
+SHA-256("YRCHAT1" || salt || uint8 sender house || the message's UTF-16LE code units)
+```
+
+Both sides record the message with its salt: the sender in `MessageInput_Print`, each recipient in
+`NetworkCallBack_NetMessage_Print` (0x48D92B). A recording's chat line can then be checked against the
+fingerprint in anyone's copy of the game, and against the canonical seals. An enemy's copy holds the
+fingerprint of a team message but not the salt, so it cannot be used to guess what was said.
+
+The event is part of the simulation. When it executes, on every peer on the same frame, it draws
+1 to 4 numbers from `ScenarioClass::Random`, the count taken from the fingerprint. Remove or alter one
+in a replay and every later roll of the dice moves, so playback no longer matches the recording's
+hashes and says so. That is what makes a fingerprint more than a note in the file: deleting a line of
+chat cannot be done quietly. The salt makes the count unpredictable, so no player can steer the game
+by what they type, and the draws change nothing else.
+
+The fingerprint is sent whether or not the game is being recorded, because another player may be.
+It is not sent while watching a replay, nor for a message `DisableChat` refused or that had no
+recipients.
 
 ## Relevant spawn.ini keys
 
@@ -703,9 +803,12 @@ never chosen.
 
 The chosen saves are compressed straight from their files into the replay (6 dictionary probes: about
 2.5 times faster than 128 for about 4% more bytes, and it runs as the game closes), so a payload is
-never held whole in memory. An entry whose files cannot be read, or that would take the archive past
-the 16 MiB budget, is truncated off again and the rest still written; a set that could not fit even
-at half its raw size loses its earliest saves first. The staging folder is deleted once the archive is
+never held whole in memory. The archive's budget is 16 MiB, or less when that would take the whole
+file past 19,000,000 bytes (`MaxReplayFileBytes`, with 256 KB kept back for the statistics section):
+the checkpoints are the one optional part of a recording, so they give way to keep it under the
+20 MB that Discord accepts without Nitro and that the ladder takes as an upload. An entry whose files
+cannot be read, or that would take the archive past the budget, is truncated off again and the rest
+still written; a set that could not fit even at half its raw size loses its earliest saves first. The staging folder is deleted once the archive is
 written, and also when a recording starts, together with any left by a process that is no longer
 running. A process crash before finalization loses these optional checkpoints; already-flushed event
 frames keep their existing recovery behavior. Repeated saves at the same frame are ignored.

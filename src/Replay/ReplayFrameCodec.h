@@ -39,7 +39,8 @@ namespace Replay
 		std::vector<uint32_t> SelectedObjectIDs;
 		std::vector<uint32_t> SelectionTriggerObjectIDs;
 		std::vector<SideChannelRecord> SideChannelEvents;
-		uint32_t GameCRC = 0;
+		// The low 16 bits of the recorded hash; only those are stored.
+		uint16_t GameCRC = 0;
 		int32_t GameSpeed = 0;
 		bool EndOfStream = false;
 	};
@@ -65,11 +66,8 @@ namespace Replay
 		bool HasHouseStats = false;
 		// Refund_Money payments made during the frame, summed per house and caller.
 		std::vector<MoneyInRecord> MoneyIn;
-		// Every ObjectSnapshotIntervalFrames, taken with HouseStats: what changed on the map.
-		std::vector<ObjectAppearRecord> ObjectsAppeared;
-		std::vector<ObjectUpdateRecord> ObjectsUpdated;
-		std::vector<ObjectGoneRecord> ObjectsGone;
-		bool HasObjects = false;
+		// Canonical seals that closed by this frame.
+		std::vector<SealRecord> Seals;
 	};
 
 	// Tracks the last serialized values so unchanged viewer state can be omitted.
@@ -80,6 +78,7 @@ namespace Replay
 		void Reset();
 		bool WriteFrame(File& file, const RecordedFrameCapture& capture, int eventsThisFrame,
 			const std::vector<SideChannelRecord>& sideChannelEvents);
+		// The events of the frame WriteFrame has just written, in the order the engine ran them.
 		bool WriteEvents(File& file, const std::vector<EventClass>& events);
 		bool WriteEndMarker(File& file);
 
@@ -88,11 +87,14 @@ namespace Replay
 
 	private:
 		bool HasLastWrittenFrameState = false;
-		int32_t LastWrittenFrameNumber = 0;
+		int32_t LastWrittenFrameNumber = -1;
 		Point2D LastRecordedTacticalPos = { 0, 0 };
 		std::vector<uint32_t> LastRecordedSelectionIDs;
 		// -1 makes the first capture establish the recorded speed.
 		int LastRecordedGameSpeed = -1;
+		// Reused for each record and block so writing does not allocate on the game thread.
+		std::vector<uint8_t> Record;
+		std::vector<uint8_t> Block;
 	};
 
 	// Reads frame blocks without applying them to the simulation. Gameplay events follow
@@ -101,14 +103,22 @@ namespace Replay
 	{
 	public:
 		// Reset after restarting the file stream, including when seeking backwards.
-		void Reset() { this->LastReadFrame = -1; }
+		void Reset()
+		{
+			this->LastReadFrame = -1;
+			this->LastTacticalPos = { 0, 0 };
+		}
 		// Structural checks live here; the caller supplies engine-dependent side-channel validation.
 		bool ReadFrame(File& file, PlaybackFrameRecord& record,
 			bool (&validateSideChannel)(SideChannelRecord&));
+		// One event of the frame ReadFrame last returned. Bytes the record does not carry are zero.
 		bool ReadEvent(File& file, EventClass& event);
 		bool SkipEvents(File& file, int count);
 
 	private:
 		int LastReadFrame = -1;
+		// Camera positions are stored as a change from the one before.
+		Point2D LastTacticalPos = { 0, 0 };
+		std::vector<uint8_t> Block;
 	};
 }

@@ -46,6 +46,7 @@ namespace ReplaySystem::Statistics
 	// end-of-game snapshot is taken here in case the recording is only closed after they are gone.
 	void OnScenarioClearing();
 
-	// Appends the statistics section. Call once the frame stream is finished.
-	void WriteSection(Replay::File& file);
+	// Appends the statistics section, with the recording's canonical seals. Call once the frame stream
+	// is finished.
+	void WriteSection(Replay::File& file, const std::vector<Replay::SealRecord>& seals);
 }

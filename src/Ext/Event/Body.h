@@ -27,9 +27,12 @@ enum class EventTypeExt : uint8_t
 	// Ares used Events 0x60 and 0x61
 
 	ResponseTime2 = 0x30,
+	// A salted fingerprint of a chat message, so a replay can prove what was said. See
+	// docs/replay-format.md, "Chat fingerprints".
+	ChatFingerprint = 0x31,
 
 	FIRST = ResponseTime2,
-	LAST = ResponseTime2
+	LAST = ChatFingerprint
 };
 
 #pragma pack(push, 1)
@@ -49,6 +52,11 @@ public:
 			char MaxAhead;
 			uint8_t LatencyLevel;
 		} ResponseTime2;
+
+		struct ChatFingerprint
+		{
+			uint8_t Hash[16];
+		} ChatFingerprint;
 	};
 
 	bool AddEvent();
