@@ -36,6 +36,7 @@
 #include <GameModeOptionsClass.h>
 #include <GameOptionsClass.h>
 #include <LoadOptionsClass.h>
+#include <MouseClass.h>
 #include <Memory.h>
 #include <RadBeam.h>
 #include <ScenarioClass.h>
@@ -379,6 +380,15 @@ namespace ReplaySystem
 			void __fastcall EBolt_Draw_All()
 			{ JMP_STD(0x4C2830); }
 
+			// The sidebar's money counter rolls towards the current player's money a step at a time
+			// (CreditClass::AI, 0x4A2600; the counter is TabClass + 0x551C). Forced, it shows it at once,
+			// rather than counting from whatever it showed before the load.
+			void SnapCreditsCounter()
+			{
+				using CreditAI = void(__thiscall*)(void*, bool);
+				reinterpret_cast<CreditAI>(0x4A2600)(reinterpret_cast<char*>(&MouseClass::Instance) + 0x551C, true);
+			}
+
 			// Tesla bolts and desolator beams are not simulation objects: each ages and is deleted only
 			// by its own Draw_All (0x4C2830, 0x6591B0), and a savegame carries neither. A seek draws one
 			// frame in SeekRenderInterval, so everything fired during it would play out at once when it
@@ -447,8 +457,13 @@ namespace ReplaySystem
 				RepointTempSurfaceAfterLoad();
 				ClearDrawTimedEffects();
 				ResumeInGameSessionAfterLoad();
+				// A checkpoint recorded during the game holds the recording player as the current
+				// player, so the house being watched from is put back, then the observer seat, in the
+				// order AssignHouses and the game start take them.
+				ReplaySystem::ApplyPlaybackViewPlayer();
 				ReplaySystem::ReapplyPlaybackSpectator();
 				keyframe.Snapshot.RestoreAfterResume(keyframeFrame, ReplayState.ShowChatAndBeacons);
+				SnapCreditsCounter();
 
 				if (ReplayState.HasPlaybackHeader)
 				{

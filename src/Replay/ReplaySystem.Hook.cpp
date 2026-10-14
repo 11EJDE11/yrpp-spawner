@@ -520,6 +520,21 @@ DEFINE_HOOK(0x6924FC, ScrollClass_ClickInfo_ReplayClickThroughShroud, 0x12)
 	return (*pShrouded || *pFogged) ? HiddenCell : PickObject;
 }
 
+// The current player's radar is decided by its own power and radar buildings
+// (HouseClass_Radar_Update_CheckEligible, 0x508DF0), on the frame step, where spectator playback hides
+// the observer. So a spectator's minimap stayed off until the recording player built a radar. It is
+// always on, as an observer's is. Phobos' free-radar hook (0x508E17) also lands here.
+DEFINE_HOOK(0x508F2F, HouseClass_UpdateRadar_ReplaySpectator, 0x5)
+{
+	if (ReplaySystem::IsSpectatorPlayback())
+	{
+		REF_STACK(bool, enableRadar, STACK_OFFSET(0x1C, -0xC));
+		enableRadar = true;
+	}
+
+	return 0;
+}
+
 #pragma endregion Viewer map reveal
 
 // Queue_AI_Multiplayer, just past where it starts its own skip-CRC timer. A replay launch is not
