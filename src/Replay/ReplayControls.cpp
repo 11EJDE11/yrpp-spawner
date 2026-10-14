@@ -23,9 +23,12 @@
 #include "ReplayFormat.h"
 #include "ReplaySystem.Internal.h"
 #include <ColorScheme.h>
+#include <EventClass.h>
+#include <HouseClass.h>
 #include <MapClass.h>
 #include <MessageListClass.h>
 #include <TacticalClass.h>
+#include <TechnoClass.h>
 #include <Unsorted.h>
 #include <algorithm>
 #include <cstdio>
@@ -81,6 +84,36 @@ namespace ReplaySystem
 				// Never carry a pre-pause or single-step deadline into resumed playback. Starting the
 				// pacing clock afresh prevents a burst of unpaced frames on resume.
 				State.NextFrameDue = 0.0;
+			}
+
+			// Whether the viewer has quit from the in-game menu: an Exit event from the local house
+			// that has not run yet. It waits in OutList until Queue_AI moves it to DoList.
+			bool IsLocalExitPending()
+			{
+				const auto pPlayer = HouseClass::CurrentPlayer;
+				if (!pPlayer)
+					return false;
+
+				const auto isLocalExit = [pPlayer](const EventClass& event)
+				{
+					return event.Type == EventType::Exit
+						&& event.HouseIndex == pPlayer->ArrayIndex
+						&& (event.IsExecuted & 1) == 0;
+				};
+
+				for (int i = 0; i < EventClass::OutList.Count; ++i)
+				{
+					if (isLocalExit(EventClass::OutList[i]))
+						return true;
+				}
+
+				for (int i = 0; i < EventClass::DoList.Count; ++i)
+				{
+					if (isLocalExit(EventClass::DoList[i]))
+						return true;
+				}
+
+				return false;
 			}
 
 			void PrintControlMessageInternal(const wchar_t* pMessage)
@@ -274,6 +307,14 @@ namespace ReplaySystem
 				return;
 			}
 
+			// Only Queue_AI runs the Exit event the in-game menu queues, and a paused frame skips it, so
+			// a quit would otherwise wait for the viewer to unpause. Resume and let it go through.
+			if ((State.Paused || State.SingleStepTargetFrame >= 0) && IsLocalExitPending())
+			{
+				State.SingleStepTargetFrame = -1;
+				State.ResumePending = true;
+			}
+
 			if (State.ResumePending)
 			{
 				State.ResumePending = false;
@@ -368,6 +409,14 @@ namespace ReplaySystem
 
 			TacticalClass::Instance->Update();
 			MapClass::Instance.Render();
+
+			// TechnoClass::AI clears the hover flag every frame (0x6F9E65) and GScreenClass::Input sets
+			// it again for whatever is still under the cursor. A paused frame skips LogicClass::AI, so
+			// without this every health bar the cursor passes over stays up. Clearing it after both of
+			// this iteration's draws, rather than where the logic tick would, keeps the bar from
+			// flickering between them.
+			for (auto const pTechno : TechnoClass::Array)
+				pTechno->IsMouseHovering = false;
 		}
 
 		int GetPlaybackGameSpeedIndex()
