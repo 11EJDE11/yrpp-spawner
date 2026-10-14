@@ -20,6 +20,7 @@
 #include "NetDiagnostics.h"
 #include "FastRetransmit.h"
 #include "PacketRedundancy.h"
+#include "PacketBundling.h"
 #include "ProtocolZero.h"
 #include "ProtocolZero.LatencyLevel.h"
 #include "FrameGate.h"
@@ -562,6 +563,12 @@ void NetDiagnostics::LogSummary(const char* reason)
 		extraDatagrams, extraFailed, caps, worstOvershoot,
 		g_badConnTrips, g_badConnWorstAge, g_sendFailures, g_lastSendError,
 		(unsigned long)tick, fps10 / 10, fps10 % 10, procMax, proc);
+
+	int bundles = 0, copiesSent = 0, recovered = 0, redundant = 0;
+	PacketBundling::GetStats(bundles, copiesSent, recovered, redundant);
+	Debug::Log("[Audit] bundling %s frame=%d enabled=%d bundles=%d copies_sent=%d"
+		" | copies_received recovered=%d already_had=%d\n",
+		reason, frame, (int)PacketBundling::Enabled, bundles, copiesSent, recovered, redundant);
 }
 
 DEFINE_HOOK(0x541820, IPXManagerClass_Service_NetDiagnostics, 0x6)

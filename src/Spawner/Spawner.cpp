@@ -27,6 +27,7 @@
 #include "NetDiagnostics.h"
 #include "RenderSkip.h"
 #include "PacketRedundancy.h"
+#include "PacketBundling.h"
 #include <Replay/ReplaySystem.h>
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
@@ -465,6 +466,7 @@ void Spawner::InitNetwork()
 	PacketRedundancy::Copies   = PacketRedundancy::ClampCopies(pSpawnerConfig->RedundancyCopies);
 	PacketRedundancy::Adaptive = pSpawnerConfig->AdaptiveRedundancy;
 	PacketRedundancy::Acks     = pSpawnerConfig->RedundantAcks;
+	PacketBundling::Enabled    = !isReplayPlayback && pSpawnerConfig->PacketBundling;
 	FrameGate::Enabled         = !isReplayPlayback && pSpawnerConfig->FrameAwareGate;
 	RenderSkip::Enabled        = !isReplayPlayback && pSpawnerConfig->RenderSkip;
 	RenderSkip::MinProcessMs       = std::clamp(pSpawnerConfig->RenderSkipMinProcessMs, 1, 1000);
@@ -472,6 +474,7 @@ void Spawner::InitNetwork()
 	NetDiagnostics::Enabled    = !isReplayPlayback && pSpawnerConfig->NetDiagnostics;
 	FastRetransmit::Reset();
 	PacketRedundancy::Reset();
+	PacketBundling::Reset();
 	FrameGate::Reset();
 	RenderSkip::Reset();
 	NetDiagnostics::Reset();

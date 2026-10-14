@@ -156,6 +156,7 @@ public:
 	int  RedundancyCopies;
 	bool AdaptiveRedundancy;
 	bool RedundantAcks;
+	bool PacketBundling;
 	bool AdaptiveLatencyDescent;
 	int  ConnectionTimeoutFloor;
 	bool RenderSkip;
@@ -259,6 +260,7 @@ public:
 		, RedundancyCopies { 2 }
 		, AdaptiveRedundancy { true }
 		, RedundantAcks { true }
+		, PacketBundling { true }
 		, AdaptiveLatencyDescent { true }
 		, ConnectionTimeoutFloor { 300 }
 		, RenderSkip { true }

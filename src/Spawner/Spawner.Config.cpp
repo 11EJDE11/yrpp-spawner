@@ -107,6 +107,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		RedundancyCopies = pINI->ReadInteger(pSettingsSection, "RedundancyCopies", RedundancyCopies);
 		AdaptiveRedundancy = pINI->ReadBool(pSettingsSection, "AdaptiveRedundancy", AdaptiveRedundancy);
 		RedundantAcks    = pINI->ReadBool(pSettingsSection, "RedundantAcks", RedundantAcks);
+		PacketBundling   = pINI->ReadBool(pSettingsSection, "PacketBundling", PacketBundling);
 		AdaptiveLatencyDescent = pINI->ReadBool(pSettingsSection, "AdaptiveLatencyDescent", AdaptiveLatencyDescent);
 		ConnectionTimeoutFloor = pINI->ReadInteger(pSettingsSection, "ConnectionTimeoutFloor", ConnectionTimeoutFloor);
 		RenderSkip       = pINI->ReadBool(pSettingsSection, "RenderSkip", RenderSkip);
