@@ -201,7 +201,8 @@ namespace Replay
 	constexpr int32_t MaxMapLeptonCoord = 512 * 256;
 
 	// In memory. On disk: uint8 type, zigzag house, zigzag aux, zigzag X/Y/Z, varint length + UTF-8
-	// sender name, varint length + UTF-8 text, then for chat uint8 salt flag and, when set, the salt.
+	// sender name, varint length + UTF-8 text, then for chat a uint8 of ChatRecordFlags, the salt when
+	// it has one, and the label and recipients when it has those.
 	struct SideChannelRecord
 	{
 		int32_t FrameNumber = 0;
@@ -215,6 +216,16 @@ namespace Replay
 		// ChatMessage only: the salt the sender's ChatFingerprint event was computed with.
 		bool HasSalt = false;
 		uint8_t Salt[ChatSaltBytes] = {};
+		// ChatMessage only: who the sender sent it to, as a ChatLabel and a bit per house index.
+		// Both 0 when the sender did not say.
+		uint8_t Label = 0;
+		uint8_t Recipients = 0;
+	};
+
+	enum ChatRecordFlags : uint8_t
+	{
+		ChatRecordFlag_Salt = 1u << 0,
+		ChatRecordFlag_Recipients = 1u << 1,
 	};
 
 #pragma pack(push, 1)

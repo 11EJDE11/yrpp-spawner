@@ -179,13 +179,19 @@ namespace Replay
 
 			if (record.Type == static_cast<uint8_t>(SideChannelEventType::ChatMessage))
 			{
-				uint8_t hasSalt = 0;
-				if (!cursor.Value(hasSalt) || hasSalt > 1)
+				uint8_t flags = 0;
+				if (!cursor.Value(flags) || (flags & ~(ChatRecordFlag_Salt | ChatRecordFlag_Recipients)) != 0)
 					return false;
 
-				record.HasSalt = hasSalt != 0;
+				record.HasSalt = (flags & ChatRecordFlag_Salt) != 0;
 				if (record.HasSalt && !cursor.Bytes(record.Salt, sizeof(record.Salt)))
 					return false;
+
+				if ((flags & ChatRecordFlag_Recipients) != 0
+					&& (!cursor.Value(record.Label) || !cursor.Value(record.Recipients)))
+				{
+					return false;
+				}
 			}
 
 			return true;
@@ -284,9 +290,16 @@ namespace Replay
 
 				if (event.Type == static_cast<uint8_t>(SideChannelEventType::ChatMessage))
 				{
-					AppendValue(block, static_cast<uint8_t>(event.HasSalt));
+					const bool hasRecipients = event.Label != 0;
+					AppendValue(block, static_cast<uint8_t>((event.HasSalt ? ChatRecordFlag_Salt : 0)
+						| (hasRecipients ? ChatRecordFlag_Recipients : 0)));
 					if (event.HasSalt)
 						AppendBytes(block, event.Salt, sizeof(event.Salt));
+					if (hasRecipients)
+					{
+						AppendValue(block, event.Label);
+						AppendValue(block, event.Recipients);
+					}
 				}
 			}
 			writeBlock(FrameBlock_SideChannel);

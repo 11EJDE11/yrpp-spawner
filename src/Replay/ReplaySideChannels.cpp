@@ -22,6 +22,7 @@
 #include "ReplaySystem.h"
 
 #include <Ext/Event/Body.h>
+#include <Misc/InGameChat.h>
 #include <Utilities/Debug.h>
 
 #include <BeaconManagerClass.h>
@@ -36,6 +37,7 @@
 
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <utility>
 
 using namespace Replay;
@@ -155,13 +157,18 @@ namespace ReplaySystem
 			switch (eventType)
 			{
 			case SideChannelEventType::ChatMessage:
+			{
+				wchar_t senderName[48] = {};
+				InGameChat::ComposeSenderName(senderName, std::size(senderName), record.SenderName,
+					InGameChat::ToLabel(record.Label));
 				MessageListClass::Instance.AddMessage(
-					record.SenderName, record.House, record.Text, record.Aux,
+					senderName, record.House, record.Text, record.Aux,
 					TextPrintType::UseGradPal | TextPrintType::FullShadow | TextPrintType::Point6Grad,
 					GetChatMessageDurationFrames(), false);
 				if (RulesClass::Instance)
 					VocClass::PlayGlobal(RulesClass::Instance->IncomingMessage, 0x2000, 1.0f);
 				break;
+			}
 
 			case SideChannelEventType::BeaconPlace:
 				BeaconManagerClass::Instance.PlaceBeacon(record.House, record.Coord, record.Aux);
@@ -187,7 +194,7 @@ namespace ReplaySystem
 }
 
 void ReplaySystem::RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex,
-	const uint8_t* pSalt)
+	const uint8_t* pSalt, ChatLabel label, uint8_t recipients)
 {
 	if (!ReplaySystem::IsRecordingActive())
 		return;
@@ -204,6 +211,11 @@ void ReplaySystem::RecordChatMessage(int houseIndex, const wchar_t* senderName, 
 	{
 		record.HasSalt = true;
 		std::memcpy(record.Salt, pSalt, sizeof(record.Salt));
+	}
+	if (label != ChatLabel::Unknown)
+	{
+		record.Label = static_cast<uint8_t>(label);
+		record.Recipients = recipients;
 	}
 
 	ReplaySystem::SideChannels::Push(std::move(record));

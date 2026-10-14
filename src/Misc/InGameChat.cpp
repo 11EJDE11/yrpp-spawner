@@ -17,18 +17,25 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "InGameChat.h"
+
 #include <Spawner/Spawner.h>
 #include <Utilities/Macro.h>
 #include <HouseClass.h>
+#include <HouseTypeClass.h>
+#include <StringTable.h>
 #include <Unsorted.h>
 #include <Replay/ReplaySystem.h>
 
 #include <MessageListClass.h>
 #include <Windows.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <iterator>
 
 // This corrects the processing of Unicode player names
 // and prohibits incoming messages from players with whom chat is disabled
@@ -46,34 +53,129 @@ struct GlobalPacket_NetMessage
 	byte Color;
 	byte CRC;
 	// Past the vanilla fields. The packet goes out at the full GlobalPacketType size (455 bytes) and
-	// arrives whole in this buffer, so the salt of the message's ChatFingerprint rides along here.
-	uint32_t SaltMagic;
+	// arrives whole in this buffer, so the spawner's own fields ride along here: the salt of the
+	// message's ChatFingerprint, and who the sender sent it to.
+	uint32_t ExtMagic;
 	uint8_t Salt[16];
+	uint8_t HasSalt;
+	uint8_t Label;      // ChatLabel
+	uint8_t Recipients; // a bit per house index
 };
 
 #pragma pack(pop)
 
-static_assert(offsetof(GlobalPacket_NetMessage, SaltMagic) == 274);
+static_assert(offsetof(GlobalPacket_NetMessage, ExtMagic) == 274);
 static_assert(sizeof(GlobalPacket_NetMessage) <= 455);
+
+// What Message_Input's send loop reads off each house (0x55EEAA): its type, then the type's Multiplay.
+static_assert(offsetof(HouseClass, Type) == 0x34);
+static_assert(offsetof(HouseTypeClass, Multiplay) == 0x1A5);
 
 namespace
 {
-	constexpr uint32_t ChatSaltMagic = 0x53435259; // 'YRCS'
+	constexpr uint32_t ChatExtMagic = 0x32435259; // 'YRC2'
 
-	// Message_Input's chat scope, set by the key that opened the prompt (0x55E550): 1 the ChatMask
-	// houses, 2 allies, 3 everyone. Zero once the observer check has refused the send.
+	// Message_Input's chat scope, set by the key that opened the prompt (0x55E550): 1 (Enter) the
+	// ChatMask houses, 2 (Backspace) allies, 3 (backslash) everyone. Zero once the observer check has
+	// refused the send.
 	int& ChatScope = *reinterpret_cast<int*>(0xABCE18);
 
 	// Set between the send loop and the local print of the same message.
 	bool HasOutgoingSalt = false;
 	uint8_t OutgoingSalt[16] = {};
+	ChatLabel OutgoingLabel = ChatLabel::Unknown;
+	uint8_t OutgoingRecipients = 0;
+
+	// The sender name the message list prints, with the label after it.
+	wchar_t ReceivedSenderName[48] = {};
+	wchar_t OutgoingSenderName[48] = {};
+
+	bool HasExtension()
+	{
+		return GlobalPacket_NetMessage::Instance.ExtMagic == ChatExtMagic;
+	}
 
 	const uint8_t* ReceivedSalt()
 	{
-		return GlobalPacket_NetMessage::Instance.SaltMagic == ChatSaltMagic
+		return HasExtension() && GlobalPacket_NetMessage::Instance.HasSalt
 			? GlobalPacket_NetMessage::Instance.Salt
 			: nullptr;
 	}
+
+	// Who Message_Input's send loop (0x55EE8B-0x55F03F) sends to: every multiplayer house but the
+	// sender's own that is masked in ChatMask for scope 1, allied for scope 2, or any for scope 3.
+	// The loop then sends to the connection of that house's name, which only a human player has.
+	void ComputeRecipients(int scope, ChatLabel& label, uint8_t& recipients)
+	{
+		label = ChatLabel::Unknown;
+		recipients = 0;
+
+		const HouseClass* const pSender = HouseClass::CurrentPlayer;
+		if (!pSender || scope < 1 || scope > 3)
+			return;
+
+		uint8_t players = 0; // everyone else, observers aside
+		uint8_t allies = 0;
+		const int count = std::min(HouseClass::Array.Count, 8);
+		for (int i = 0; i < count; ++i)
+		{
+			const HouseClass* const pHouse = HouseClass::Array.GetItem(i);
+			if (!pHouse || pHouse == pSender || !pHouse->Type || !pHouse->Type->Multiplay || !pHouse->IsHumanPlayer)
+				continue;
+
+			const uint8_t bit = static_cast<uint8_t>(1u << i);
+			const bool ally = pSender->IsAlliedWith(pHouse);
+			if (!pHouse->IsObserver())
+			{
+				players |= bit;
+				if (ally)
+					allies |= bit;
+			}
+
+			if ((scope == 1 && Game::ChatMask[i]) || (scope == 2 && ally) || scope == 3)
+				recipients |= bit;
+		}
+
+		const uint8_t reached = recipients & players;
+		if (scope == 3 || (scope == 1 && reached == players))
+			label = ChatLabel::All;
+		else if (scope == 2 || (allies != 0 && reached == allies))
+			label = ChatLabel::Team;
+		else
+			label = ChatLabel::Private;
+	}
+}
+
+ChatLabel InGameChat::ToLabel(uint8_t value)
+{
+	return value <= static_cast<uint8_t>(ChatLabel::Private) ? static_cast<ChatLabel>(value) : ChatLabel::Unknown;
+}
+
+void InGameChat::ComposeSenderName(wchar_t* out, size_t capacity, const wchar_t* name, ChatLabel label)
+{
+	if (!out || capacity == 0)
+		return;
+
+	const wchar_t* pLabel = nullptr;
+	switch (label)
+	{
+	case ChatLabel::All:
+		pLabel = StringTable::TryFetchString("TXT_CHAT_LABEL_ALL", L"All");
+		break;
+	case ChatLabel::Team:
+		pLabel = StringTable::TryFetchString("TXT_CHAT_LABEL_TEAM", L"Team");
+		break;
+	case ChatLabel::Private:
+		pLabel = StringTable::TryFetchString("TXT_CHAT_LABEL_PRIVATE", L"Private");
+		break;
+	default:
+		break;
+	}
+
+	if (pLabel && *pLabel)
+		swprintf_s(out, capacity, L"%ls (%ls)", name ? name : L"", pLabel);
+	else
+		wcsncpy_s(out, capacity, name ? name : L"", _TRUNCATE);
 }
 
 static bool inline IsDisableChatEnabled()
@@ -101,17 +203,27 @@ DEFINE_HOOK(0x55EF38, MessageSend_DisableChat, 0x6)
 		}
 
 		HasOutgoingSalt = false;
-		GlobalPacket_NetMessage::Instance.SaltMagic = 0;
+		OutgoingLabel = ChatLabel::Unknown;
+		OutgoingRecipients = 0;
+		GlobalPacket_NetMessage::Instance.ExtMagic = 0;
 		return 0x55F056; // skip the send
 	}
 
-	// The message is about to go out: give it a fresh salt, for its ChatFingerprint.
+	// The message is about to go out: give it a fresh salt, for its ChatFingerprint, and say who it
+	// is going to.
 	HasOutgoingSalt = ChatScope != 0 && !ReplaySystem::IsPlaybackRequested()
 		&& ReplaySystem::GenerateChatSalt(OutgoingSalt);
+	ComputeRecipients(ChatScope, OutgoingLabel, OutgoingRecipients);
 
-	GlobalPacket_NetMessage::Instance.SaltMagic = HasOutgoingSalt ? ChatSaltMagic : 0;
+	auto& packet = GlobalPacket_NetMessage::Instance;
+	packet.ExtMagic = ChatExtMagic;
+	packet.HasSalt = HasOutgoingSalt;
 	if (HasOutgoingSalt)
-		memcpy(GlobalPacket_NetMessage::Instance.Salt, OutgoingSalt, sizeof(OutgoingSalt));
+		memcpy(packet.Salt, OutgoingSalt, sizeof(OutgoingSalt));
+	else
+		memset(packet.Salt, 0, sizeof(packet.Salt));
+	packet.Label = static_cast<uint8_t>(OutgoingLabel);
+	packet.Recipients = OutgoingRecipients;
 
 	return 0; // execute original: cmp edi, ebx; mov [esp+0x14], ebx
 }
@@ -181,12 +293,17 @@ DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 	HouseClass* pRecordHouse = (houseIndex < 8 && HouseClass::Array.ValidIndex(houseIndex))
 		? HouseClass::Array.GetItem(houseIndex) : nullptr;
 
+	const ChatLabel label = HasExtension()
+		? InGameChat::ToLabel(GlobalPacket_NetMessage::Instance.Label) : ChatLabel::Unknown;
+	const uint8_t recipients = HasExtension() ? GlobalPacket_NetMessage::Instance.Recipients : 0;
+
 	// Recorded ahead of the DisableChat and ChatMask filters below, so a replay holds what was
 	// sent rather than what this client chose to display
 	if (pRecordHouse)
 	{
 		ReplaySystem::RecordChatMessage(houseIndex, pRecordHouse->UIName,
-			GlobalPacket_NetMessage::Instance.Message, pRecordHouse->ColorSchemeIndex, ReceivedSalt());
+			GlobalPacket_NetMessage::Instance.Message, pRecordHouse->ColorSchemeIndex, ReceivedSalt(),
+			label, recipients);
 	}
 
 	if (IsDisableChatEnabled())
@@ -197,7 +314,8 @@ DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 		if (pRecordHouse)
 		{
 			GlobalPacket_NetMessage::Instance.Color = (byte)pRecordHouse->ColorSchemeIndex;
-			R->ESI(pRecordHouse->UIName);
+			InGameChat::ComposeSenderName(ReceivedSenderName, std::size(ReceivedSenderName), pRecordHouse->UIName, label);
+			R->ESI(ReceivedSenderName);
 			return PrintMessage;
 		}
 	}
@@ -238,11 +356,17 @@ DEFINE_HOOK(0x55F0A8, MessageInput_Print, 0x5)
 			ReplaySystem::QueueChatFingerprint(OutgoingSalt, pHouse->ArrayIndex, GlobalPacket_NetMessage::Instance.Message);
 
 		ReplaySystem::RecordChatMessage(pHouse->ArrayIndex, GlobalPacket_NetMessage::Instance.PlayerName,
-			GlobalPacket_NetMessage::Instance.Message, pHouse->ColorSchemeIndex, HasOutgoingSalt ? OutgoingSalt : nullptr);
+			GlobalPacket_NetMessage::Instance.Message, pHouse->ColorSchemeIndex, HasOutgoingSalt ? OutgoingSalt : nullptr,
+			OutgoingLabel, OutgoingRecipients);
 	}
 
-	HasOutgoingSalt = false;
+	InGameChat::ComposeSenderName(OutgoingSenderName, std::size(OutgoingSenderName),
+		GlobalPacket_NetMessage::Instance.PlayerName, OutgoingLabel);
 
-	R->EAX(GlobalPacket_NetMessage::Instance.PlayerName);
+	HasOutgoingSalt = false;
+	OutgoingLabel = ChatLabel::Unknown;
+	OutgoingRecipients = 0;
+
+	R->EAX(OutgoingSenderName);
 	return 0x55F0B2;
 }

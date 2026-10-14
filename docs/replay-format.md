@@ -274,8 +274,10 @@ recordings made before it:
 Playback reads the first five and skips the rest, which are for readers outside the game.
 
 A side-channel record: uint8 type, zigzag house, zigzag aux, zigzag X, Y and Z, a varint length and
-that many bytes of UTF-8 sender name, the same for the text, then for a chat message a uint8 salt flag
-and, when it is 1, the 16-byte salt of its [fingerprint](#chat-fingerprints).
+that many bytes of UTF-8 sender name, the same for the text, then for a chat message a uint8 of flags -
+bit 0 a salt, bit 1 recipients, no others - followed by the 16-byte salt of its
+[fingerprint](#chat-fingerprints) when bit 0 is set, and by a uint8 label and a uint8 recipient mask
+when bit 1 is (see [Chat recipients](#chat-recipients)).
 
 An event: uint8 type, uint8 house, zigzag (`Frame` - the record's frame), then its payload:
 
@@ -716,8 +718,9 @@ message into the lockstep stream, where every player's copy holds it on the same
 
 When a player sends a message, `MessageSend_DisableChat` (0x55EF38, just before the send loop) gives
 it a fresh 16-byte random salt and puts it in the chat packet after the vanilla fields, behind a
-`YRCS` magic. The packet goes out at the full `GlobalPacketType` size (455 bytes) and arrives whole in
-`GPacket` (0xA8D638, 456 bytes long), so the salt reaches every recipient. When the message is
+`YRC2` magic: at offset 274 the magic, the salt, a uint8 saying whether there is one, then the
+[recipients](#chat-recipients). The packet goes out at the full `GlobalPacketType` size (455 bytes)
+and arrives whole in `GPacket` (0xA8D638, 456 bytes long), so all of it reaches every recipient. When the message is
 printed locally (`MessageInput_Print`, 0x55F0A8), the sender queues a `ChatFingerprint` event
 (`EventTypeExt` 0x31) holding the first 16 bytes of
 
@@ -738,6 +741,23 @@ chat cannot be done quietly. The salt makes the count unpredictable, so no playe
 by what they type, and the draws change nothing else.
 
 The fingerprint is sent whether or not the game is being recorded, because another player may be.
+
+### Chat recipients
+
+Nothing in a vanilla chat packet says who it was sent to, so a message to the team and one to everyone
+look the same to the people who get them. The sender works it out as the message goes, the way
+`Message_Input`'s send loop (0x55EE8B-0x55F03F) picks recipients from the key that opened the prompt
+(`ChatScope`, 0xABCE18): Enter sends to the houses ticked in `ChatMask`, Backspace to allies, `\` to
+everyone - every multiplayer house but the sender's own, and only a human player has a connection to
+receive it. It sends the result in the packet alongside the salt:
+
+- a label: 1 *All* (every other player, observers aside), 2 *Team* (the sender's allies, or the
+  Backspace key), 3 *Private* (any other set), 0 when the sender did not say;
+- the recipients, a bit per house index.
+
+The game shows the label after the sender's name, "Name (Team): ...", on the sender's screen and the
+recipients'; the replay records both and playback shows the label the same way. The label strings are
+`TXT_CHAT_LABEL_ALL`, `TXT_CHAT_LABEL_TEAM` and `TXT_CHAT_LABEL_PRIVATE`, defaulting to the English.
 It is not sent while watching a replay, nor for a message `DisableChat` refused or that had no
 recipients.
 

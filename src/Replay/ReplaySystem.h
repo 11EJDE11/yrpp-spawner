@@ -20,6 +20,7 @@
 #pragma once
 
 #include <GeneralStructures.h>
+#include <Misc/InGameChat.h>
 
 #include <cstdint>
 
@@ -69,6 +70,7 @@ namespace ReplaySystem
 	// on both sides. pSalt is null for a message that carried none. See docs/replay-format.md.
 	bool GenerateChatSalt(uint8_t (&salt)[16]);
 	void QueueChatFingerprint(const uint8_t (&salt)[16], int houseIndex, const wchar_t* message);
+	// label is a ChatLabel, recipients a bit per house index; both 0 when the sender did not say.
 	void RecordChatMessage(int houseIndex, const wchar_t* senderName, const wchar_t* message, int colorSchemeIndex,
-		const uint8_t* pSalt);
+		const uint8_t* pSalt, ChatLabel label, uint8_t recipients);
 }
