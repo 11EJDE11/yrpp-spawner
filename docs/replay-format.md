@@ -10,7 +10,8 @@ Three readers outside the game mirror parts of this by hand, with no compile-tim
 
 - the CnCNet client, `DXMainClient/Domain/YRReplayGame.cs`: the header and the two embedded INIs;
 - the replay analyser, `yrrp-analyser`: everything, including the canonical hash;
-- the Quick Match ladder's upload check: the magic number and the version.
+- the Quick Match ladder, `app/Http/Services/Replay/` in cncnet-ladder-api: the header, the embedded
+  INIs, the frame stream, the statistics section and the canonical hash (not the checkpoint archive).
 
 **Any change here must be made in all of them in the same change.** A size mismatch does not error;
 it silently mis-parses every field after the point of divergence.
@@ -283,7 +284,8 @@ An event: uint8 type, uint8 house, zigzag (`Frame` - the record's frame), then i
 - for the spawner's own types, `EventExt::GetDataSize`;
 - for `FRAMEINFO`, `CommandCount` (2 bytes), `Delay` (1) and a `FrameInfoCheck` (1) in place of the
   CRC: whether the peer's hash of the frame matched the recorder's own (`LatestFramesCRC`), the check
-  `Execute_DoList` makes with it at 0x64C6F2, or 2 where it was not comparable. The CRC itself is
+  `Execute_DoList` makes with it at 0x64C6F2, or 2 where it was not comparable - including while
+  `Queue_AI_Multiplayer`'s skip-CRC timer (0xAFA450) has time left, when the game makes no check. The CRC itself is
   the recorder's own hash unless that peer was out of sync, which is what the flag keeps;
 - for any other type - another module's, whose length is not known here - a varint length and the
   whole 104-byte union.

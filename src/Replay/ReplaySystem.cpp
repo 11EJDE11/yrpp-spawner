@@ -1040,12 +1040,15 @@ namespace ReplaySystem
 
 			// A peer's FRAMEINFO carries its hash of an earlier frame. The file keeps whether that matched
 			// this machine's own - the check Execute_DoList makes with it (0x64C6F2) - not the hash.
+			// Execute_DoList makes no check while Queue_AI_Multiplayer's skip-CRC timer still has time
+			// left, as it does at the start of a game, so neither does this.
 			if (recorded.Type == EventType::FrameInfo)
 			{
 				const int checkedFrame = static_cast<int>(recorded.Frame) - recorded.FrameInfo.Delay;
 				const int age = static_cast<int>(Unsorted::CurrentFrame) - checkedFrame;
 				const bool comparable = recorded.Frame == static_cast<unsigned int>(Unsorted::CurrentFrame)
-					&& age >= 0 && age < static_cast<int>(std::size(EventClass::LatestFramesCRC));
+					&& age >= 0 && age < static_cast<int>(std::size(EventClass::LatestFramesCRC))
+					&& GameTimers::QueueAIMultiplayerSkipCRC.GetTimeLeft() == 0;
 
 				recorded.FrameInfo.CRC = !comparable ? FrameInfoCheck_NotChecked
 					: EventClass::LatestFramesCRC[checkedFrame & 0xFF] == recorded.FrameInfo.CRC
