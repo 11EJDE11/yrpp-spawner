@@ -41,16 +41,20 @@
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.Desyncs.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.ExceptionCatch.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.IsoMapPack5Limit.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.LocalInterfaces.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.PlanningMode.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.SaveLoad.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\CopyProtection.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\DisableEdgeScrolling.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\GameSpeed.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\InGameChat.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\MPDebug.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\NoCD.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Observers.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Observers.Visibility.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\QuickExit.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\SavedGamesInSubdir.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\SilentCheer.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\SkipCreateAppMutex.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\SkipScoreScreen.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\VideoMode.cpp" />
@@ -101,9 +105,7 @@
     <ClCompile Include="$(ThisDir)\src\Spawner\Spawner.Hook.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\Statistics.cpp" />
     <!-- UI -->
-    <ClCompile Include="$(ThisDir)\src\UI\Dialogs.cpp" />
-    <ClCompile Include="$(ThisDir)\src\UI\Hooks.cpp" />
-    <ResourceCompile Include="$(ThisDir)\src\UI\MultiplayerGameOptionsDialog.rc" />
+    <ClCompile Include="$(ThisDir)\src\UI\Hooks.SaveButton.cpp" />
     <!-- Utilities -->
     <ClCompile Include="$(ThisDir)\src\Utilities\Debug.cpp" />
     <ClCompile Include="$(ThisDir)\src\Utilities\Patch.cpp" />
@@ -157,7 +159,6 @@
     <ClInclude Include="$(ThisDir)\src\Spawner\Spawner.Config.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\Spawner.h" />
     <!-- UI -->
-    <ClInclude Include="$(ThisDir)\src\UI\Dialogs.h" />
     <!-- Utilities -->
     <ClInclude Include="$(ThisDir)\src\Utilities\Debug.h" />
     <ClInclude Include="$(ThisDir)\src\Utilities\DumperTypes.h" />

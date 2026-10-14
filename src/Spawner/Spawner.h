@@ -25,8 +25,12 @@
 class Spawner
 {
 public:
+#if defined(IS_HARDENED_VER) || defined(IS_CNCNET_YR_VER)
+	static constexpr bool Enabled = true;
+#else
 	static bool Enabled;
-	static bool Active;
+#endif
+	static bool Started;
 	static bool DoSave;
 	static int NextAutoSaveFrame;
 	static int NextAutoSaveNumber;

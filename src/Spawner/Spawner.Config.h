@@ -103,6 +103,7 @@ public:
 	int AutoSaveCount;
 	int AutoSaveInterval;
 	int NextAutoSaveNumber;
+	bool ShowMPSaveGameButton;
 
 	// Replay Options
 	bool EnableReplayRecording;
@@ -217,6 +218,7 @@ public:
 		, AutoSaveCount { 5 }
 		, AutoSaveInterval { 7200 }
 		, NextAutoSaveNumber { 0 }
+		, ShowMPSaveGameButton { true }
 		, EnableReplayRecording { false }
 		, ReplayFileOut { "replay.yrrp" }
 		, ReplayFile { "" }

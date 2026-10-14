@@ -17,6 +17,7 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <SessionClass.h>
 #include "Main.Config.h"
 #include <Utilities/Debug.h>
 #include <Utilities/Macro.h>
@@ -74,17 +75,6 @@ void MainConfig::ApplyStaticOptions()
 		Game::EnableMPDebug     = true;
 		Game::EnableMPSyncDebug = true;
 		Game::DrawMPDebugStats  = this->MPDebugShow;
-
-		// Fixes text layout in the MPDebug panel
-		Patch::Apply_TYPED<DWORD>(0x542A19, { 312 });
-		Patch::Apply_TYPED<DWORD>(0x542AA6, { 322 });
-		Patch::Apply_TYPED<DWORD>(0x542B08, { 332 });
-		Patch::Apply_TYPED<DWORD>(0x542B72, { 342 });
-		Patch::Apply_TYPED<DWORD>(0x542BD4, { 352 });
-		Patch::Apply_TYPED<DWORD>(0x542C94, { 362 });
-		Patch::Apply_TYPED<DWORD>(0x542CF7, { 372 });
-		Patch::Apply_TYPED<DWORD>(0x542D5E, { 382 });
-		Patch::Apply_TYPED<DWORD>(0x542DC2, { 392 });
 	}
 
 	if (this->SingleProcAffinity)
@@ -111,8 +101,7 @@ void MainConfig::ApplyStaticOptions()
 		speedControl = true;
 	}
 
-	auto& LANTaunts = *reinterpret_cast<bool*>(0xA8D110u);
-	LANTaunts = this->AllowTaunts;
+	SessionClass::Instance.LANTaunts = this->AllowTaunts;
 
 	// Set 3rd party ddraw.dll options
 	if (HMODULE hDDraw = LoadLibraryA("ddraw.dll"))

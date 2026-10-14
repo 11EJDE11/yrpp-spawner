@@ -54,13 +54,14 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 	}
 
 	{ // SaveGame Options
-		LoadSaveGame       = pINI->ReadBool(pSettingsSection, "LoadSaveGame", LoadSaveGame);
-		/* SavedGameDir   */ pINI->ReadString(pSettingsSection, "SavedGameDir", SavedGameDir, SavedGameDir, sizeof(SavedGameDir));
-		/* SaveGameName   */ pINI->ReadString(pSettingsSection, "SaveGameName", SaveGameName, SaveGameName, sizeof(SaveGameName));
-		CustomMissionID  = pINI->ReadInteger(pSettingsSection, "CustomMissionID", 0);
-		AutoSaveCount      = pINI->ReadInteger(pSettingsSection, "AutoSaveCount", AutoSaveCount);
-		AutoSaveInterval   = pINI->ReadInteger(pSettingsSection, "AutoSaveInterval", AutoSaveInterval);
-		NextAutoSaveNumber = pINI->ReadInteger(pSettingsSection, "NextAutoSaveNumber", NextAutoSaveNumber);
+		LoadSaveGame         = pINI->ReadBool(pSettingsSection, "LoadSaveGame", LoadSaveGame);
+		/* SavedGameDir     */ pINI->ReadString(pSettingsSection, "SavedGameDir", SavedGameDir, SavedGameDir, sizeof(SavedGameDir));
+		/* SaveGameName     */ pINI->ReadString(pSettingsSection, "SaveGameName", SaveGameName, SaveGameName, sizeof(SaveGameName));
+		CustomMissionID      = pINI->ReadInteger(pSettingsSection, "CustomMissionID", 0);
+		AutoSaveCount        = pINI->ReadInteger(pSettingsSection, "AutoSaveCount", AutoSaveCount);
+		AutoSaveInterval     = pINI->ReadInteger(pSettingsSection, "AutoSaveInterval", AutoSaveInterval);
+		NextAutoSaveNumber   = pINI->ReadInteger(pSettingsSection, "NextAutoSaveNumber", NextAutoSaveNumber);
+		ShowMPSaveGameButton = pINI->ReadBool(pSettingsSection, "ShowMPSaveGameButton", ShowMPSaveGameButton);
 
 		EnableReplayRecording    = pINI->ReadBool(pSettingsSection, "EnableReplayRecording", EnableReplayRecording);
 		/* ReplayFileOut        */ pINI->ReadString(pSettingsSection, "ReplayFileOut", ReplayFileOut, ReplayFileOut, sizeof(ReplayFileOut));
@@ -78,14 +79,14 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 	}
 
 	{ // Scenario Options
-		Seed             = pINI->ReadInteger(pSettingsSection, "Seed", Seed);
-		TechLevel        = pINI->ReadInteger(pSettingsSection, "TechLevel", TechLevel);
-		IsCampaign       = pINI->ReadBool(pSettingsSection, "IsSinglePlayer", IsCampaign);
-		Tournament       = pINI->ReadInteger(pSettingsSection, "Tournament", Tournament);
-		WOLGameID        = pINI->ReadInteger(pSettingsSection, "GameID", WOLGameID);
-		/* ScenarioName */ pINI->ReadString(pSettingsSection, "Scenario", ScenarioName, ScenarioName, sizeof(ScenarioName));
-		/* MapHash      */ pINI->ReadString(pSettingsSection, "MapHash", MapHash, MapHash, sizeof(MapHash));
-		ReadMissionSection  = pINI->ReadBool(pSettingsSection, "ReadMissionSection", ReadMissionSection);
+		Seed               = pINI->ReadInteger(pSettingsSection, "Seed", Seed);
+		TechLevel          = pINI->ReadInteger(pSettingsSection, "TechLevel", TechLevel);
+		IsCampaign         = pINI->ReadBool(pSettingsSection, "IsSinglePlayer", IsCampaign);
+		Tournament         = pINI->ReadInteger(pSettingsSection, "Tournament", Tournament);
+		WOLGameID          = pINI->ReadInteger(pSettingsSection, "GameID", WOLGameID);
+		/* ScenarioName   */ pINI->ReadString(pSettingsSection, "Scenario", ScenarioName, ScenarioName, sizeof(ScenarioName));
+		/* MapHash        */ pINI->ReadString(pSettingsSection, "MapHash", MapHash, MapHash, sizeof(MapHash));
+		ReadMissionSection = pINI->ReadBool(pSettingsSection, "ReadMissionSection", ReadMissionSection);
 
 		if (INIClassExt::ReadString_WithoutAresHook(pINI, pSettingsSection, "UIMapName", "", Main::readBuffer, sizeof(Main::readBuffer)) > 0)
 			MultiByteToWideChar(CP_UTF8, 0, Main::readBuffer, strlen(Main::readBuffer), UIMapName, std::size(UIMapName));
