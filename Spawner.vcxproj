@@ -58,6 +58,11 @@
     <ClCompile Include="$(ThisDir)\src\Misc\SkipCreateAppMutex.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\SkipScoreScreen.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\VideoMode.cpp" />
+    <!-- Perf -->
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.Blitters.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.CellShadow.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.MapRevealer.cpp" />
     <!-- Replay -->
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Serialization.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayControls.cpp" />
@@ -127,6 +132,8 @@
     <ClInclude Include="$(ThisDir)\src\CnCNetYR\Ra2Mode.h" />
     <!-- Misc -->
     <ClInclude Include="$(ThisDir)\src\Misc\Bugfixes.Desyncs.h" />
+    <!-- Perf -->
+    <ClInclude Include="$(ThisDir)\src\Perf\Perf.h" />
     <!-- Replay -->
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayControls.h" />
     <ClInclude Include="$(ThisDir)\src\Replay\ReplayFrameCodec.h" />
