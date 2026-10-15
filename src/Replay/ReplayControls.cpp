@@ -55,6 +55,9 @@ namespace ReplaySystem
 				// Input runs after frame preparation, so resuming must wait for frame start.
 				bool ResumePending = false;
 				bool ControlBarVisible = false;
+				// Performance-counter time the next frame is drawn at when playing faster than the
+				// display refreshes.
+				double NextRenderDue = 0.0;
 			};
 
 			PlaybackControlState State;
@@ -81,6 +84,7 @@ namespace ReplaySystem
 			void SetPausedState(bool paused)
 			{
 				State.Paused = paused;
+				State.NextRenderDue = 0.0;
 				// Never carry a pre-pause or single-step deadline into resumed playback. Starting the
 				// pacing clock afresh prevents a burst of unpaced frames on resume.
 				State.NextFrameDue = 0.0;
@@ -180,6 +184,46 @@ namespace ReplaySystem
 		void ResetFramePacing()
 		{
 			State.NextFrameDue = 0.0;
+		}
+
+		bool ShouldSkipRenderForDisplayRate()
+		{
+			if (!ReplayState.Playback || State.Paused || ReplaySystem::Seek::IsSeeking())
+				return false;
+
+			const auto* pConfig = GetConfig();
+			if (pConfig && !pConfig->ReplayRenderAtDisplayRate)
+				return false;
+
+			static int refreshRate = 0;
+			if (refreshRate == 0)
+			{
+				DEVMODEW mode {};
+				mode.dmSize = sizeof(mode);
+				refreshRate = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1
+					? std::clamp(static_cast<int>(mode.dmDisplayFrequency), 30, 500)
+					: 60;
+			}
+
+			// At or below the display rate every frame can be shown, and skipping one on timer
+			// jitter would only make playback stutter.
+			if (State.FrameRate <= refreshRate)
+			{
+				State.NextRenderDue = 0.0;
+				return false;
+			}
+
+			const double interval = 1000.0 / refreshRate;
+			const double now = PlaybackClockMilliseconds();
+			if (State.NextRenderDue != 0.0 && now < State.NextRenderDue)
+				return true;
+
+			// Keep to the display's cadence, but do not try to catch up on draws a slow frame missed.
+			if (State.NextRenderDue == 0.0 || now - State.NextRenderDue > interval)
+				State.NextRenderDue = now;
+
+			State.NextRenderDue += interval;
+			return false;
 		}
 
 		bool HasPlaybackSpeed()

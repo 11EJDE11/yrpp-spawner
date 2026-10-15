@@ -74,6 +74,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		ReplayShowChatAndBeacons     = pINI->ReadBool(pSettingsSection, "ReplayShowChatAndBeacons", ReplayShowChatAndBeacons);
 		ReplayViewPlayer             = pINI->ReadInteger(pSettingsSection, "ReplayViewPlayer", ReplayViewPlayer);
 		ReplayControlBar             = pINI->ReadBool(pSettingsSection, "ReplayControlBar", ReplayControlBar);
+		ReplayRenderAtDisplayRate    = pINI->ReadBool(pSettingsSection, "ReplayRenderAtDisplayRate", ReplayRenderAtDisplayRate);
 		ReplayKeyframeInterval        = pINI->ReadInteger(pSettingsSection, "ReplayKeyframeInterval", ReplayKeyframeInterval);
 		ReplayKeyframeStorageLimitMB  = pINI->ReadInteger(pSettingsSection, "ReplayKeyframeStorageLimitMB", ReplayKeyframeStorageLimitMB);
 	}

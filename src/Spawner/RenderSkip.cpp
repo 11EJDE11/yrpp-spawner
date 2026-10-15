@@ -27,6 +27,7 @@
 #include <Unsorted.h>
 #include <Utilities/Debug.h>
 #include <Replay/ReplaySeek.h>
+#include <Replay/ReplayControls.h>
 
 bool RenderSkip::Enabled = true;
 int  RenderSkip::MinProcessMs = 20;
@@ -267,6 +268,9 @@ DEFINE_HOOK(0x55D8F2, MainLoop_Render_RenderSkip, 0x5)
 	enum { Resume = 0x55D8F7 };
 
 	GET(GScreenClass*, screen, ECX);
+
+	if (ReplaySystem::Controls::ShouldSkipRenderForDisplayRate())
+		return Resume;
 
 	if (ReplaySystem::Seek::IsSeeking())
 	{

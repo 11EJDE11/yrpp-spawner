@@ -35,6 +35,11 @@ namespace ReplaySystem
 
 		void ApplyFramePacing();
 		void ResetFramePacing();
+
+		// Whether to leave this frame undrawn because playback is running faster than the display
+		// can show. Draws at the display's refresh rate and skips the frames in between; never
+		// skips while paused, seeking, or running no faster than the display.
+		bool ShouldSkipRenderForDisplayRate();
 		// Whether a playback rate is initialized (used by the options-dialog hooks).
 		bool HasPlaybackSpeed();
 

@@ -777,6 +777,7 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayShowChatAndBeacons` | `true` | Playback only; recording of this data is unconditional. |
 | `ReplayPlaybackSpeed` | `0` | Playback frame rate in FPS. `0` uses the recorded speed. |
 | `ReplayViewPlayer` | `-1` | Which player's screen to watch the recording from. See below. |
+| `ReplayRenderAtDisplayRate` | `true` | When playback runs faster than the monitor refreshes, simulate every frame but only draw at the refresh rate. Never applies while paused, seeking, or at or below the refresh rate. |
 | `ReplayControlBar` | `false` | Draw the on-screen playback controls during playback. Toggled with a hotkey; no client UI sets this. See below. |
 | `ReplayKeyframeInterval` | `750` | Frames between playback-generated keyframes. `0` still permits embedded checkpoints. |
 | `ReplayKeyframeStorageLimitMB` | `512` | Maximum temporary keyframe storage in MB. `0` disables the limit. |

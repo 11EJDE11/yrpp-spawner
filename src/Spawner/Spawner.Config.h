@@ -126,6 +126,7 @@ public:
 	int  ReplayViewPlayer;
 	// Show the playback control bar initially.
 	bool ReplayControlBar;
+	bool ReplayRenderAtDisplayRate;
 	// Frames between playback keyframes. Zero still allows recorded checkpoints.
 	int  ReplayKeyframeInterval;
 	// Maximum keyframe storage in MB. Zero disables the limit.
@@ -231,6 +232,7 @@ public:
 		, ReplayShowChatAndBeacons { true }
 		, ReplayViewPlayer { -1 }
 		, ReplayControlBar { false }
+		, ReplayRenderAtDisplayRate { true }
 		, ReplayKeyframeInterval { 750 }
 		, ReplayKeyframeStorageLimitMB { 512 }
 
