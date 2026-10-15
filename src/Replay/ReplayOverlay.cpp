@@ -24,6 +24,7 @@
 
 #include <Drawing.h>
 #include <Surface.h>
+#include <Unsorted.h>
 
 #include <windows.h>
 
@@ -235,6 +236,7 @@ namespace ReplaySystem
 			struct InteractionState
 			{
 				bool LeftDownLastFrame = false;
+				bool HadFocus = false;
 				int PressedButton = -1;
 				bool DraggingHandle = false;
 				int ScrubFrame = 0;
@@ -245,9 +247,23 @@ namespace ReplaySystem
 
 			InteractionState Interaction;
 
-			bool IsLeftButtonDown()
+			// GetAsyncKeyState reports the physical button whichever window it is pressed over, so a
+			// click in another program would otherwise drive the seek bar at wherever the game last
+			// saw the cursor. GameInFocus is no help: with cnc-ddraw's noactivateapp the game is never
+			// told it lost focus.
+			bool GameHasFocus()
+			{
+				return Game::hWnd && GetForegroundWindow() == Game::hWnd;
+			}
+
+			bool IsPhysicalLeftButtonDown()
 			{
 				return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+			}
+
+			bool IsLeftButtonDown()
+			{
+				return GameHasFocus() && IsPhysicalLeftButtonDown();
 			}
 
 			int FrameAtTrackPosition(const PanelLayout& layout, int mouseX)
@@ -456,6 +472,20 @@ namespace ReplaySystem
 
 		bool ProcessMouseInput(int mouseX, int mouseY)
 		{
+			if (!GameHasFocus())
+			{
+				CancelInteraction();
+				Interaction.HadFocus = false;
+				return false;
+			}
+
+			// The click that brought the window back to the front is not a press on the panel.
+			if (!Interaction.HadFocus)
+			{
+				Interaction.HadFocus = true;
+				Interaction.LeftDownLastFrame = IsPhysicalLeftButtonDown();
+			}
+
 			const bool leftDown = IsLeftButtonDown();
 			const PanelLayout layout = ComputeLayout();
 
