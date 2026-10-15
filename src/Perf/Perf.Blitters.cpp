@@ -17,8 +17,9 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
-// The three blitters that draw most of a busy battlefield, one scanline per call:
+// The four blitters that draw most of a busy battlefield, one scanline per call:
 //   0x497FD0 RLEBlitTransXlatAlphaZRead::Blit - building animations and other RLE shapes
+//   0x4990E0 the same blitter writing Z      - terrain objects and other shapes drawn into the tile layer
 //   0x494B60 BlitTransXlatAlphaZRead::Blit    - every vehicle's cached voxel image
 //   0x491820 RLEBlitTransXlat<BYTE>::Blit     - decoding that voxel image into the 8-bit scratch surface
 // The 16-bit ones test each pixel against the Z buffer and light it through the alpha buffer.
@@ -165,6 +166,90 @@ public:
 		}
 	}
 
+	// 0x4990E0, the same with a Z write: a pixel in front of the Z buffer is drawn and its depth
+	// stored. Returns the Z pointer where the line ended, as the original does.
+	WORD* BlitRLEWriteZ(WORD* pDst, const BYTE* pSrc, int count, int skip, int zBase, WORD* pZ, WORD* pA,
+		int alphaLevel, int unused, const signed char* pZShape) const
+	{
+		const WORD* const pAlphaRow = AlphaRow(alphaLevel);
+		auto const pZBuffer = ZBuffer::Instance;
+		auto const pABuffer = ABuffer::Instance;
+
+		if (skip > 0)
+		{
+			int remaining = skip;
+			do
+			{
+				if (*pSrc++)
+					--remaining;
+				else
+					remaining -= *pSrc++;
+			}
+			while (remaining > 0);
+
+			const int overshoot = -remaining;
+			pDst += overshoot;
+			count -= overshoot;
+			pZ += overshoot;
+			pZBuffer->AdjustPointer(pZ);
+			pA += overshoot;
+			pABuffer->AdjustPointer(pA);
+		}
+
+		if (count <= 0)
+			return pZ;
+
+		PrefetchNextRow(pZBuffer, pZ, count);
+		PrefetchNextRow(pABuffer, pA, count);
+
+		for (;;)
+		{
+			if (const BYTE first = *pSrc++)
+			{
+				const ptrdiff_t block = std::min<ptrdiff_t>(
+					std::min(PixelsBeforeWrap(pZBuffer, pZ), PixelsBeforeWrap(pABuffer, pA)), count);
+
+				BYTE pixel = first;
+				ptrdiff_t done = 0;
+				for (;;)
+				{
+					const int z = zBase - *pZShape++;
+					if (z < *pZ)
+					{
+						*pDst = Lit(pixel, pAlphaRow, pA);
+						*pZ = static_cast<WORD>(z);
+					}
+
+					++pDst;
+					++pZ;
+					++pA;
+
+					if (++done == block || !*pSrc)
+						break;
+
+					pixel = *pSrc++;
+				}
+
+				count -= static_cast<int>(done);
+			}
+			else
+			{
+				const BYTE run = *pSrc++;
+				count -= run;
+				pZShape += run;
+				pDst += run;
+				pZ += run;
+				pA += run;
+			}
+
+			pZBuffer->AdjustPointer(pZ);
+			pABuffer->AdjustPointer(pA);
+
+			if (count <= 0)
+				return pZ;
+		}
+	}
+
 	// 0x494B60
 	void Blit(WORD* pDst, const BYTE* pSrc, int size, int zValue, WORD* pZ, WORD* pA, int alphaLevel, int warp) const
 	{
@@ -247,5 +332,6 @@ public:
 };
 
 DEFINE_FUNCTION_JUMP(LJMP, 0x497FD0, AlphaBlitterPerf::BlitRLE);
+DEFINE_FUNCTION_JUMP(LJMP, 0x4990E0, AlphaBlitterPerf::BlitRLEWriteZ);
 DEFINE_FUNCTION_JUMP(LJMP, 0x494B60, AlphaBlitterPerf::Blit);
 DEFINE_FUNCTION_JUMP(LJMP, 0x491820, ByteBlitterPerf::BlitRLE);

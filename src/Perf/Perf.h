@@ -21,8 +21,9 @@
 
 // Engine speed-ups that change nothing the game computes, only how fast it computes it. Each one is a
 // drop-in replacement with the original's exact results and side effects, so a game stays in sync
-// with players who do not have them. Cell_Shadow and the blitters are static jumps; the MapRevealer
-// takeover has to wait for Syringe's hooks and check which Ares it is replacing.
+// with players who do not have them. Cell_Shadow and the blitters are static jumps, the tile drawer's
+// row loop is a hook; the MapRevealer takeover has to wait for Syringe's hooks and check which Ares it
+// is replacing.
 
 namespace Perf
 {
