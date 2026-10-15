@@ -83,6 +83,16 @@ DEFINE_HOOK(0x4D7EB5, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x5)
 	return 0x4D7EBA;
 }
 
+// SidebarClass::StripClass::SelectClass::Action, a click on a sidebar cameo. Playback discards the
+// order it sends, but the cameo still marks itself as starting and stays that way, as nothing ever
+// arrives to clear it. Ignore the click, as the strip does when it has no owner.
+DEFINE_HOOK(0x6AAD0D, SidebarCameoClick_IgnoreDuringPlayback, 0x5)
+{
+	enum { Ignored = 0x6AAD14 };
+
+	return ReplayState.Playback ? Ignored : 0;
+}
+
 // Init_Random. Seed playback from the replay header rather than from the clock, so the simulation
 // starts from the RNG state the recording started from.
 DEFINE_HOOK(0x52FC42, InitRandom_CheckReplayMode, 0x7)
