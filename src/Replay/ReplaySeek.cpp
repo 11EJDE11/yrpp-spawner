@@ -30,19 +30,27 @@
 #include <Utilities/Debug.h>
 #include <Vendor/miniz/miniz.h>
 
+#include <AircraftTypeClass.h>
+#include <BuildingClass.h>
+#include <BuildingTypeClass.h>
 #include <EBolt.h>
 #include <EventClass.h>
 #include <FootClass.h>
 #include <GameModeOptionsClass.h>
 #include <GameOptionsClass.h>
+#include <HouseClass.h>
+#include <InfantryTypeClass.h>
 #include <LoadOptionsClass.h>
 #include <MouseClass.h>
 #include <Memory.h>
 #include <RadBeam.h>
 #include <ScenarioClass.h>
+#include <SidebarClass.h>
+#include <SuperClass.h>
 #include <SessionClass.h>
 #include <Surface.h>
 #include <TacticalClass.h>
+#include <UnitTypeClass.h>
 #include <Unsorted.h>
 #include <VocClass.h>
 
@@ -445,6 +453,142 @@ namespace ReplaySystem
 					sizeof(EventClass::MegaMissionTargets));
 			}
 
+			// Game functions YRpp has no wrappers for. The game only ever calls them for the local player.
+			class SidebarAccess final : public SidebarClass
+			{
+			public:
+				// SidebarClass::Factory_Link; Ares redirects it into its own cameo lists.
+				bool LinkFactory(FactoryClass* pFactory, AbstractType type, int index)
+					{ JMP_THIS(0x6A6140); }
+			};
+
+			struct StripAccess final : public StripClass
+			{
+				// StripClass::Recalc, which Ares replaces: drops cameos the current player cannot build.
+				bool Recalc()
+					{ JMP_THIS(0x6AA600); }
+			};
+
+			class BuildingAccess final : public BuildingClass
+			{
+			public:
+				// Adds the cameos this building enables, when it belongs to the current player.
+				void UpdateBuildables()
+					{ JMP_THIS(0x4456D0); }
+			};
+
+			static_assert(sizeof(BuildType) == 0x34);
+			static_assert(offsetof(BuildType, unknown_10) == 0x10);
+
+			// Ares keeps the cameos in its own DynamicVectorClass<BuildType>[4] instead of the strips. Its
+			// SidebarClass::Factory_Link replacement walks them, and the two instructions that read the
+			// vector name its Items and Count: mov eax, [Items + ecx*8] at +0x19 and
+			// imul ecx, [Count + ecx*8], 0x34 at +0x20.
+			DynamicVectorClass<BuildType>* FindAresCameoLists()
+			{
+				static DynamicVectorClass<BuildType>* const pLists = []() -> DynamicVectorClass<BuildType>*
+				{
+					const HMODULE ares = GetModuleHandleA("Ares.dll");
+					auto const pCode = ares ? reinterpret_cast<const unsigned char*>(
+						GetProcAddress(ares, "SidebarClass_SetFactoryForObject")) : nullptr;
+					const unsigned char readItems[] = { 0x8B, 0x04, 0xCD };
+					const unsigned char readCount[] = { 0x6B, 0x0C, 0xCD };
+					if (!pCode || memcmp(pCode + 0x19, readItems, sizeof(readItems))
+						|| memcmp(pCode + 0x20, readCount, sizeof(readCount)) || pCode[0x27] != sizeof(BuildType))
+					{
+						Debug::Log("[Replay] This Ares build keeps its sidebar cameos where the replay cannot find "
+							"them; cameos clicked before a checkpoint may stay drawn as starting.\n");
+						return nullptr;
+					}
+
+					uintptr_t items = 0;
+					uintptr_t count = 0;
+					memcpy(&items, pCode + 0x1C, sizeof(items));
+					memcpy(&count, pCode + 0x23, sizeof(count));
+					constexpr auto itemsOffset = offsetof(DynamicVectorClass<BuildType>, Items);
+					constexpr auto countOffset = offsetof(DynamicVectorClass<BuildType>, Count);
+					if (count - items != countOffset - itemsOffset)
+						return nullptr;
+
+					return reinterpret_cast<DynamicVectorClass<BuildType>*>(items - itemsOffset);
+				}();
+
+				return pLists;
+			}
+
+			// A checkpoint recorded during the game carries the recording player's sidebar - Ares saves
+			// the cameo lists with it - so after a load it lists their buildables and points at their
+			// factories, while playback watches someone else. The game only unlinks a factory from the
+			// sidebar when the factory belongs to the current player, so once those factories finish or
+			// are cancelled the sidebar points at freed memory: the build queue shows the wrong items,
+			// and the strip update can crash. Rebuild it for the house being watched. All of this is
+			// local display state; nothing here reaches the simulation.
+			void RebuildSidebarForCurrentPlayer()
+			{
+				HouseClass* const pPlayer = HouseClass::CurrentPlayer;
+				if (!pPlayer)
+					return;
+
+				auto& sidebar = static_cast<SidebarAccess&>(SidebarClass::Instance);
+
+				// Every cameo points at the watched house's factory for its type, or at none.
+				auto relink = [&sidebar, pPlayer](auto const& types)
+				{
+					for (int i = 0; i < types.Count; ++i)
+					{
+						auto const pType = types.Items[i];
+						sidebar.LinkFactory(pPlayer->GetFactoryProducing(pType), pType->WhatAmI(), i);
+					}
+				};
+				relink(BuildingTypeClass::Array);
+				relink(InfantryTypeClass::Array);
+				relink(UnitTypeClass::Array);
+				relink(AircraftTypeClass::Array);
+
+				// A cameo also keeps the state of the local player's last click on it: 1 while the order to
+				// start is on its way, 2 on hold. These are the recording player's, so a building they had
+				// just clicked stayed drawn as starting, with no progress, and greyed out every other
+				// building. Nobody clicks during playback, so none has one.
+				if (auto const pLists = FindAresCameoLists())
+				{
+					for (int tab = 0; tab < 4; ++tab)
+					{
+						for (auto& cameo : pLists[tab])
+							cameo.unknown_10 = 0;
+					}
+				}
+
+				for (auto& strip : sidebar.Tabs)
+					static_cast<StripAccess&>(strip).Recalc();
+
+				for (auto const pBuilding : BuildingClass::Array)
+				{
+					if (pBuilding->Owner == pPlayer)
+						static_cast<BuildingAccess*>(pBuilding)->UpdateBuildables();
+				}
+
+				for (int i = 0; i < pPlayer->Supers.Count; ++i)
+				{
+					if (pPlayer->Supers.Items[i]->IsPresent)
+						sidebar.AddCameo(AbstractType::Special, i);
+				}
+
+				// A building waiting to be placed belongs to whoever was the current player at the save.
+				if (MouseClass::Instance.CurrentBuildingOwnerArrayIndex != pPlayer->ArrayIndex)
+				{
+					MouseClass::Instance.CurrentBuilding = nullptr;
+					MouseClass::Instance.CurrentBuildingType = nullptr;
+					MouseClass::Instance.CurrentBuildingOwnerArrayIndex = -1;
+					MouseClass::Instance.SetActiveFoundation(nullptr);
+				}
+
+				// Drawn on the next frame, not in the middle of the load.
+				sidebar.SidebarNeedsRedraw = true;
+				sidebar.SidebarBackgroundNeedsRedraw = true;
+				for (auto& strip : sidebar.Tabs)
+					strip.NeedsRedraw = true;
+			}
+
 			bool RestorePlaybackAfterLoad(const Keyframe& keyframe)
 			{
 				const int keyframeFrame = keyframe.Frame;
@@ -464,6 +608,7 @@ namespace ReplaySystem
 				ReplaySystem::ReapplyPlaybackSpectator();
 				keyframe.Snapshot.RestoreAfterResume(keyframeFrame, ReplayState.ShowChatAndBeacons);
 				SnapCreditsCounter();
+				RebuildSidebarForCurrentPlayer();
 
 				if (ReplayState.HasPlaybackHeader)
 				{
