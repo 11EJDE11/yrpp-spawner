@@ -138,8 +138,8 @@ namespace ReplaySystem::KeyframeState::Detail
 				PlanningMemberSnapshot member {};
 				member.Present = true;
 				member.OwnerId = UniqueIDOf(pMember->Owner);
-				if (pMember->Packet)
-					memcpy(member.Packet.data(), pMember->Packet, sizeof(EventClass));
+				if (pMember->Order)
+					memcpy(member.Packet.data(), pMember->Order, sizeof(EventClass));
 				member.Field8 = pMember->field_8;
 				member.FieldC = pMember->field_C;
 				node.Members.push_back(std::move(member));
@@ -324,9 +324,9 @@ namespace ReplaySystem::KeyframeState::Detail
 				auto* const pMember = static_cast<PlanningMemberClass*>(
 					YRMemory::AllocateChecked(sizeof(PlanningMemberClass)));
 				pMember->Owner = findTechno(savedMember.OwnerId);
-				pMember->Packet = static_cast<EventClass*>(
+				pMember->Order = static_cast<EventClass*>(
 					YRMemory::AllocateChecked(sizeof(EventClass)));
-				memcpy(pMember->Packet, savedMember.Packet.data(), sizeof(EventClass));
+				memcpy(pMember->Order, savedMember.Packet.data(), sizeof(EventClass));
 				pMember->field_8 = savedMember.Field8;
 				pMember->field_C = savedMember.FieldC;
 				if (!pNode->PlanningMembers.AddItem(pMember))
