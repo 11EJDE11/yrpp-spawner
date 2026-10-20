@@ -718,8 +718,10 @@ message into the lockstep stream, where every player's copy holds it on the same
 
 When a player sends a message, `MessageSend_DisableChat` (0x55EF38, just before the send loop) gives
 it a fresh 16-byte random salt and puts it in the chat packet after the vanilla fields, behind a
-`YRC2` magic: at offset 274 the magic, the salt, a uint8 saying whether there is one, then the
-[recipients](#chat-recipients). The packet goes out at the full `GlobalPacketType` size (455 bytes)
+`YRC2` magic: at offset 280 the magic, the salt, a uint8 saying whether there is one, then the
+[recipients](#chat-recipients). The vanilla fields end with two dwords, the sender's colour at 272 and
+at 276 a checksum the receiver recomputes (0x48D8F0) and drops the message on a mismatch, so nothing
+of the spawner's may start before 280. The packet goes out at the full `GlobalPacketType` size (455 bytes)
 and arrives whole in `GPacket` (0xA8D638, 456 bytes long), so all of it reaches every recipient. When the message is
 printed locally (`MessageInput_Print`, 0x55F0A8), the sender queues a `ChatFingerprint` event
 (`EventTypeExt` 0x31) holding the first 16 bytes of

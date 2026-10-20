@@ -50,8 +50,9 @@ struct GlobalPacket_NetMessage
 	byte HouseIndex;
 	byte ChatID;
 	wchar_t Message[112];
-	byte Color;
-	byte CRC;
+	int Color;          // Message_Input writes the sender's colour as a whole dword (0x55EE0A)
+	uint32_t Checksum;  // 0x5DAC00 of the string at 0xA8D610 (0x55EE14); a receiver that gets another
+	                    // value drops the message (NetworkCallBack, 0x48D8F0)
 	// Past the vanilla fields. The packet goes out at the full GlobalPacketType size (455 bytes) and
 	// arrives whole in this buffer, so the spawner's own fields ride along here: the salt of the
 	// message's ChatFingerprint, and who the sender sent it to.
@@ -64,7 +65,8 @@ struct GlobalPacket_NetMessage
 
 #pragma pack(pop)
 
-static_assert(offsetof(GlobalPacket_NetMessage, ExtMagic) == 274);
+static_assert(offsetof(GlobalPacket_NetMessage, Checksum) == 276);
+static_assert(offsetof(GlobalPacket_NetMessage, ExtMagic) == 280);
 static_assert(sizeof(GlobalPacket_NetMessage) <= 455);
 
 // What Message_Input's send loop reads off each house (0x55EEAA): its type, then the type's Multiplay.
@@ -313,7 +315,7 @@ DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 	{
 		if (pRecordHouse)
 		{
-			GlobalPacket_NetMessage::Instance.Color = (byte)pRecordHouse->ColorSchemeIndex;
+			GlobalPacket_NetMessage::Instance.Color = pRecordHouse->ColorSchemeIndex;
 			InGameChat::ComposeSenderName(ReceivedSenderName, std::size(ReceivedSenderName), pRecordHouse->UIName, label);
 			R->ESI(ReceivedSenderName);
 			return PrintMessage;
