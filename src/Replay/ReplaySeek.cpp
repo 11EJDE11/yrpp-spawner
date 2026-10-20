@@ -610,6 +610,11 @@ namespace ReplaySystem
 				SnapCreditsCounter();
 				RebuildSidebarForCurrentPlayer();
 
+				// The checkpoint also brings back the recording player's selection. Following the
+				// recorded selection, that is the right one; otherwise playback never selects anything.
+				if (!ReplayState.SelectUnits)
+					MapClass::UnselectAll();
+
 				if (ReplayState.HasPlaybackHeader)
 				{
 					const int recordedGameSpeed = std::clamp(
