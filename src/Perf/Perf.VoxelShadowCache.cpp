@@ -43,3 +43,7 @@ DEFINE_HOOK(0x73C459, UnitClass_DrawAsVXL_ShadowCacheKey, 0x5)
 
 	return mayDrop ? 0 : KeepKey;
 }
+
+// The voxel cache is one 4 MB block (0x40F270), and a game full of Siege Choppers fills it, which throws
+// every cached image away. Phobos 0.5 makes it 128 MB with this same patch; remove this with Phobos 0.5.
+DEFINE_PATCH(0x40F271, 0x00, 0x00, 0x00, 0x08);
