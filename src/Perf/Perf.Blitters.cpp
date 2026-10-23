@@ -27,15 +27,17 @@
 // The originals re-load the buffer globals and spill their counters to the stack every pixel. These
 // keep everything in registers, run through stretches of pixels where neither ring buffer can wrap
 // before testing for the wrap, and fetch the next row of both buffers ahead of the next call, which
-// is where the time actually went. Every pixel written, every pointer step and the returned count
-// are the original's.
+// is where the time actually went. A voxel image is mostly transparent, so the voxel blitter skips
+// transparent source pixels 16 at a time. Every pixel written, every pointer step and the returned
+// count are the original's.
 
 #include <Drawing.h>
 
 #include <Utilities/Macro.h>
 
 #include <algorithm>
-#include <xmmintrin.h>
+#include <emmintrin.h>
+#include <intrin.h>
 
 namespace
 {
@@ -267,7 +269,23 @@ public:
 			const ptrdiff_t block = std::min<ptrdiff_t>(
 				std::min(PixelsBeforeWrap(pZBuffer, pZ), PixelsBeforeWrap(pABuffer, pA)), size);
 
-			for (ptrdiff_t i = 0; i < block; ++i)
+			ptrdiff_t i = 0;
+			for (; i + 16 <= block; i += 16)
+			{
+				const __m128i src = _mm_loadu_si128(reinterpret_cast<const __m128i*>(pSrc + i));
+				unsigned int opaque = ~_mm_movemask_epi8(_mm_cmpeq_epi8(src, _mm_setzero_si128())) & 0xFFFFu;
+				while (opaque)
+				{
+					unsigned long bit;
+					_BitScanForward(&bit, opaque);
+					const ptrdiff_t at = i + static_cast<ptrdiff_t>(bit);
+					opaque &= opaque - 1;
+					if (zValue < pZ[at])
+						pDst[at] = Lit(pSrc[at], pAlphaRow, pA + at);
+				}
+			}
+
+			for (; i < block; ++i)
 			{
 				if (zValue < pZ[i] && pSrc[i])
 					pDst[i] = Lit(pSrc[i], pAlphaRow, pA + i);
