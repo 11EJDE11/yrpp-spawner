@@ -33,9 +33,11 @@
 
 #include <EventClass.h>
 #include <HouseClass.h>
+#include <PowerClass.h>
 #include <ProgressScreenClass.h>
 #include <ScenarioClass.h>
 #include <SessionClass.h>
+#include <SidebarClass.h>
 #include <Timer.h>
 #include <TechnoClass.h>
 #include <WWMouseClass.h>
@@ -546,6 +548,97 @@ DEFINE_HOOK(0x508F2F, HouseClass_UpdateRadar_ReplaySpectator, 0x5)
 }
 
 #pragma endregion Viewer map reveal
+
+// Spectator playback watches from the recording player's own house, so the sidebar acts as that
+// player's: new build options and finished buildings enable and flash its tabs (SidebarClass::Add,
+// StripClass::AI), the power bar shows its power, and Sell and Repair work on its buildings. An
+// observer's house builds nothing: its tabs stay disabled and draw blank, its power bar stays empty,
+// and it has nothing to sell or repair. Spectator playback keeps the sidebar that way.
+namespace
+{
+	ShapeButtonClass& SellButton() { return *reinterpret_cast<ShapeButtonClass*>(0xB07DF8); }
+	ShapeButtonClass& RepairButton() { return *reinterpret_cast<ShapeButtonClass*>(0xB0B3A0); }
+
+	void KeepSpectatorButtonsDisabled()
+	{
+		if (!ReplaySystem::IsSpectatorPlayback())
+			return;
+
+		for (auto& tab : SidebarClass::TabButtons)
+		{
+			tab.StopFlashing();
+			if (!tab.Disabled)
+				tab.Disable();
+		}
+
+		for (auto pButton : { &SellButton(), &RepairButton() })
+		{
+			if (!pButton->Disabled)
+				pButton->Disable();
+		}
+	}
+}
+
+// After the strips have run, before the sidebar flashes the tabs.
+DEFINE_HOOK(0x6A77DB, SidebarClass_AI_KeepSpectatorButtonsDisabled, 0x6)
+{
+	KeepSpectatorButtonsDisabled();
+	return 0;
+}
+
+DEFINE_HOOK(0x6A6C30, SidebarClass_DrawIt_KeepSpectatorButtonsDisabled, 0x9)
+{
+	KeepSpectatorButtonsDisabled();
+	return 0;
+}
+
+// PowerClass::AI recounts the bar from the current player's power. Spectator playback skips that, as
+// the game does while the sidebar is closed, and empties a bar a keyframe load brought back. The
+// stolen bytes are a relative jz, so both ways out are explicit.
+DEFINE_HOOK(0x63FEAF, PowerClass_AI_EmptySpectatorBar, 0x6)
+{
+	enum { UpdateBar = 0x63FEB5, SkipBar = 0x640385 };
+
+	GET(PowerClass* const, pThis, ESI);
+
+	if (!R->AL())
+		return SkipBar;
+
+	if (!ReplaySystem::IsSpectatorPlayback())
+		return UpdateBar;
+
+	// Green, yellow and red bar counts, and the top bar's blink countdown.
+	if (pThis->unknown_152C || pThis->unknown_1530 || pThis->unknown_1534 || pThis->unknown_151C)
+	{
+		pThis->unknown_152C = 0;
+		pThis->unknown_1530 = 0;
+		pThis->unknown_1534 = 0;
+		pThis->unknown_151C = 0;
+		pThis->unknown_bool_1538 = false;
+		pThis->PowerNeedRedraw = true;
+		pThis->MarkNeedsRedraw(0);
+	}
+
+	return SkipBar;
+}
+
+// Sell_Mode_Control and Repair_Mode_Control take -1 to toggle, 0 for off and 1 for on. Spectator
+// playback always asks for off, whether from the buttons or a hotkey.
+DEFINE_HOOK(0x4AC664, DisplayClass_SellModeControl_SpectatorOff, 0xA)
+{
+	if (ReplaySystem::IsSpectatorPlayback())
+		R->Stack(0xC, 0);
+
+	return 0;
+}
+
+DEFINE_HOOK(0x4AC8C4, DisplayClass_RepairModeControl_SpectatorOff, 0xA)
+{
+	if (ReplaySystem::IsSpectatorPlayback())
+		R->Stack(0xC, 0);
+
+	return 0;
+}
 
 // Queue_AI_Multiplayer, just past where it starts its own skip-CRC timer. A replay launch is not
 // compared against anyone, taken over or not, so let that timer never run out.

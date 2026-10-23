@@ -212,8 +212,13 @@ DEFINE_HOOK(0x6A57E2, SidebarClass__InitIO_ShowHouseOnObserverSidebar2, 0xA)
 		: DontDraw;
 }
 
-// Don't set LightGrey ColorScheme for failed observers
-DEFINE_JUMP(LJMP, 0x6A91F7, 0x6A9212); // SidebarClass_StripClass_AI
+// A listed house that is the observer - a defeated player who became one, or the player a spectator
+// replay is watched from - is coloured like the others: Grey once defeated, otherwise its own colour,
+// not the observer's LightGrey. Both the colour StripClass::AI compares against and the one it stores
+// change, or the two would differ and the list would redraw every frame.
+DEFINE_JUMP(LJMP, 0x6A5694, 0x6A56AD); // SidebarClass::Init_IO
+DEFINE_JUMP(LJMP, 0x6A9142, 0x6A915B); // SidebarClass::StripClass::AI, the compare
+DEFINE_JUMP(LJMP, 0x6A91EE, 0x6A9208); // SidebarClass::StripClass::AI, the update
 
 #pragma endregion Show house on Observer sidebar
 
