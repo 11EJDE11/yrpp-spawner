@@ -66,6 +66,7 @@
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.LightRedraw.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.MapRevealer.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.TileBlit.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.VoxelShadowCache.cpp" />
     <!-- Replay -->
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Serialization.cpp" />
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayControls.cpp" />
