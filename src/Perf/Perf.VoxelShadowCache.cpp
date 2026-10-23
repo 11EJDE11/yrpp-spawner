@@ -25,6 +25,7 @@
 //
 // This applies the rule Phobos meant at 0x73C459, which every path that drops the key goes through.
 // It is clear of the bytes Phobos' hook returns to, so it stays correct once Phobos is fixed.
+// Phobos #2484 fixes the hook; remove this with Phobos 0.5.
 
 #include <UnitClass.h>
 #include <UnitTypeClass.h>
