@@ -43,8 +43,13 @@ namespace
 	// UDPInterfaceClass::Message_Handler reads each datagram into a 640-byte buffer (0x7B3EEC), so no
 	// engine datagram is longer.
 	constexpr size_t MaxDatagram = 640;
-	// The CnCNet tunnel receives into 1024 bytes (TunnelV3), of which Tunnel::SendTo's header takes 4.
+	// The CnCNet tunnel receives into 1024 bytes (TunnelV3), of which Tunnel::SendTo's header takes 4;
+	// the hardened build's Tunnel::SendTo also adds a checksum, 8 bytes in all.
+#ifdef IS_HARDENED_VER
+	constexpr size_t MaxBundleBytes = 1016;
+#else
 	constexpr size_t MaxBundleBytes = 1020;
+#endif
 
 	// An engine datagram: uint32 CRC, then CommHeaderType.
 	constexpr size_t CrcBytes = 4;

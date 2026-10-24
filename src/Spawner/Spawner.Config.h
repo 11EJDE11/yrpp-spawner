@@ -258,7 +258,7 @@ public:
 		, FrameAwareGate { true }
 		, FastRetransmit { true }
 		, RetransmitBackoff { true }
-		, PacketRedundancy { true }
+		, PacketRedundancy { false } // PacketBundling covers the same loss better; the two together cost more and do worse
 		, RedundancyCopies { 2 }
 		, AdaptiveRedundancy { true }
 		, RedundantAcks { true }
