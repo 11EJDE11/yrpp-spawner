@@ -39,6 +39,15 @@ enum DesyncDialogOutcomeType
 {
 	DESYNC_OUTCOME_CONTINUE,    // Continue playing without the desynced players.
 	DESYNC_OUTCOME_QUIT,        // The local player wants to exit the game.
+	DESYNC_OUTCOME_LOAD,        // Everyone goes back to a save made before the desync.
+};
+
+// What Execute_DoList does after a desync check.
+enum DesyncActionType
+{
+	DESYNC_ACTION_PROCEED,      // Execute the frame as usual.
+	DESYNC_ACTION_QUIT,         // Stop the game.
+	DESYNC_ACTION_SKIP_FRAME,   // Execute nothing this frame; a save is loaded before the next.
 };
 
 /**
@@ -86,7 +95,15 @@ public:
 	 *  if the game should stop (quit), false to resume. Called from the
 	 *  Execute_DoList hook.
 	 */
-	bool Check_And_Handle_Desync();
+	DesyncActionType Check_And_Handle_Desync();
+
+	// Multiplayer saves: those made during the game, and the one it was started from.
+	void Note_Save_Made(int frame);
+	void Note_Save_Loaded(const char* path, int frame);
+
+	// The load the game master chose, done at the top of the main loop.
+	bool Has_Pending_Reload() const { return PendingReloadFrame >= 0; }
+	void Perform_Pending_Reload();
 
 private:
 	void Create_Dialog();
@@ -101,6 +118,18 @@ private:
 	void Send_Continue();
 	void Send_Sign_Off();
 	void Check_Heartbeat_Timeouts();
+	bool Has_Save_To_Offer() const;
+	int Preferred_Save_Index() const;
+	void Fill_Save_List();
+	int Selected_Save_Frame() const;
+	void Send_Load(int save_frame);
+	void Notify_Load(int save_frame, int desync_frame);
+	void Send_Ready();
+	void Send_Go(int save_frame);
+	void Notify_Ready(int house_id);
+	void Notify_Go(int save_frame);
+	bool Everything_Sent_Acknowledged() const;
+	bool Everyone_Ready() const;
 
 	static BOOL CALLBACK Dialog_Proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 
@@ -125,6 +154,44 @@ private:
 	 */
 	bool ContinueReceived = false;
 
+	struct SaveEntry
+	{
+		int Frame;
+		std::string Path;
+	};
+
+	// Oldest first.
+	std::vector<SaveEntry> Saves;
+
+	// The frame the dialog was opened for.
+	int DesyncFrame = -1;
+
+	/**
+	 *  Going back to a save takes two steps, so that nothing sent in the timeline
+	 *  being left is still in flight when it is loaded: once the game master has
+	 *  chosen the save, everyone stays in the dialog until all they sent has been
+	 *  acknowledged and says so; when all have, the game master says to load.
+	 */
+	int LoadDecidedFrame = -1;
+	std::chrono::steady_clock::time_point LoadDecidedAt;
+	bool ReadySent = false;
+	bool ReadyFrom[SessionExt::MaxPlayers] = {};
+
+	// The save to load at the top of the next main loop, by its frame; -1 for none.
+	int PendingReloadFrame = -1;
+
+	// The save last loaded after a desync, so another desync before the next save offers the
+	// one before it.
+	int LastReloadFrame = -1;
+
+	// The desync that led to that load.
+	int LastReloadDesyncFrame = -1;
+
+	// Saves that went out of sync again soon after being loaded.
+	std::vector<int> FailedSaveFrames;
+
+	bool Is_Failed_Save(int frame) const;
+
 	/**
 	 *  Is the chat edit box currently showing its hint text?
 	 */
@@ -134,6 +201,9 @@ private:
 	 *  Players that have left the game while the dialog was open, by house ID.
 	 */
 	bool PlayerLeft[SessionExt::MaxPlayers] = {};
+
+	// Players already dropped for going out of sync, so each is dropped and announced once.
+	bool PlayerRemoved[SessionExt::MaxPlayers] = {};
 
 	/**
 	 *  Heartbeat bookkeeping for detecting players that silently disappear.

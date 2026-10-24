@@ -27,10 +27,44 @@
 #include <Spawner/GlobalPacketExt.h>
 #include <Spawner/KickAgreement.h>
 #include <Utilities/Macro.h>
+#include <Main.h>
 
 #include <SessionClass.h>
 #include <IPX.h>
 #include <Timer.h>
+
+/**
+ *  Lets the game find resources - our dialog templates - in this DLL too, as an
+ *  addition to its own lookup, so other DLLs can do the same.
+ *
+ *  0x4A3B4B, 9 bytes: this replaces a call, but an absolute one.
+ */
+DEFINE_HOOK(0x4A3B4B, FetchResource_SpawnerResources, 0x9)
+{
+	const HMODULE module = static_cast<HMODULE>(Main::hInstance);
+	GET(LPCTSTR, name, ECX);
+	GET(LPCTSTR, type, EDX);
+
+	if (HRSRC info = FindResource(module, name, type)) {
+		if (HGLOBAL data = LoadResource(module, info)) {
+			LockResource(data);
+			R->EAX(data);
+			return 0x4A3B73; // the resource, locked and loaded
+		}
+	}
+
+	return 0; // not ours: the game's own resources
+}
+
+/**
+ *  The CRC-skip window a game loaded from a save starts with. Queue_AI_Multiplayer
+ *  sets its CDTimer to start at the current frame and to last current frame + 256,
+ *  so after loading a save from frame F desyncs went unnoticed until frame 2F + 256.
+ *  It is meant to be 256 frames, as it is when a new game starts at frame 0.
+ *
+ *  0x647849: `lea eax, [ecx+100h]` -> `mov eax, 100h` and a nop.
+ */
+DEFINE_PATCH(0x647849, 0xB8, 0x00, 0x01, 0x00, 0x00, 0x90);
 
 /**
  *  Make the desync dialogs full-screen "menu" dialogs.
@@ -119,7 +153,7 @@ DEFINE_HOOK(0x608D27, OwnerDraw_DesyncDialogSidebarButtons, 0x6)
 	GET(int, control_id, EAX);
 
 	if ((dialog_id == IDD_DESYNC_HOST || dialog_id == IDD_DESYNC_WAIT)
-		&& (control_id == IDC_DESYNC_CONTINUE || control_id == IDC_DESYNC_QUIT)) {
+		&& (control_id == IDC_DESYNC_CONTINUE || control_id == IDC_DESYNC_QUIT || control_id == IDC_DESYNC_LOAD)) {
 		return 0x608F34;
 	}
 
@@ -193,6 +227,19 @@ static __declspec(naked) void Execute_DoList_Quit()
 }
 
 /**
+ *  Returns success from Execute_DoList without executing anything, for the
+ *  frame of a desync that is about to be undone by loading a save.
+ */
+static __declspec(naked) void Execute_DoList_Skip()
+{
+	__asm
+	{
+		mov eax, 1
+		retn 0Ch
+	}
+}
+
+/**
  *  Execute_DoList entry: detect desync and, if any, run the dialog. The 4th arg
  *  (skip_crc) is the engine's initial CRC-skip window; respect it so a new game
  *  does not falsely desync. On "continue" let the original run (out-of-sync
@@ -205,10 +252,17 @@ DEFINE_HOOK(0x64C380, Execute_DoList_DesyncDialog, 0xA)
 
 	const bool in_skip_window = skip_crc && skip_crc->GetTimeLeft() != 0;
 
-	if (!in_skip_window && DesyncDialog.Check_And_Handle_Desync())
+	switch (in_skip_window ? DESYNC_ACTION_PROCEED : DesyncDialog.Check_And_Handle_Desync())
+	{
+	case DESYNC_ACTION_QUIT:
 		return reinterpret_cast<DWORD>(&Execute_DoList_Quit);
 
-	return 0; // run the original Execute_DoList
+	case DESYNC_ACTION_SKIP_FRAME:
+		return reinterpret_cast<DWORD>(&Execute_DoList_Skip);
+
+	default:
+		return 0; // run the original Execute_DoList
+	}
 }
 
 /**

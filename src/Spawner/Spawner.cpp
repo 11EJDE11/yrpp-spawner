@@ -34,6 +34,7 @@
 #include <Misc/Bugfixes.Desyncs.h>
 
 #include <Ext/Session/Body.h>
+#include <UI/DesyncDialog.h>
 
 #include <GameOptionsClass.h>
 #include <GameStrings.h>
@@ -401,6 +402,9 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		}
 		else if (Config->LoadSaveGame && !Spawner::Reconcile_Players())
 			return false;
+
+		if (Config->LoadSaveGame)
+			DesyncDialog.Note_Save_Loaded(Config->SaveGameName, Unsorted::CurrentFrame);
 
 		if (!isReplayPlayback && !pSession->CreateConnections())
 			return false;
@@ -803,6 +807,7 @@ void Spawner::After_Main_Loop()
 			// though as it would require a custom event (seems overkill for such).
 			saveGameDescription += StringTable::LoadString(GameStrings::TXT_MULTIPLAYER_GAME);
 			SaveGame(GameStrings::SAVEGAME_NET, saveGameDescription.c_str());
+			DesyncDialog.Note_Save_Made(Unsorted::CurrentFrame);
 
 			Spawner::NextAutoSaveFrame = Unsorted::CurrentFrame + pConfig->AutoSaveInterval;
 		}

@@ -39,11 +39,45 @@
 #include <Surface.h>
 #include <PCX.h>
 #include <MapClass.h>
+#include <ScenarioClass.h>
 #include <IPX.h>
 #include <IPXManagerClass.h>
 #include <WWMouseClass.h>
 #include <StringTable.h>
 #include <Unsorted.h>
+#include <MessageListClass.h>
+#include <RulesClass.h>
+#include <WWMessageBox.h>
+#include <GameStrings.h>
+#include <LoadOptionsClass.h>
+#include <IPXManagerClass.h>
+#include <ConnectionClass.h>
+#include <CommBufferClass.h>
+#include <IPXConnClass.h>
+#include <WinsockInterfaceClass.h>
+
+// Netcode pieces of this spawner that keep their own state across frames, and
+// so must start over when a save is loaded mid-game.
+#if __has_include(<Spawner/FrameGate.h>)
+#include <Spawner/FrameGate.h>
+#define DESYNC_RELOAD_FRAMEGATE
+#endif
+#if __has_include(<Spawner/FastRetransmit.h>)
+#include <Spawner/FastRetransmit.h>
+#define DESYNC_RELOAD_FASTRETRANSMIT
+#endif
+#if __has_include(<Spawner/PacketBundling.h>)
+#include <Spawner/PacketBundling.h>
+#define DESYNC_RELOAD_BUNDLING
+#endif
+#if __has_include(<Spawner/PacketRedundancy.h>)
+#include <Spawner/PacketRedundancy.h>
+#define DESYNC_RELOAD_REDUNDANCY
+#endif
+#if __has_include(<Replay/ReplaySystem.Internal.h>)
+#include <Replay/ReplaySystem.Internal.h>
+#define DESYNC_RELOAD_REPLAY
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -145,6 +179,69 @@ namespace
 		}
 		IPXManagerClass::Instance.Service();
 	}
+
+	/**
+	 *  What has to happen around loading a save mid-game, beyond the load.
+	 */
+	namespace Reload_Hooks
+	{
+		void Before_Load()
+		{
+#ifdef DESYNC_RELOAD_REPLAY
+			// A recording cannot go back in time; it ends at the desync, which is what is wanted to
+			// find out what went wrong. The load would start a new one over it, so recording stops.
+			ReplaySystem::Internal::StopReplaySystem();
+			Spawner::GetConfig()->EnableReplayRecording = false;
+#endif
+		}
+
+		void After_Load()
+		{
+#ifdef DESYNC_RELOAD_FRAMEGATE
+			// Its watermarks are frames of the timeline left behind.
+			FrameGate::Reset();
+#endif
+#ifdef DESYNC_RELOAD_FASTRETRANSMIT
+			FastRetransmit::Reset();
+#endif
+#ifdef DESYNC_RELOAD_BUNDLING
+			PacketBundling::Reset();
+#endif
+#ifdef DESYNC_RELOAD_REDUNDANCY
+			PacketRedundancy::Reset();
+#endif
+
+			// Loading replaces the surfaces but leaves Temp on the old hidden one, and
+			// leaves the session's sound and input stopped.
+			DSurface::Temp = DSurface::Hidden;
+			SessionClass::Instance.Resume();
+
+			if (Spawner::GetConfig()->AutoSaveInterval > 0) {
+				Spawner::NextAutoSaveFrame = Unsorted::CurrentFrame + Spawner::GetConfig()->AutoSaveInterval;
+			}
+		}
+	}
+
+	/**
+	 *  Tells the player in the in-game message list that someone was dropped
+	 *  for going out of sync.
+	 */
+	void Print_Player_Removed(int house_id)
+	{
+		if (house_id < 0 || house_id >= HouseClass::Array.Count || HouseClass::Array[house_id] == nullptr) {
+			return;
+		}
+
+		HouseClass* const house = HouseClass::Array[house_id];
+
+		wchar_t message[160];
+		std::swprintf(message, std::size(message),
+			StringTable::TryFetchString("GUI:DesyncPlayerRemoved", L"%ls went out of sync and has been removed."),
+			house->UIName);
+
+		MessageListClass::Instance.PrintMessage(message, RulesClass::Instance->MessageDelay,
+			house->ColorSchemeIndex, /* bSilent: */ false);
+	}
 }
 
 
@@ -219,6 +316,44 @@ DesyncDialogOutcomeType DesyncDialogClass::Run()
 
 		Check_Heartbeat_Timeouts();
 		Update_Chat_Placeholder();
+
+		/**
+		 *  The game master chose to go back to a save.
+		 */
+		if (Decision == IDC_DESYNC_LOAD && LoadDecidedFrame < 0) {
+			const int save_frame = Selected_Save_Frame();
+			if (save_frame >= 0) {
+				Send_Load(save_frame);
+				LoadDecidedFrame = save_frame;
+				LoadDecidedAt = std::chrono::steady_clock::now();
+				EnableWindow(GetDlgItem(Window, IDC_DESYNC_LOAD), FALSE);
+				EnableWindow(GetDlgItem(Window, IDC_DESYNC_CONTINUE), FALSE);
+			}
+		}
+
+		/**
+		 *  Once all this player sent has been acknowledged, it is ready to load;
+		 *  once everyone is (or has had long enough), the game master says to.
+		 */
+		if (LoadDecidedFrame >= 0 && PendingReloadFrame < 0) {
+			if (!ReadySent && Everything_Sent_Acknowledged()) {
+				ReadySent = true;
+				if (!IsHostDialog) {
+					Send_Ready();
+				}
+			}
+
+			if (IsHostDialog && ReadySent
+				&& (Everyone_Ready() || std::chrono::steady_clock::now() - LoadDecidedAt > std::chrono::seconds(10))) {
+				Send_Go(LoadDecidedFrame);
+				PendingReloadFrame = LoadDecidedFrame;
+			}
+		}
+
+		if (PendingReloadFrame >= 0) {
+			outcome = DESYNC_OUTCOME_LOAD;
+			break;
+		}
 
 		if (Decision == IDC_DESYNC_QUIT) {
 			outcome = DESYNC_OUTCOME_QUIT;
@@ -312,6 +447,14 @@ void DesyncDialogClass::Create_Dialog()
 	Update_Player_List();
 
 	if (IsHostDialog) {
+		HWND save_list = GetDlgItem(Window, IDC_DESYNC_SAVE_LIST);
+		if (save_list != nullptr) {
+			RECT save_client {};
+			GetClientRect(save_list, &save_client);
+			SendMessage(save_list, WW_LB_ADDCOLUMN, save_client.right, 0);
+		}
+		Fill_Save_List();
+		EnableWindow(GetDlgItem(Window, IDC_DESYNC_LOAD), Has_Save_To_Offer() ? TRUE : FALSE);
 		EnableWindow(GetDlgItem(Window, IDC_DESYNC_CONTINUE), TRUE);
 	} else {
 
@@ -712,18 +855,19 @@ void DesyncDialogClass::Send_Sign_Off()
 
 /**
  *  Detects per-player desync for the current frame and, if any player has
- *  diverged, shows the dialog and applies the chosen outcome. Returns true if
- *  the game should stop (quit), false to resume.
+ *  diverged, applies the outcome: with a save from before the desync, the
+ *  dialog lets the game master take everyone back to it; without one, the
+ *  players who disagree with the majority are dropped straight away.
  *
  *  Called from the Execute_DoList entry hook (which gates the engine's
  *  start-of-game CRC-skip window). Replaces the engine's stock
  *  message-box-and-quit: on "continue" the desynced players are dropped and
  *  their events kept out of the frame by the out-of-sync skip hook.
  */
-bool DesyncDialogClass::Check_And_Handle_Desync()
+DesyncActionType DesyncDialogClass::Check_And_Handle_Desync()
 {
 	if (!SessionClass::IsMultiplayer()) {
-		return false;
+		return DESYNC_ACTION_PROCEED;
 	}
 
 	/**
@@ -733,17 +877,36 @@ bool DesyncDialogClass::Check_And_Handle_Desync()
 	 */
 	if (Is_Active()) {
 		Debug::Log("DesyncDialog: re-entrant desync check ignored (dialog already open).\n");
-		return false;
+		return DESYNC_ACTION_PROCEED;
+	}
+
+	// A load is already on its way; the frame is thrown away with the timeline.
+	if (Has_Pending_Reload()) {
+		return DESYNC_ACTION_SKIP_FRAME;
 	}
 
 	/**
 	 *  Detect desync the same way the engine does: for each FRAMEINFO event
-	 *  scheduled this frame, compare the frame's reported CRC against ours and
-	 *  mark every player that diverged.
+	 *  scheduled this frame, compare the frame's reported CRC against ours.
+	 *  Every machine compares the same FRAMEINFOs, so grouping the players by
+	 *  the CRC they reported gives every machine the same answer as to which
+	 *  players agree, without any further messages.
 	 */
 	bool newly_desynced = false;
 	EventClass* offending_event = nullptr;
 	const unsigned int current_frame = static_cast<unsigned int>(Unsorted::CurrentFrame);
+
+	/**
+	 *  A FRAMEINFO carries the CRC of the frame its sender was on, the frame it
+	 *  is executed on less the sender's MaxAhead, which can differ between
+	 *  players for a while after the timing changes. So each player is compared
+	 *  with our own CRC of that frame, as the engine does; players who disagree
+	 *  with us are compared with each other only when they report the same frame.
+	 */
+	bool has_crc[SessionExt::MaxPlayers] = {};
+	bool agrees[SessionExt::MaxPlayers] = {};
+	int crc_frame[SessionExt::MaxPlayers] = {};
+	unsigned int house_crc[SessionExt::MaxPlayers] = {};
 
 	for (int i = 0; i < EventClass::DoList.Count; i++) {
 
@@ -759,8 +922,12 @@ bool DesyncDialogClass::Check_And_Handle_Desync()
 		}
 
 		const int index = static_cast<int>((event.Frame - event.FrameInfo.Delay) & 0xFF);
-		if (EventClass::LatestFramesCRC[index] != event.FrameInfo.CRC) {
-			SessionExt::Mark_Player_As_Out_of_Sync(id);
+		has_crc[id] = true;
+		crc_frame[id] = index;
+		house_crc[id] = event.FrameInfo.CRC;
+		agrees[id] = EventClass::LatestFramesCRC[index] == event.FrameInfo.CRC;
+
+		if (!agrees[id]) {
 			newly_desynced = true;
 			if (offending_event == nullptr) {
 				offending_event = &event;
@@ -769,18 +936,88 @@ bool DesyncDialogClass::Check_And_Handle_Desync()
 	}
 
 	if (!newly_desynced) {
-		return false;
+		return DESYNC_ACTION_PROCEED;
 	}
 
 	Debug::Log("DesyncDialog: desync detected on frame %u.\n", current_frame);
+	for (int i = 0; i < EventClass::DoList.Count; i++) {
+		const EventClass& event = EventClass::DoList[i];
+		if (event.Type == EventType::FrameInfo && event.Frame == current_frame) {
+			const int index = static_cast<int>((event.Frame - event.FrameInfo.Delay) & 0xFF);
+			Debug::Log("DesyncDialog:   house %d delay %d: CRC %08X, ours %08X%s\n", event.HouseIndex,
+				static_cast<int>(event.FrameInfo.Delay), event.FrameInfo.CRC, EventClass::LatestFramesCRC[index],
+				SessionExt::Is_Out_of_Sync(event.HouseIndex) ? " (already out of sync)" : "");
+		}
+	}
+	DesyncFrame = static_cast<int>(current_frame);
+
+	/**
+	 *  Out of sync again soon after going back to a save: that save leads to a
+	 *  desync too, so the next one back is offered instead.
+	 */
+	if (LastReloadFrame >= 0) {
+		const int window = (std::max)(Spawner::GetConfig()->AutoSaveInterval, 900);
+		if (DesyncFrame <= LastReloadDesyncFrame + window && !Is_Failed_Save(LastReloadFrame)) {
+			Debug::Log("DesyncDialog: out of sync again after loading the save from frame %d.\n", LastReloadFrame);
+			FailedSaveFrames.push_back(LastReloadFrame);
+		}
+		LastReloadFrame = -1;
+	}
+
+	const int own_id = HouseClass::CurrentPlayer ? HouseClass::CurrentPlayer->ArrayIndex : -1;
+
+	/**
+	 *  The largest group of players that agree is the game that goes on. If
+	 *  there is one, the players outside it are dropped by everyone in it, and
+	 *  each of them drops out itself rather than playing on alone. If there is
+	 *  no single largest group (a 1v1, or an even split), each group carries on
+	 *  without the players it disagrees with.
+	 */
+	int own_group = 1;
+	int largest_other = 0;
+	for (int id = 0; id < SessionExt::MaxPlayers; id++) {
+		if (!has_crc[id] || id == own_id) {
+			continue;
+		}
+
+		if (agrees[id]) {
+			own_group++;
+			continue;
+		}
+
+		int count = 0;
+		for (int other = 0; other < SessionExt::MaxPlayers; other++) {
+			if (has_crc[other] && other != own_id && !agrees[other]
+				&& crc_frame[other] == crc_frame[id] && house_crc[other] == house_crc[id]) {
+				count++;
+			}
+		}
+		largest_other = (std::max)(largest_other, count);
+
+		// Whatever happens next, the engine must not compare its frames with ours.
+		SessionExt::Mark_Player_As_Out_of_Sync(id);
+	}
+
+	const bool out_of_majority = largest_other > own_group;
+	Debug::Log("DesyncDialog: %d players agree with this one, the largest other group is %d; this player is %s.\n",
+		own_group, largest_other, out_of_majority ? "outside the majority"
+			: own_group > largest_other ? "in the majority" : "in an even split");
 
 	/**
 	 *  Write the engine's sync-debug dump (SYNC*.TXT) for the offending event,
 	 *  exactly as the stock out-of-sync handler does (Execute_DoList @0x64CC68).
 	 *  Our entry hook intercepts before that handler runs, so reproduce it here
 	 *  or desyncs become impossible to diagnose.
+	 *
+	 *  The dump draws a number from the scenario's random number generator to
+	 *  print it ("My Random Number"). The stock handler quits right after, but
+	 *  this game goes on, so the draw would become part of it, and a replay,
+	 *  which writes no dump, would go its own way from here. Put the generator
+	 *  back as it was.
 	 */
 	if (offending_event != nullptr) {
+		const Randomizer random = ScenarioClass::Instance->Random;
+
 		if (Game::EnableMPSyncDebug) {
 			for (int slot = 0; slot < 256; slot++) {
 				EventClass::Print_CRCs_All_Players(slot, offending_event);
@@ -788,11 +1025,38 @@ bool DesyncDialogClass::Check_And_Handle_Desync()
 		} else {
 			EventClass::Print_CRCs_Current_Player(offending_event);
 		}
+
+		ScenarioClass::Instance->Random = random;
 	}
 
-	const DesyncDialogOutcomeType outcome = Run();
+	/**
+	 *  With a save to go back to, everyone - out of sync or not - waits for
+	 *  the game master to choose. Without one, carry on without the players
+	 *  who disagree with the majority.
+	 */
+	const DesyncDialogOutcomeType outcome = Has_Save_To_Offer() ? Run() : DESYNC_OUTCOME_CONTINUE;
+
+	if (outcome == DESYNC_OUTCOME_CONTINUE && out_of_majority) {
+		/**
+		 *  The others agree with each other and not with us: they are dropping
+		 *  us, so leave rather than play on alone.
+		 */
+		Send_Sign_Off();
+		WWMessageBox::Instance.Process(
+			StringTable::TryFetchString("GUI:DesyncYouWereRemoved",
+				L"Your game went out of sync with the other players, and you have been removed from it."),
+			StringTable::LoadString(GameStrings::TXT_OK), nullptr);
+		return DESYNC_ACTION_QUIT;
+	}
 
 	switch (outcome) {
+
+	case DESYNC_OUTCOME_LOAD:
+		/**
+		 *  Throw this frame away; the save is loaded at the top of the next
+		 *  main loop, ahead of the network handshake a loaded game starts with.
+		 */
+		return DESYNC_ACTION_SKIP_FRAME;
 
 	case DESYNC_OUTCOME_CONTINUE:
 		/**
@@ -802,12 +1066,14 @@ bool DesyncDialogClass::Check_And_Handle_Desync()
 		 *  cleanly. Symmetric: the desynced players drop us the same way.
 		 */
 		for (int id = 0; id < SessionExt::MaxPlayers; id++) {
-			if (SessionExt::Is_Out_of_Sync(id)) {
+			if (SessionExt::Is_Out_of_Sync(id) && !PlayerRemoved[id]) {
+				PlayerRemoved[id] = true;
 				SessionClass::Destroy_Connection(id, -1);
+				Print_Player_Removed(id);
 			}
 		}
 		SessionExt::Update_Master_After_Player_Removal();
-		return false;
+		return DESYNC_ACTION_PROCEED;
 
 	case DESYNC_OUTCOME_QUIT:
 	default:
@@ -816,7 +1082,7 @@ bool DesyncDialogClass::Check_And_Handle_Desync()
 		 *  (the Execute_DoList hook returns failure to it).
 		 */
 		Send_Sign_Off();
-		return true;
+		return DESYNC_ACTION_QUIT;
 	}
 }
 
@@ -960,6 +1226,18 @@ bool DesyncDialogClass::Handle_Global_Packet(const ExtGlobalPacketType* packet, 
 		Notify_Chat(packet->Name, packet->Chat.Text);
 		return true;
 
+	case EXT_NET_DESYNC_LOAD:
+		Notify_Load(packet->Load.SaveFrame, packet->Load.DesyncFrame);
+		return true;
+
+	case EXT_NET_DESYNC_READY:
+		Notify_Ready(packet->Heartbeat.HouseID);
+		return true;
+
+	case EXT_NET_DESYNC_GO:
+		Notify_Go(packet->Load.SaveFrame);
+		return true;
+
 	default:
 		return false;
 	}
@@ -1025,6 +1303,7 @@ BOOL CALLBACK DesyncDialogClass::Dialog_Proc(HWND window, UINT message, WPARAM w
 
 				case IDC_DESYNC_CONTINUE:
 				case IDC_DESYNC_QUIT:
+				case IDC_DESYNC_LOAD:
 					DesyncDialog.Decision = LOWORD(wparam);
 					break;
 			}
@@ -1032,4 +1311,386 @@ BOOL CALLBACK DesyncDialogClass::Dialog_Proc(HWND window, UINT message, WPARAM w
 	}
 
 	return FALSE;
+}
+
+
+/**
+ *  Records a multiplayer save just made. Every player saves on the same frame,
+ *  and the file is whichever SVGM_*.NET was written last (Phobos numbers them).
+ */
+void DesyncDialogClass::Note_Save_Made(int frame)
+{
+	char pattern[MAX_PATH];
+	std::snprintf(pattern, std::size(pattern), "%s\\SVGM_*.NET", Spawner::GetConfig()->SavedGameDir);
+
+	WIN32_FIND_DATAA found {};
+	HANDLE search = FindFirstFileA(pattern, &found);
+	if (search == INVALID_HANDLE_VALUE) {
+		return;
+	}
+
+	std::string newest;
+	FILETIME newest_time {};
+	do {
+		if (CompareFileTime(&found.ftLastWriteTime, &newest_time) > 0) {
+			newest_time = found.ftLastWriteTime;
+			newest = found.cFileName;
+		}
+	} while (FindNextFileA(search, &found));
+	FindClose(search);
+
+	// Written within the last few seconds, or the save failed and this is an older one.
+	FILETIME now {};
+	GetSystemTimeAsFileTime(&now);
+	const auto ticks = [](const FILETIME& time) {
+		return (static_cast<unsigned long long>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+	};
+	if (newest.empty() || ticks(now) - ticks(newest_time) > 10ULL * 10000000ULL) {
+		return;
+	}
+
+	Saves.erase(std::remove_if(Saves.begin(), Saves.end(),
+		[frame](const SaveEntry& save) { return save.Frame >= frame; }), Saves.end());
+	Saves.push_back({ frame, newest });
+	Debug::Log("DesyncDialog: noted the save %s made on frame %d.\n", newest.c_str(), frame);
+}
+
+
+/**
+ *  Records the save the game was started from.
+ */
+void DesyncDialogClass::Note_Save_Loaded(const char* path, int frame)
+{
+	if (path == nullptr || path[0] == '\0') {
+		return;
+	}
+
+	Saves.clear();
+	Saves.push_back({ frame, path });
+}
+
+
+/**
+ *  Whether there is a save from before the desync to offer loading.
+ */
+bool DesyncDialogClass::Has_Save_To_Offer() const
+{
+	return Preferred_Save_Index() >= 0;
+}
+
+
+/**
+ *  The save to offer first: the newest one from before the desync that has not
+ *  gone out of sync again after being loaded.
+ */
+int DesyncDialogClass::Preferred_Save_Index() const
+{
+	int newest = -1;
+	for (int i = 0; i < static_cast<int>(Saves.size()); i++) {
+		if (Saves[i].Frame < DesyncFrame && !Is_Failed_Save(Saves[i].Frame)) {
+			newest = i;
+		}
+	}
+
+	return newest;
+}
+
+
+/**
+ *  Fills the host dialog's save list, newest first, with the preferred save
+ *  selected.
+ */
+void DesyncDialogClass::Fill_Save_List()
+{
+	if (!Is_Active()) {
+		return;
+	}
+
+	HWND list = GetDlgItem(Window, IDC_DESYNC_SAVE_LIST);
+	if (list == nullptr) {
+		return;
+	}
+
+	ListBox_ResetContent(list);
+
+	const int preferred = Preferred_Save_Index();
+	int selected_row = -1;
+
+	for (int i = static_cast<int>(Saves.size()) - 1; i >= 0; i--) {
+		if (Saves[i].Frame >= DesyncFrame) {
+			continue;
+		}
+
+		// Game time at the game's frame rate, and how far back from the desync it is.
+		const int seconds = Saves[i].Frame / 60;
+		const int back = (DesyncFrame - Saves[i].Frame) / 60;
+		wchar_t text[96];
+		std::swprintf(text, std::size(text),
+			StringTable::TryFetchString("GUI:DesyncSaveEntry", L"%02d:%02d game time (%d s back)"),
+			seconds / 60, seconds % 60, back);
+
+		const int row = static_cast<int>(SendMessage(list, WW_LB_ADDSTRINGW, 0, reinterpret_cast<LPARAM>(text)));
+		if (row >= 0) {
+			ListBox_SetItemData(list, row, static_cast<LPARAM>(Saves[i].Frame));
+			if (i == preferred) {
+				selected_row = row;
+			}
+		}
+	}
+
+	if (selected_row >= 0) {
+		ListBox_SetCurSel(list, selected_row);
+	}
+}
+
+
+/**
+ *  The frame of the save selected in the host dialog, or of the preferred save
+ *  if the list has no selection; -1 for none.
+ */
+int DesyncDialogClass::Selected_Save_Frame() const
+{
+	HWND list = Is_Active() ? GetDlgItem(Window, IDC_DESYNC_SAVE_LIST) : nullptr;
+	if (list != nullptr) {
+		const int row = ListBox_GetCurSel(list);
+		if (row >= 0) {
+			return static_cast<int>(ListBox_GetItemData(list, row));
+		}
+	}
+
+	const int preferred = Preferred_Save_Index();
+	return preferred >= 0 ? Saves[preferred].Frame : -1;
+}
+
+
+/**
+ *  Broadcasts the master's decision to go back to a save.
+ */
+void DesyncDialogClass::Send_Load(int save_frame)
+{
+	Debug::Log("DesyncDialog: broadcasting the decision to load the save from frame %d.\n", save_frame);
+
+	ExtGlobalPacketType packet {};
+	packet.Command = EXT_NET_DESYNC_LOAD;
+	Local_Player_Name(packet.Name, sizeof(packet.Name));
+	packet.Load.SaveFrame = save_frame;
+	packet.Load.DesyncFrame = DesyncFrame;
+
+	Broadcast_Global_Packet(packet, 1);
+}
+
+
+/**
+ *  Called when the game master has chosen to go back to a save. Taken even if
+ *  this player's dialog is not open yet: it is loaded between frames all the
+ *  same, and the handshake after the load brings everyone together.
+ */
+void DesyncDialogClass::Notify_Load(int save_frame, int desync_frame)
+{
+	Debug::Log("DesyncDialog: the game master chose the save from frame %d (desync on frame %d).\n",
+		save_frame, desync_frame);
+
+	const bool have_it = std::any_of(Saves.begin(), Saves.end(),
+		[save_frame](const SaveEntry& save) { return save.Frame == save_frame; });
+
+	if (!have_it) {
+		Debug::Log("DesyncDialog: this player has no save from frame %d!\n", save_frame);
+		return;
+	}
+
+	if (LoadDecidedFrame < 0) {
+		LoadDecidedFrame = save_frame;
+		LoadDecidedAt = std::chrono::steady_clock::now();
+	}
+}
+
+
+/**
+ *  Tells the game master that this player has nothing unacknowledged in flight.
+ */
+void DesyncDialogClass::Send_Ready()
+{
+	if (HouseClass::CurrentPlayer == nullptr) {
+		return;
+	}
+
+	Debug::Log("DesyncDialog: ready to load.\n");
+
+	ExtGlobalPacketType packet {};
+	packet.Command = EXT_NET_DESYNC_READY;
+	Local_Player_Name(packet.Name, sizeof(packet.Name));
+	packet.Heartbeat.HouseID = static_cast<char>(HouseClass::CurrentPlayer->ArrayIndex);
+
+	Broadcast_Global_Packet(packet, 1);
+}
+
+
+/**
+ *  Tells everyone to load the save now.
+ */
+void DesyncDialogClass::Send_Go(int save_frame)
+{
+	Debug::Log("DesyncDialog: telling everyone to load the save from frame %d.\n", save_frame);
+
+	ExtGlobalPacketType packet {};
+	packet.Command = EXT_NET_DESYNC_GO;
+	Local_Player_Name(packet.Name, sizeof(packet.Name));
+	packet.Load.SaveFrame = save_frame;
+	packet.Load.DesyncFrame = DesyncFrame;
+
+	Broadcast_Global_Packet(packet, 1);
+}
+
+
+void DesyncDialogClass::Notify_Ready(int house_id)
+{
+	if (house_id >= 0 && house_id < SessionExt::MaxPlayers) {
+		ReadyFrom[house_id] = true;
+	}
+}
+
+
+/**
+ *  The game master says to load. Taken even if this player never opened the
+ *  dialog; it is loaded between frames all the same.
+ */
+void DesyncDialogClass::Notify_Go(int save_frame)
+{
+	Debug::Log("DesyncDialog: told to load the save from frame %d.\n", save_frame);
+
+	const bool have_it = std::any_of(Saves.begin(), Saves.end(),
+		[save_frame](const SaveEntry& save) { return save.Frame == save_frame; });
+
+	if (have_it) {
+		PendingReloadFrame = save_frame;
+	}
+}
+
+
+/**
+ *  Whether everything this player has sent on its connections has been
+ *  acknowledged, so that no packet of the current timeline can still arrive.
+ */
+bool DesyncDialogClass::Everything_Sent_Acknowledged() const
+{
+	for (int i = 0; i < static_cast<int>(IPXManagerClass::Instance.NumConnections); i++) {
+		const auto* connection = IPXManagerClass::Instance.Connection[i];
+		if (connection != nullptr && connection->Queue != nullptr && connection->Queue->Num_Send() > 0) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+
+/**
+ *  Whether every other connected player has said it is ready to load.
+ */
+bool DesyncDialogClass::Everyone_Ready() const
+{
+	auto& players = NodeNameType::Array;
+	for (int i = 1; i < players.Count; i++) {
+		const NodeNameType* node = players[i];
+		if (node == nullptr) {
+			continue;
+		}
+
+		const int id = node->HouseIndex;
+		if (id >= 0 && id < SessionExt::MaxPlayers && !ReadyFrom[id]) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+
+/**
+ *  Loads the save the game master chose, between two frames, and sets the
+ *  game up to start from it the way a game loaded from a save starts.
+ */
+void DesyncDialogClass::Perform_Pending_Reload()
+{
+	const int save_frame = PendingReloadFrame;
+	PendingReloadFrame = -1;
+
+	const auto save = std::find_if(Saves.begin(), Saves.end(),
+		[save_frame](const SaveEntry& entry) { return entry.Frame == save_frame; });
+	if (save == Saves.end()) {
+		return;
+	}
+
+	const std::string path = save->Path;
+	Debug::Log("DesyncDialog: loading %s (frame %d) on frame %d.\n", path.c_str(), save_frame, Unsorted::CurrentFrame);
+
+	/**
+	 *  Everything sent before the desync was acknowledged in the dialog (see
+	 *  Run): a packet's ID is then known to the other side, which drops any
+	 *  later copy of it, so no event from the timeline being left can turn up
+	 *  after the load. The events still queued here belong to it too.
+	 *
+	 *  So do the packets received but not yet read: unacknowledged ones (a
+	 *  FRAMEINFO with no commands in it) are not covered by the above, and one
+	 *  read after the load would bring a CRC of the old timeline into the new
+	 *  one. It is done before loading, as a faster player may already be
+	 *  sending from the new timeline by the time this one has loaded.
+	 */
+	if (WinsockInterfaceClass::Instance != nullptr) {
+		WinsockInterfaceClass::Instance->DiscardInBuffers();
+	}
+	for (int i = 0; i < static_cast<int>(IPXManagerClass::Instance.NumConnections); i++) {
+		auto* const connection = IPXManagerClass::Instance.Connection[i];
+		if (connection != nullptr && connection->Queue != nullptr) {
+			connection->Queue->Init();
+		}
+	}
+
+	EventClass::OutList.Init();
+	EventClass::DoList.Init();
+	EventClass::MegaMissionList.Init();
+
+	Reload_Hooks::Before_Load();
+
+	if (!LoadOptionsClass::LoadMission(path.c_str())) {
+		Debug::Log("DesyncDialog: loading %s failed!\n", path.c_str());
+		return;
+	}
+
+	Reload_Hooks::After_Load();
+
+	/**
+	 *  Queue_AI_Multiplayer treats the next frame as the first of a loaded
+	 *  game: it resets the sync counters, CRC history and compressed-event
+	 *  caches, and waits for everyone with a FRAMESYNC handshake.
+	 */
+	SessionClass::Instance.LoadGame = 1;
+
+	std::fill(std::begin(SessionExt::IsOutOfSync), std::end(SessionExt::IsOutOfSync), false);
+	std::fill(std::begin(PlayerRemoved), std::end(PlayerRemoved), false);
+	LastReloadFrame = save_frame;
+	LastReloadDesyncFrame = DesyncFrame;
+	LoadDecidedFrame = -1;
+	ReadySent = false;
+	std::fill(std::begin(ReadyFrom), std::end(ReadyFrom), false);
+
+	// Later saves belong to the timeline left behind.
+	Saves.erase(std::remove_if(Saves.begin(), Saves.end(),
+		[save_frame](const SaveEntry& entry) { return entry.Frame > save_frame; }), Saves.end());
+
+	wchar_t message[160];
+	std::swprintf(message, std::size(message),
+		StringTable::TryFetchString("GUI:DesyncReloaded", L"The game went out of sync and has gone back to %02d:%02d."),
+		save_frame / 60 / 60, save_frame / 60 % 60);
+	MessageListClass::Instance.PrintMessage(message, RulesClass::Instance->MessageDelay,
+		HouseClass::CurrentPlayer ? HouseClass::CurrentPlayer->ColorSchemeIndex : -1, false);
+}
+
+
+/**
+ *  Whether the save from this frame went out of sync again after being loaded.
+ */
+bool DesyncDialogClass::Is_Failed_Save(int frame) const
+{
+	return std::find(FailedSaveFrames.begin(), FailedSaveFrames.end(), frame) != FailedSaveFrames.end();
 }

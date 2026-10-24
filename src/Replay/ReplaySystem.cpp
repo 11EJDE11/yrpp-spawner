@@ -940,6 +940,11 @@ namespace ReplaySystem
 				if (nextRecord.EndOfStream)
 				{
 					ReplayState.PlaybackStreamEnded = true;
+
+					// A recording that stopped before the game ended (one the desync dialog ended to load
+					// a save, say) has no game end to report this at.
+					Debug::Log("[Replay] The recording ends before frame %d.\n", currentFrame);
+					LogPlaybackDivergenceSummary();
 				}
 				else
 				{
