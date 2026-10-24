@@ -267,6 +267,21 @@ DEFINE_HOOK(0x67E6DA, LoadGame_AfterInit, 0x6)
 	return 0;
 }
 
+// Loading a multiplayer save starts at full progress, so SessionClass's progress callback sends
+// every update as a guaranteed message, then waits up to four seconds each time for the global send
+// queue to drain to five. Whoever starts loading first sends before the others are listening, and
+// the others stop acknowledging global messages once they reach the frame sync, so the first player
+// stalls on every callback - 10 to 20 seconds - while everyone else waits. The messages only drive
+// the loading bars and stay queued; the frame sync is what holds the start, so skip the wait.
+DEFINE_HOOK(0x69B01A, SessionClass_Callback_NoProgressWaitOnLoad, 0x5)
+{
+	enum { SkipWait = 0x69B148 };
+
+	return Spawner::Enabled && Spawner::GetConfig()->LoadSaveGame
+		? SkipWait
+		: 0;
+}
+
 #pragma endregion
 
 DEFINE_HOOK(0x686A9E, ReadScenario_InitSomeThings_SpecialHouseIsAlly, 0x6)
