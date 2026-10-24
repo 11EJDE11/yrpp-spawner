@@ -69,6 +69,11 @@ DEFINE_HOOK(0x6BD7C5, WinMain_SpawnerInit, 0x6)
 		Patch::Apply_TYPED<int>(0x6843C7, { Spawner::GetConfig()->ConnTimeout }); // Scenario_Load_Wait
 		Patch::Apply_TYPED<int>(0x684484, { Spawner::GetConfig()->ConnTimeout }); // Scenario_Load_Wait, on progress
 
+		// While the game waits for a player, the FRAMESYNC that tells them where it is goes out only
+		// every 180 ticks (3 s). Nothing else is sent while stalled, so once a loss burst ends a
+		// stalled pair could sit for up to 3 s more. Resend every 10 ticks instead; it is a few bytes.
+		Patch::Apply_TYPED<int>(0x648061, { 10 }); // Queue_AI_Multiplayer, Wait_For_Players resend_delta
+
 		// Show GameMode in DiplomacyDialog in Skirmish
 		Patch::Apply_LJMP(0x658117, 0x658126); // RadarClass_DiplomacyDialog
 
