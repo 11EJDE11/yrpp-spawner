@@ -381,7 +381,7 @@ namespace FPStateGuard
 	static constexpr unsigned int DangerMask = 0xE040;
 	static constexpr unsigned int DefaultMxcsr = 0x1F80;
 
-	void Repair(const char* pSite)
+	void RepairMxcsr(const char* pSite)
 	{
 		const unsigned int mxcsr = _mm_getcsr();
 		if ((mxcsr & DangerMask) == 0)
@@ -396,6 +396,36 @@ namespace FPStateGuard
 			Debug::Log("Repaired corrupted SSE FP state at %s: MXCSR %04X -> %04X (GPU driver bug, see cnc-ddraw#453)\n",
 				pSite, mxcsr & 0xFFFF, DefaultMxcsr);
 		}
+	}
+
+	// The game's x87 control word, saved by WinMain right after it sets round-toward-zero
+	// (store_fpu_codeword, 0x7C5EE4). Westwood's __ftol loads it again before converting, but any
+	// x87 maths before that, and Ares' own conversions, run with whatever a driver left set.
+	void RepairX87(const char* pSite)
+	{
+		WORD expected = *reinterpret_cast<const WORD*>(0x822D80);
+		if (!expected)
+			return;
+
+		WORD current;
+		__asm fnstcw current;
+		if (current == expected)
+			return;
+
+		__asm fldcw expected;
+
+		static int logged = 0;
+		if (logged < 10)
+		{
+			++logged;
+			Debug::Log("Repaired changed x87 FP control word at %s: %04X -> %04X\n", pSite, current, expected);
+		}
+	}
+
+	void Repair(const char* pSite)
+	{
+		RepairMxcsr(pSite);
+		RepairX87(pSite);
 	}
 }
 
