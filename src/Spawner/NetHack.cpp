@@ -68,9 +68,11 @@ int WINAPI NetHack::SendTo(
 	// A failed sendto means this machine lost its link, rather than packets being dropped upstream.
 	if (ret == SOCKET_ERROR)
 		NetDiagnostics::LogSendFailure(index, firstError);
+	// A redundant copy is of the engine's datagram alone: repeating a whole bundle (up to a kilobyte)
+	// filled a slow upload, which the drops then made redundancy answer with more copies.
 	for (int i = 1; i < copies; ++i)
 	{
-		const int extra = Tunnel::SendTo(sockfd, sendBuf, sendLen, flags, &tempDest, addrlen);
+		const int extra = Tunnel::SendTo(sockfd, buf, len, flags, &tempDest, addrlen);
 		PacketRedundancy::NoteExtraSend(extra);
 		if (ret == SOCKET_ERROR && extra != SOCKET_ERROR)
 			ret = extra;
