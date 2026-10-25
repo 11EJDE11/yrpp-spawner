@@ -742,10 +742,12 @@ void Spawner::After_Main_Loop()
 
 		auto SaveGame = [PrintMessage](const char* fName, const wchar_t* description)
 		{
-			if (ScenarioClass::SaveGame(fName, description))
+			const bool saved = ScenarioClass::SaveGame(fName, description);
+			if (saved)
 				PrintMessage(StringTable::LoadString(GameStrings::TXT_GAME_WAS_SAVED));
 			else
 				PrintMessage(StringTable::LoadString(GameStrings::TXT_ERROR_SAVING_GAME));
+			return saved;
 		};
 
 		// Send the message.
@@ -806,8 +808,8 @@ void Spawner::After_Main_Loop()
 			// regardless as it shouldn't impact anything. The suffix for it is unavailable
 			// though as it would require a custom event (seems overkill for such).
 			saveGameDescription += StringTable::LoadString(GameStrings::TXT_MULTIPLAYER_GAME);
-			SaveGame(GameStrings::SAVEGAME_NET, saveGameDescription.c_str());
-			DesyncDialog.Note_Save_Made(Unsorted::CurrentFrame);
+			const bool saved = SaveGame(GameStrings::SAVEGAME_NET, saveGameDescription.c_str());
+			DesyncDialog.Note_Save_Made(Unsorted::CurrentFrame, saved);
 
 			Spawner::NextAutoSaveFrame = Unsorted::CurrentFrame + pConfig->AutoSaveInterval;
 		}

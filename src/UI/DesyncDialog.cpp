@@ -78,6 +78,10 @@
 #include <Replay/ReplaySystem.Internal.h>
 #define DESYNC_RELOAD_REPLAY
 #endif
+#if __has_include(<Spawner/KickAgreement.h>)
+#include <Spawner/KickAgreement.h>
+#define DESYNC_RELOAD_KICKAGREEMENT
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -210,6 +214,10 @@ namespace
 #ifdef DESYNC_RELOAD_REDUNDANCY
 			PacketRedundancy::Reset();
 #endif
+#ifdef DESYNC_RELOAD_KICKAGREEMENT
+			// Its order history and cutoffs are frames of the timeline left behind.
+			KickAgreement::Reset();
+#endif
 
 			// Loading replaces the surfaces but leaves Temp on the old hidden one, and
 			// leaves the session's sound and input stopped.
@@ -309,7 +317,7 @@ DesyncDialogOutcomeType DesyncDialogClass::Run()
 		 *  we are suspended) services the network via Call_Back. If it ever
 		 *  reports that the game itself has ended, bail out.
 		 */
-		if (UI::Updated()) {
+		if (UI::Updated() || QuitPending) {
 			outcome = DESYNC_OUTCOME_QUIT;
 			break;
 		}
@@ -880,6 +888,16 @@ DesyncActionType DesyncDialogClass::Check_And_Handle_Desync()
 		return DESYNC_ACTION_PROCEED;
 	}
 
+	// The others went back to a save this player couldn't load.
+	if (QuitPending) {
+		Send_Sign_Off();
+		WWMessageBox::Instance.Process(
+			StringTable::TryFetchString("GUI:DesyncReloadFailed",
+				L"The game went out of sync, and this player couldn't go back to the save the others went back to."),
+			StringTable::LoadString(GameStrings::TXT_OK), nullptr);
+		return DESYNC_ACTION_QUIT;
+	}
+
 	// A load is already on its way; the frame is thrown away with the timeline.
 	if (Has_Pending_Reload()) {
 		return DESYNC_ACTION_SKIP_FRAME;
@@ -1318,8 +1336,19 @@ BOOL CALLBACK DesyncDialogClass::Dialog_Proc(HWND window, UINT message, WPARAM w
  *  Records a multiplayer save just made. Every player saves on the same frame,
  *  and the file is whichever SVGM_*.NET was written last (Phobos numbers them).
  */
-void DesyncDialogClass::Note_Save_Made(int frame)
+void DesyncDialogClass::Note_Save_Made(int frame, bool saved)
 {
+	/**
+	 *  A save that failed here is not offered, and if the game master picks it
+	 *  this player leaves (see Notify_Go). That it succeeded is all that is
+	 *  checked: a check on the file's age could fail on one machine and not on
+	 *  another, and split a reload the same way.
+	 */
+	if (!saved) {
+		Debug::Log("DesyncDialog: the save on frame %d failed.\n", frame);
+		return;
+	}
+
 	char pattern[MAX_PATH];
 	std::snprintf(pattern, std::size(pattern), "%s\\SVGM_*.NET", Spawner::GetConfig()->SavedGameDir);
 
@@ -1339,13 +1368,7 @@ void DesyncDialogClass::Note_Save_Made(int frame)
 	} while (FindNextFileA(search, &found));
 	FindClose(search);
 
-	// Written within the last few seconds, or the save failed and this is an older one.
-	FILETIME now {};
-	GetSystemTimeAsFileTime(&now);
-	const auto ticks = [](const FILETIME& time) {
-		return (static_cast<unsigned long long>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
-	};
-	if (newest.empty() || ticks(now) - ticks(newest_time) > 10ULL * 10000000ULL) {
+	if (newest.empty()) {
 		return;
 	}
 
@@ -1494,7 +1517,8 @@ void DesyncDialogClass::Notify_Load(int save_frame, int desync_frame)
 		[save_frame](const SaveEntry& save) { return save.Frame == save_frame; });
 
 	if (!have_it) {
-		Debug::Log("DesyncDialog: this player has no save from frame %d!\n", save_frame);
+		Debug::Log("DesyncDialog: this player has no save from frame %d; leaving.\n", save_frame);
+		QuitPending = true;
 		return;
 	}
 
@@ -1563,6 +1587,9 @@ void DesyncDialogClass::Notify_Go(int save_frame)
 
 	if (have_it) {
 		PendingReloadFrame = save_frame;
+	} else {
+		Debug::Log("DesyncDialog: this player has no save from frame %d; leaving.\n", save_frame);
+		QuitPending = true;
 	}
 }
 
@@ -1618,6 +1645,7 @@ void DesyncDialogClass::Perform_Pending_Reload()
 	const auto save = std::find_if(Saves.begin(), Saves.end(),
 		[save_frame](const SaveEntry& entry) { return entry.Frame == save_frame; });
 	if (save == Saves.end()) {
+		QuitPending = true;
 		return;
 	}
 
@@ -1653,7 +1681,8 @@ void DesyncDialogClass::Perform_Pending_Reload()
 	Reload_Hooks::Before_Load();
 
 	if (!LoadOptionsClass::LoadMission(path.c_str())) {
-		Debug::Log("DesyncDialog: loading %s failed!\n", path.c_str());
+		Debug::Log("DesyncDialog: loading %s failed; leaving.\n", path.c_str());
+		QuitPending = true;
 		return;
 	}
 

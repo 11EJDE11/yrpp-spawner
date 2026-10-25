@@ -98,7 +98,7 @@ public:
 	DesyncActionType Check_And_Handle_Desync();
 
 	// Multiplayer saves: those made during the game, and the one it was started from.
-	void Note_Save_Made(int frame);
+	void Note_Save_Made(int frame, bool saved);
 	void Note_Save_Loaded(const char* path, int frame);
 
 	// The load the game master chose, done at the top of the main loop.
@@ -179,6 +179,10 @@ private:
 
 	// The save to load at the top of the next main loop, by its frame; -1 for none.
 	int PendingReloadFrame = -1;
+
+	// The others are going back to a save this player can't load: it leaves rather than play on
+	// in the timeline they leave behind.
+	bool QuitPending = false;
 
 	// The save last loaded after a desync, so another desync before the next save offers the
 	// one before it.
