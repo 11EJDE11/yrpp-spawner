@@ -258,7 +258,7 @@ public:
 		, FrameAwareGate { true }
 		, FastRetransmit { true }
 		, RetransmitBackoff { true }
-		, PacketRedundancy { false } // PacketBundling covers the same loss better; the two together cost more and do worse
+		, PacketRedundancy { true } // With bundling: under 20% loss, half the input delay of either alone, for more datagrams
 		, RedundancyCopies { 2 }
 		, AdaptiveRedundancy { true }
 		, RedundantAcks { true }
