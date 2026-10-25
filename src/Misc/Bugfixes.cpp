@@ -18,6 +18,7 @@
 */
 
 #include <Utilities/Macro.h>
+#include <ProgressScreenClass.h>
 #include <SessionClass.h>
 #include <Unsorted.h>
 #include <WWMouseClass.h>
@@ -64,4 +65,26 @@ DEFINE_HOOK(0x4F4B8E, GScreenClass_DoBlit_SkipUncapturedCursorWait, 0x8)
 		Sleep(50);
 
 	return 0x4F4B96;
+}
+
+// A player's loading progress as another reports it can only go up. Reports at 100% are sent reliably,
+// the ones before unreliably, so a 99% one that arrives after the 100% (reordered on the way) set the
+// player back to 99% for good: the loading screen waited for it until it timed out and dropped that
+// player, who had gone on into the game with everyone else - a game that split at frame 0.
+// 0x48DAA3 is `fild GPacket.Chat_ID` (6 bytes, absolute) in Network_Call_Back's NET_PROGRESS_REPORT
+// case; ESI is the sender's index in Players, as ProgressScreenClass::Init (0x642A60) zeroes them.
+// The scale at +0x48 is a double (0x643C98 loads it with fld qword), not the int YRpp declares.
+DEFINE_HOOK(0x48DAA3, NetworkCallBack_ProgressNeverBack, 0x6)
+{
+	enum { Skip = 0x48DAD3 };
+
+	GET(int, index, ESI);
+	const int percent = *reinterpret_cast<const int*>(0xA8D667);
+
+	auto& screen = ProgressScreenClass::Instance;
+	const double scale = *reinterpret_cast<const double*>(reinterpret_cast<const char*>(&screen) + 0x48);
+	if (index >= 0 && index < 8 && scale * 0.01 * percent < screen.PlayerProgresses[index])
+		return Skip;
+
+	return 0;
 }
