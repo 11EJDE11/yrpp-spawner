@@ -77,9 +77,6 @@ DEFINE_HOOK(0x6BD7C5, WinMain_SpawnerInit, 0x6)
 		// Show GameMode in DiplomacyDialog in Skirmish
 		Patch::Apply_LJMP(0x658117, 0x658126); // RadarClass_DiplomacyDialog
 
-		// Leaves bottom bar closed for losing players during last game frames
-		Patch::Apply_LJMP(0x6D1639, 0x6D1640); // TabClass_6D1610
-
 		// Allow surrendering to observe even when only one human is still playing
 		Patch::Apply_LJMP(0x4F1993, 0x4F19C4); // AbortMissionDialog_Init_SkipHumanCount
 
@@ -210,6 +207,21 @@ DEFINE_HOOK(0x4FC57C, HouseClass__MPlayerDefeated_CheckAliveAndHumans, 0x7)
 	}
 
 	return FinishMatch;
+}
+
+// Leaves the bottom bar closed for a defeated local player. When the local player loses, the game
+// closes the bar (Toggle_Thumb) and sets a flag (0x824410) that nothing clears, so every later defeat
+// that ends the match reopens it (Init_Thumb). Each reopen links the command bar buttons into the
+// gadget list again, so the list loops back on itself and the game hangs - e.g. when the local player
+// and another house are both defeated in the last frames. Skipping it is the engine's own path when
+// the flag is clear. The hook above returns here too when the match ends.
+DEFINE_HOOK(0x4FC591, HouseClass__MPlayerDefeated_SkipThumbRestore, 0x5)
+{
+	enum { SkipThumbRestore = 0x4FC5AA };
+
+	return (Spawner::Enabled || ReplaySystem::IsSpectatorPlayback())
+		? SkipThumbRestore
+		: 0;
 }
 
 #pragma endregion MPlayerDefeated

@@ -446,15 +446,6 @@ DEFINE_HOOK(0x686060, DoLose_EndGameAfterPlayback, 0x5)
 	return ReplaySystem::IsPlaybackRequested() ? EndGameWithoutRestarting : 0;
 }
 
-// Skips the tab thumb restore at the end of a match, which hangs the game when watching as a
-// spectator. Playback has no thumb to restore.
-DEFINE_HOOK(0x4FC591, MPlayerDefeated_SkipThumbRestoreDuringSpectatorPlayback, 0x5)
-{
-	enum { SkipThumbRestore = 0x4FC5AA };
-
-	return ReplaySystem::IsSpectatorPlayback() ? SkipThumbRestore : 0;
-}
-
 #pragma endregion Ending playback when the mission ends
 
 DEFINE_HOOK(0x70DA48, TechnoClass_RadarTrackingAI_ShowAllOnViewerRadar, 0x8)
