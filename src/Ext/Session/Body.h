@@ -17,29 +17,40 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
-// Re-created bits of Vinifera's SessionClassExtension. The game's native
-// master/host fields (MasterPlayerID / MasterPlayerName) exist but nothing sets
-// them in a LAN-mode game, so the master is recorded through here.
+// Re-created bits of Vinifera's SessionClassExtension that the desync dialog
+// needs. YR's SessionClass has no equivalent of these (it only has a single
+// global OutOfSync bool and no per-player tracking), so this holds the new
+// state spawner-side. The game's native master/host fields (MasterPlayerID /
+// MasterPlayerName) DO exist and are written through here.
 
 #pragma once
+
+class HouseClass;
 
 namespace SessionExt
 {
 	// The engine supports up to 8 multiplayer houses.
 	constexpr int MaxPlayers = 8;
 
+	// --- Per-player out-of-sync tracking (the engine only has one global flag).
+	//     Set by the desync-detection hook and read by the dialog to colour each
+	//     player's status.
+	extern bool IsOutOfSync[MaxPlayers];
+
+	bool Is_Out_of_Sync(int house_id);
+	void Mark_Player_As_Out_of_Sync(int house_id);
+
 	// Assigns the game master/host, writing the engine's native MasterPlayerID
-	// and MasterPlayerName.
+	// and MasterPlayerName so SessionClass::Am_I_Master() agrees.
 	void Set_Master(int house_id);
 
 	// Called on the host at game start: records itself as the master and tells
 	// every other player who the host is (EXT_NET_HOST_ANNOUNCE), so MasterPlayerID
-	// is the same on all machines. Mirrors Vinifera's
+	// is authoritative on all machines before any desync. Mirrors Vinifera's
 	// SessionClassExtension::Announce_Master.
 	void Announce_Master();
 
-	// Recomputes the master after a player has gone: if the current master is no
-	// longer connected (or none was announced), promotes the connected player with
-	// the lowest house id.
+	// Recomputes the master after a player has been removed: if the current
+	// master is gone, promotes the first remaining non-defeated human house.
 	void Update_Master_After_Player_Removal();
 }

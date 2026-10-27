@@ -375,8 +375,9 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		pSession->GameMode = GameMode::LAN;
 
 		// Until the host announces itself there is no known game master. This
-		// clears any stale value from a previous game (the session is a reused
-		// singleton). Mirrors Vinifera's spawner.
+		// makes our Am_I_Master replacement fall back to the "first human house"
+		// heuristic, and clears any stale value from a previous game (the session
+		// is a reused singleton). Mirrors Vinifera's spawner.
 		pSession->MasterPlayerID() = -1;
 		pSession->MasterPlayerName()[0] = L'\0';
 

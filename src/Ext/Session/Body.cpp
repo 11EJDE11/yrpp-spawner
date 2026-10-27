@@ -26,10 +26,33 @@
 #include <IPX.h>
 #include <IPXManagerClass.h>
 
+#include <Utilities/Macro.h>
+
 #include <cwchar>
+
+bool SessionExt::IsOutOfSync[SessionExt::MaxPlayers] = {};
+
+bool SessionExt::Is_Out_of_Sync(int house_id)
+{
+	if (house_id < 0 || house_id >= MaxPlayers)
+		return false;
+
+	return IsOutOfSync[house_id];
+}
+
+void SessionExt::Mark_Player_As_Out_of_Sync(int house_id)
+{
+	if (house_id < 0 || house_id >= MaxPlayers)
+		return;
+
+	IsOutOfSync[house_id] = true;
+}
 
 void SessionExt::Set_Master(int house_id)
 {
+	if (house_id < 0 || house_id >= MaxPlayers)
+		return;
+
 	SessionClass::Instance.MasterPlayerID() = house_id;
 
 	wchar_t* const master_name = SessionClass::Instance.MasterPlayerName();
@@ -81,10 +104,12 @@ void SessionExt::Update_Master_After_Player_Removal()
 {
 	// Mirrors Vinifera: decide the master from the connected-players list
 	// (NodeNameType::Array == SessionClass::Players, 0xA8DA74), which
-	// Destroy_Connection shrinks immediately. A departed house is only flagged
-	// defeated when its queued E_REMOVEPLAYER event runs, so the houses' Defeated
-	// flag would lag. node->HouseIndex is the house id (the same value
-	// Set_Master/MasterPlayerID use).
+	// Destroy_Connection shrinks immediately - even while the desync dialog has
+	// game logic suspended. We must NOT use the houses' Defeated flag here: a
+	// departed house is only flagged defeated when its queued E_REMOVEPLAYER
+	// event runs, which never happens while suspended, so the old master would
+	// keep looking valid and never get replaced. node->HouseIndex is the house
+	// id (the same value Set_Master/MasterPlayerID use).
 	const int current = SessionClass::Instance.MasterPlayerID();
 	auto& players = NodeNameType::Array;
 
@@ -116,3 +141,44 @@ void SessionExt::Update_Master_After_Player_Removal()
 	if (new_master != -1 && new_master != current)
 		Set_Master(new_master);
 }
+
+/**
+ *  Replacement for SessionClass::Am_I_Master (0x697E70).
+ *
+ *  The vanilla implementation only consults MasterPlayerID/MasterPlayerName in
+ *  GameMode::Internet (WOL) sessions, falling back to "the first non-defeated
+ *  human house is the master" otherwise. Spawner multiplayer games run as
+ *  GameMode::LAN, so the host/master we record through Set_Master (from the
+ *  EXT_NET_HOST_ANNOUNCE at game start) would be ignored. Extend the check to LAN
+ *  so the announced master is honoured - including after host migration. Mirrors
+ *  Vinifera's SessionClassExt::_Am_I_Master.
+ *
+ *  __fastcall(ECX=this, EDX unused, stack: who) reproduces the original __thiscall
+ *  (retn 4); the whole function is replaced via DEFINE_FUNCTION_JUMP below.
+ */
+static bool __fastcall SessionClass_Am_I_Master(SessionClass* pThis, void*, HouseClass* who)
+{
+	if (who == nullptr)
+		who = HouseClass::CurrentPlayer;
+
+	if ((pThis->GameMode == GameMode::Internet || pThis->GameMode == GameMode::LAN) && who != nullptr)
+	{
+		const int master = pThis->MasterPlayerID();
+		if (master != -1)
+			return who->ArrayIndex == master;
+
+		if (_wcsicmp(who->UIName, pThis->MasterPlayerName()) == 0)
+			return true;
+	}
+
+	// Fallback: the first non-defeated human house is the master.
+	for (int i = 0; i < HouseClass::Array.Count; i++)
+	{
+		HouseClass* const house = HouseClass::Array[i];
+		if (house && house->IsHumanPlayer && !house->Defeated)
+			return who == house;
+	}
+
+	return false;
+}
+DEFINE_FUNCTION_JUMP(LJMP, 0x697E70, SessionClass_Am_I_Master)
