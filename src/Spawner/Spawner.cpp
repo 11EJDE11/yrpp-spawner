@@ -33,6 +33,8 @@
 #include <Utilities/DumperTypes.h>
 #include <Misc/Bugfixes.Desyncs.h>
 
+#include <Ext/Session/Body.h>
+
 #include <GameOptionsClass.h>
 #include <GameStrings.h>
 #include <HouseClass.h>
@@ -372,6 +374,12 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 		pSession->GameMode = GameMode::LAN;
 
+		// Until the host announces itself there is no known game master. This
+		// clears any stale value from a previous game (the session is a reused
+		// singleton). Mirrors Vinifera's spawner.
+		pSession->MasterPlayerID() = -1;
+		pSession->MasterPlayerName()[0] = L'\0';
+
 		if (deferForceMultiplayer)
 		{
 			// A Skirmish save already identifies the local house; player names may differ.
@@ -395,6 +403,11 @@ bool Spawner::StartScenario(const char* pScenarioName)
 
 		if (!isReplayPlayback && !pSession->CreateConnections())
 			return false;
+
+		// Let the other players know who the game host is, so the game master is the
+		// same on every machine.
+		if (Config->Host && !isReplayPlayback)
+			SessionExt::Announce_Master();
 
 		// Ares does not support MultiEngineer switching in multiplayer, however
 		// we can disable it simply by setting EngineerCaptureLevel to 1 - Belonit

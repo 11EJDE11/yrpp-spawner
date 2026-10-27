@@ -130,6 +130,7 @@ namespace
 	int g_recovered = 0;
 	int g_redundant = 0;
 	bool g_loggedFirstBundle[PacketBundling::MaxPeers] = {};
+	unsigned long g_lastReceived[PacketBundling::MaxPeers] = {};
 
 	char g_out[MaxBundleBytes];
 
@@ -386,10 +387,18 @@ const char* PacketBundling::PrepareSend(int peerIndex, const char* buf, size_t l
 	return g_out;
 }
 
+unsigned long PacketBundling::LastReceived(int peer)
+{
+	return ValidPeer(peer) ? g_lastReceived[peer] : 0;
+}
+
 int PacketBundling::Receive(int sockfd, const char* datagram, int datagramLen, int peerIndex,
 	char* buf, size_t len, const sockaddr_in* src, int addrlen)
 {
 	const size_t size = static_cast<size_t>((std::max)(datagramLen, 0));
+
+	if (ValidPeer(peerIndex) && size > 0)
+		g_lastReceived[peerIndex] = GetTickCount();
 
 	uint32_t magic = 0;
 	if (size >= BundleHeaderBytes)

@@ -165,6 +165,7 @@ public:
 	int  RenderSkipRenderShare;
 	bool NetDiagnostics;
 	bool ForceMultiplayer;
+	bool Host; // True on the machine hosting the game; announces itself as the game master at start.
 
 	// Tunnel Options
 	int  TunnelId;
@@ -270,6 +271,7 @@ public:
 		, RenderSkipRenderShare { 25 }
 		, NetDiagnostics { true }
 		, ForceMultiplayer { false }
+		, Host { false }
 
 		// Tunnel Options
 		, TunnelId { 0 }

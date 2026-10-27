@@ -116,6 +116,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		RenderSkipRenderShare  = pINI->ReadInteger(pSettingsSection, "RenderSkipRenderShare", RenderSkipRenderShare);
 		NetDiagnostics   = pINI->ReadBool(pSettingsSection, "NetDiagnostics", NetDiagnostics);
 		ForceMultiplayer = pINI->ReadBool(pSettingsSection, "ForceMultiplayer", ForceMultiplayer);
+		Host             = pINI->ReadBool(pSettingsSection, "Host", Host);
 	}
 
 	{ // Tunnel Options
