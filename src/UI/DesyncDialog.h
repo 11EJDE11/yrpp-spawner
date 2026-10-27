@@ -225,6 +225,13 @@ private:
 	// Players already dropped for going out of sync, so each is dropped and announced once.
 	bool PlayerRemoved[SessionExt::MaxPlayers] = {};
 
+	// Players the dialog shows as out of sync: those outside the largest group that agrees,
+	// which for a player outside it is itself and those agreeing with it.
+	bool ShownOutOfSync[SessionExt::MaxPlayers] = {};
+
+	// Removes the houses of players no longer in the game, as the engine does for a lost connection.
+	void Remove_Departed_Houses();
+
 	/**
 	 *  Heartbeat bookkeeping for detecting players that silently disappear.
 	 */

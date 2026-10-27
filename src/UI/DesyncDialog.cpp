@@ -654,7 +654,7 @@ void DesyncDialogClass::Update_Player_List()
 		if (PlayerLeft[i]) {
 			status = StringTable::TryFetchString("GUI:DesyncStatusQuit", L"Quit");
 			color = RGB(200, 0, 0);
-		} else if (SessionExt::Is_Out_of_Sync(i)) {
+		} else if (ShownOutOfSync[i]) {
 			status = StringTable::TryFetchString("GUI:DesyncStatusDesynced", L"Desynced");
 			color = RGB(200, 200, 0);
 		} else {
@@ -1058,6 +1058,8 @@ DesyncActionType DesyncDialogClass::Check_And_Handle_Desync()
 	 */
 	int own_group = 1;
 	int largest_other = 0;
+	int largest_other_id = -1;
+	bool largest_other_unique = false;
 	for (int id = 0; id < SessionExt::MaxPlayers; id++) {
 		if (!has_crc[id] || id == own_id) {
 			continue;
@@ -1075,13 +1077,41 @@ DesyncActionType DesyncDialogClass::Check_And_Handle_Desync()
 				count++;
 			}
 		}
-		largest_other = (std::max)(largest_other, count);
+
+		if (count > largest_other) {
+			largest_other = count;
+			largest_other_id = id;
+			largest_other_unique = true;
+		} else if (count == largest_other && (crc_frame[id] != crc_frame[largest_other_id]
+			|| house_crc[id] != house_crc[largest_other_id])) {
+			largest_other_unique = false;
+		}
 
 		// Whatever happens next, the engine must not compare its frames with ours.
 		SessionExt::Mark_Player_As_Out_of_Sync(id);
 	}
 
 	const bool out_of_majority = largest_other > own_group;
+
+	/**
+	 *  The engine's out-of-sync flags are the players this one disagrees with.
+	 *  The dialog shows everyone the same: the players outside the largest
+	 *  group, so a player outside it shows itself as the one out of sync.
+	 */
+	for (int id = 0; id < SessionExt::MaxPlayers; id++) {
+		ShownOutOfSync[id] = SessionExt::Is_Out_of_Sync(id);
+	}
+	if (out_of_majority && largest_other_unique) {
+		for (int id = 0; id < SessionExt::MaxPlayers; id++) {
+			if (has_crc[id]) {
+				ShownOutOfSync[id] = id == own_id || agrees[id]
+					|| crc_frame[id] != crc_frame[largest_other_id] || house_crc[id] != house_crc[largest_other_id];
+			}
+		}
+		if (own_id >= 0) {
+			ShownOutOfSync[own_id] = true;
+		}
+	}
 	Debug::Log("DesyncDialog: %d players agree with this one, the largest other group is %d; this player is %s.\n",
 		own_group, largest_other, out_of_majority ? "outside the majority"
 			: own_group > largest_other ? "in the majority" : "in an even split");
@@ -1156,6 +1186,7 @@ DesyncActionType DesyncDialogClass::Check_And_Handle_Desync()
 			}
 		}
 		SessionExt::Update_Master_After_Player_Removal();
+		Remove_Departed_Houses();
 		return DESYNC_ACTION_PROCEED;
 
 	case DESYNC_OUTCOME_QUIT:
@@ -1854,12 +1885,54 @@ void DesyncDialogClass::Perform_Pending_Reload()
 	}
 	SignOffsDuringLoad.clear();
 
+	// Sent with the loaded game's first packets: its first frame waits for everyone and skips
+	// the sync checks for a while (Queue_AI_Multiplayer), but keeps what is queued.
+	Remove_Departed_Houses();
+
 	wchar_t message[160];
 	std::swprintf(message, std::size(message),
 		StringTable::TryFetchString("GUI:DesyncReloaded", L"The game went out of sync and has gone back to %02d:%02d."),
 		save_frame / 60 / 60, save_frame / 60 % 60);
 	MessageListClass::Instance.PrintMessage(message, RulesClass::Instance->MessageDelay,
 		HouseClass::CurrentPlayer ? HouseClass::CurrentPlayer->ColorSchemeIndex : -1, false);
+}
+
+
+/**
+ *  Houses still in the game whose players have gone: one that quit while the
+ *  dialog was open, which only signs off, and one removed before the save just
+ *  loaded, which the save brings back. Nobody would give them orders again.
+ *  A lost connection makes the engine send a REMOVEPLAYER order from each of
+ *  the others (Destroy_Connection, 0x5DA750), which destroys the house on the
+ *  same frame everywhere; the same order is sent for these.
+ */
+void DesyncDialogClass::Remove_Departed_Houses()
+{
+	if (HouseClass::CurrentPlayer == nullptr) {
+		return;
+	}
+
+	for (int id = 0; id < HouseClass::Array.Count; id++) {
+		const HouseClass* house = HouseClass::Array[id];
+		// Those just dropped for going out of sync had theirs sent by Destroy_Connection.
+		if (house == nullptr || !house->IsHumanPlayer || house->Defeated || house->IsObserver()
+			|| house == HouseClass::CurrentPlayer || (id < SessionExt::MaxPlayers && PlayerRemoved[id])) {
+			continue;
+		}
+
+		bool connected = false;
+		for (int i = 0; i < NodeNameType::Array.Count && !connected; i++) {
+			connected = NodeNameType::Array[i] != nullptr && NodeNameType::Array[i]->HouseIndex == id;
+		}
+		if (connected) {
+			continue;
+		}
+
+		Debug::Log("DesyncDialog: house %d's player has gone; removing the house.\n", id);
+		EventClass event(HouseClass::CurrentPlayer->ArrayIndex, EventType::RemovePlayer);
+		event.RemovePlayer.HouseID = id;
+		EventClass::OutList.Add(event);
+	}
 }
 
 
