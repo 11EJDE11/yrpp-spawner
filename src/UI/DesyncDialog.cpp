@@ -433,11 +433,26 @@ DesyncDialogOutcomeType DesyncDialogClass::Run()
 			break;
 		}
 
-		if (ContinueReceived || Decision == IDC_DESYNC_CONTINUE) {
+		if (!ResumeSent && (ContinueReceived || Decision == IDC_DESYNC_CONTINUE)) {
 
 			if (Decision == IDC_DESYNC_CONTINUE) {
 				Send_Continue();
 			}
+
+			// A player outside the majority leaves on a continue; nobody waits for it.
+			if (OutOfMajority) {
+				outcome = DESYNC_OUTCOME_CONTINUE;
+				break;
+			}
+
+			ResumeSent = true;
+			Send_Resume();
+			EnableWindow(GetDlgItem(Window, IDC_DESYNC_LOAD), FALSE);
+			EnableWindow(GetDlgItem(Window, IDC_DESYNC_CONTINUE), FALSE);
+			EnableWindow(GetDlgItem(Window, IDC_DESYNC_QUIT), FALSE);
+		}
+
+		if (ResumeSent && Everyone_Resumed()) {
 			outcome = DESYNC_OUTCOME_CONTINUE;
 			break;
 		}
@@ -1092,6 +1107,9 @@ DesyncActionType DesyncDialogClass::Check_And_Handle_Desync()
 	}
 
 	const bool out_of_majority = largest_other > own_group;
+	OutOfMajority = out_of_majority;
+	ResumeSent = false;
+	std::fill(std::begin(ResumeFrom), std::end(ResumeFrom), false);
 
 	/**
 	 *  The engine's out-of-sync flags are the players this one disagrees with.
@@ -1186,7 +1204,23 @@ DesyncActionType DesyncDialogClass::Check_And_Handle_Desync()
 			}
 		}
 		SessionExt::Update_Master_After_Player_Removal();
+
+		/**
+		 *  Those who left while the dialog was open had orders in flight that
+		 *  some may have read and others not. Everyone resumed only once each
+		 *  other player had resumed or left (Run), so all agree on who left;
+		 *  their orders from this frame on are dropped as for those out of sync.
+		 *  Their connections are already gone, so this comes after the above, and
+		 *  they count as dropped, which a later continue would otherwise repeat.
+		 */
 		Remove_Departed_Houses();
+		for (int id = 0; id < SessionExt::MaxPlayers; id++) {
+			if (PlayerLeft[id]) {
+				SessionExt::Mark_Player_As_Out_of_Sync(id);
+				PlayerRemoved[id] = true;
+			}
+		}
+
 		return DESYNC_ACTION_PROCEED;
 
 	case DESYNC_OUTCOME_QUIT:
@@ -1349,6 +1383,10 @@ bool DesyncDialogClass::Handle_Global_Packet(const ExtGlobalPacketType* packet, 
 
 	case EXT_NET_DESYNC_READY:
 		Notify_Ready(packet->Heartbeat.HouseID);
+		return true;
+
+	case EXT_NET_DESYNC_RESUME:
+		Notify_Resume(packet->Heartbeat.HouseID);
 		return true;
 
 	case EXT_NET_DESYNC_GO:
@@ -1710,6 +1748,58 @@ void DesyncDialogClass::Send_Go(int save_frame)
 	packet.Load.DesyncFrame = DesyncFrame;
 
 	Broadcast_Global_Packet(packet, 1);
+}
+
+
+/**
+ *  Tells everyone this player has the decision to continue and resumes.
+ */
+void DesyncDialogClass::Send_Resume()
+{
+	if (HouseClass::CurrentPlayer == nullptr) {
+		return;
+	}
+
+	Debug::Log("DesyncDialog: resuming once everyone has.\n");
+
+	ExtGlobalPacketType packet {};
+	packet.Command = EXT_NET_DESYNC_RESUME;
+	Local_Player_Name(packet.Name, sizeof(packet.Name));
+	packet.Heartbeat.HouseID = static_cast<char>(HouseClass::CurrentPlayer->ArrayIndex);
+
+	Broadcast_Global_Packet(packet, 1);
+}
+
+
+void DesyncDialogClass::Notify_Resume(int house_id)
+{
+	if (house_id >= 0 && house_id < SessionExt::MaxPlayers) {
+		ResumeFrom[house_id] = true;
+	}
+}
+
+
+/**
+ *  Whether every other player still here that agrees with this one has said
+ *  it resumes. One that leaves is dropped from the player list when its
+ *  sign-off arrives, and those out of sync are being dropped.
+ */
+bool DesyncDialogClass::Everyone_Resumed() const
+{
+	auto& players = NodeNameType::Array;
+	for (int i = 1; i < players.Count; i++) {
+		const NodeNameType* node = players[i];
+		if (node == nullptr) {
+			continue;
+		}
+
+		const int id = node->HouseIndex;
+		if (id >= 0 && id < SessionExt::MaxPlayers && !SessionExt::Is_Out_of_Sync(id) && !ResumeFrom[id]) {
+			return false;
+		}
+	}
+
+	return true;
 }
 
 

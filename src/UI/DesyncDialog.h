@@ -130,6 +130,7 @@ private:
 	void Send_Ready();
 	void Send_Go(int save_frame);
 	void Notify_Ready(int house_id);
+	void Notify_Resume(int house_id);
 	void Notify_Go(int save_frame);
 	bool Everything_Sent_Acknowledged() const;
 	bool Everyone_Ready() const;
@@ -156,6 +157,20 @@ private:
 	 *  Has the game master decided to continue without the desynced players?
 	 */
 	bool ContinueReceived = false;
+
+	/**
+	 *  Continuing also takes a step: a player that leaves from the dialog has
+	 *  orders in flight that some may have read and others not. So each player
+	 *  says it resumes, and nobody does until every other player has resumed or
+	 *  left; then all agree on who left, and drop their orders alike.
+	 */
+	bool ResumeSent = false;
+	bool ResumeFrom[SessionExt::MaxPlayers] = {};
+	void Send_Resume();
+	bool Everyone_Resumed() const;
+
+	// This player is outside the largest group that agrees: on a continue it leaves, and nobody waits for it.
+	bool OutOfMajority = false;
 
 	struct SaveEntry
 	{
