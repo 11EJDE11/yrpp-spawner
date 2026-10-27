@@ -201,6 +201,9 @@ DEFINE_HOOK(0x48D859, NetworkCallBack_SignOff_NotifyPlayerLeft, 0x5)
 
 	GET(int, id, ECX);
 
+	if (DesyncDialog.Defer_Sign_Off(id))
+		return AfterDestroyConnection;
+
 	SessionClass::Destroy_Connection(id, 0);
 	SessionExt::Update_Master_After_Player_Removal();
 	DesyncDialog.Notify_Player_Left(id);

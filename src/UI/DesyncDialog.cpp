@@ -117,6 +117,55 @@ namespace
 		return StringTable::TryFetchString("GUI:DesyncChatHint", L"Type here to chat...");
 	}
 
+	// Saves are named as the engine loads them, from the saved game directory.
+	std::string Save_File_Path(const std::string& name)
+	{
+		if (name.find_first_of("\\/:") != std::string::npos) {
+			return name;
+		}
+		return std::string(Spawner::GetConfig()->SavedGameDir) + "\\" + name;
+	}
+
+	/**
+	 *  Reads the whole file, for its size and CRC-32. False if it can't be read
+	 *  to the end.
+	 */
+	bool Read_File_CRC(const std::string& path, unsigned long& size, unsigned long& crc)
+	{
+		static unsigned long table[256];
+		if (table[1] == 0) {
+			for (unsigned long i = 0; i < 256; i++) {
+				unsigned long c = i;
+				for (int k = 0; k < 8; k++) {
+					c = (c & 1) ? 0xEDB88320UL ^ (c >> 1) : c >> 1;
+				}
+				table[i] = c;
+			}
+		}
+
+		const HANDLE file = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+			FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+		if (file == INVALID_HANDLE_VALUE) {
+			return false;
+		}
+
+		static unsigned char buffer[64 * 1024];
+		unsigned long value = 0xFFFFFFFFUL;
+		size = 0;
+		DWORD read = 0;
+		bool ok = true;
+		while ((ok = ReadFile(file, buffer, sizeof(buffer), &read, nullptr) != FALSE) && read > 0) {
+			for (DWORD i = 0; i < read; i++) {
+				value = table[(value ^ buffer[i]) & 0xFF] ^ (value >> 8);
+			}
+			size += read;
+		}
+		CloseHandle(file);
+
+		crc = value ^ 0xFFFFFFFFUL;
+		return ok;
+	}
+
 	/**
 	 *  Player list column positions, in pixels within the listbox client
 	 *  area (the same units the game's lobby player lists use).
@@ -329,7 +378,23 @@ DesyncDialogOutcomeType DesyncDialogClass::Run()
 		 *  The game master chose to go back to a save.
 		 */
 		if (Decision == IDC_DESYNC_LOAD && LoadDecidedFrame < 0) {
-			const int save_frame = Selected_Save_Frame();
+			int save_frame = Selected_Save_Frame();
+
+			// The game master's own copy is cut short or changed: it is dropped from the list and
+			// the next older save taken instead. With none left the game goes on without the
+			// desynced players, as when there is no save to offer.
+			while (save_frame >= 0 && !Has_Usable_Save(save_frame)) {
+				Saves.erase(std::remove_if(Saves.begin(), Saves.end(),
+					[save_frame](const SaveEntry& entry) { return entry.Frame == save_frame; }), Saves.end());
+				Fill_Save_List();
+				save_frame = Selected_Save_Frame();
+			}
+
+			if (save_frame < 0 && !Has_Save_To_Offer()) {
+				Debug::Log("DesyncDialog: no save left to go back to; going on without the desynced players.\n");
+				Decision = IDC_DESYNC_CONTINUE;
+			}
+
 			if (save_frame >= 0) {
 				Send_Load(save_frame);
 				LoadDecidedFrame = save_frame;
@@ -1229,6 +1294,9 @@ bool DesyncDialogClass::Handle_Global_Packet(const ExtGlobalPacketType* packet, 
 		// Sent by the host at game start (before any dialog is open), so record
 		// the master unconditionally; this is what makes MasterPlayerID
 		// authoritative everywhere - including for the dialog's host icon.
+		if (SessionClass::Instance.MasterPlayerID() != packet->Heartbeat.HouseID) {
+			Debug::Log("DesyncDialog: house %d is the game master.\n", static_cast<int>(packet->Heartbeat.HouseID));
+		}
 		SessionExt::Set_Master(packet->Heartbeat.HouseID);
 		return true;
 
@@ -1341,8 +1409,10 @@ void DesyncDialogClass::Note_Save_Made(int frame, bool saved)
 	/**
 	 *  A save that failed here is not offered, and if the game master picks it
 	 *  this player leaves (see Notify_Go). That it succeeded is all that is
-	 *  checked: a check on the file's age could fail on one machine and not on
-	 *  another, and split a reload the same way.
+	 *  checked against the others: a check on the file's age could fail on one
+	 *  machine and not on another, and split a reload the same way. Its size and
+	 *  CRC are kept to tell later whether this player's file is still the one it
+	 *  wrote (see Has_Usable_Save).
 	 */
 	if (!saved) {
 		Debug::Log("DesyncDialog: the save on frame %d failed.\n", frame);
@@ -1372,10 +1442,18 @@ void DesyncDialogClass::Note_Save_Made(int frame, bool saved)
 		return;
 	}
 
+	unsigned long size = 0;
+	unsigned long crc = 0;
+	if (!Read_File_CRC(Save_File_Path(newest), size, crc)) {
+		Debug::Log("DesyncDialog: the save %s made on frame %d can't be read.\n", newest.c_str(), frame);
+		return;
+	}
+
 	Saves.erase(std::remove_if(Saves.begin(), Saves.end(),
 		[frame](const SaveEntry& save) { return save.Frame >= frame; }), Saves.end());
-	Saves.push_back({ frame, newest });
-	Debug::Log("DesyncDialog: noted the save %s made on frame %d.\n", newest.c_str(), frame);
+	Saves.push_back({ frame, newest, size, crc });
+	Debug::Log("DesyncDialog: noted the save %s made on frame %d (%lu bytes, CRC %08lX).\n",
+		newest.c_str(), frame, size, crc);
 }
 
 
@@ -1389,7 +1467,48 @@ void DesyncDialogClass::Note_Save_Loaded(const char* path, int frame)
 	}
 
 	Saves.clear();
-	Saves.push_back({ frame, path });
+
+	unsigned long size = 0;
+	unsigned long crc = 0;
+	if (!Read_File_CRC(Save_File_Path(path), size, crc)) {
+		Debug::Log("DesyncDialog: the save %s the game started from can't be read.\n", path);
+		return;
+	}
+
+	Saves.push_back({ frame, path, size, crc });
+}
+
+
+/**
+ *  A save cut short or changed since this player made it may fail to load,
+ *  and by then the scenario has been cleared and the others are loading too.
+ *  It is read again before this player says it is ready, so that it leaves
+ *  the way a player without the save does.
+ */
+bool DesyncDialogClass::Has_Usable_Save(int save_frame) const
+{
+	const auto save = std::find_if(Saves.begin(), Saves.end(),
+		[save_frame](const SaveEntry& entry) { return entry.Frame == save_frame; });
+	if (save == Saves.end()) {
+		Debug::Log("DesyncDialog: this player has no save from frame %d.\n", save_frame);
+		return false;
+	}
+
+	unsigned long size = 0;
+	unsigned long crc = 0;
+	if (!Read_File_CRC(Save_File_Path(save->Path), size, crc)) {
+		Debug::Log("DesyncDialog: the save %s from frame %d can't be read.\n", save->Path.c_str(), save_frame);
+		return false;
+	}
+
+	if (size != save->Size || crc != save->CRC) {
+		Debug::Log("DesyncDialog: the save %s from frame %d has changed since it was made "
+			"(%lu bytes, CRC %08lX; it was %lu bytes, CRC %08lX).\n",
+			save->Path.c_str(), save_frame, size, crc, save->Size, save->CRC);
+		return false;
+	}
+
+	return true;
 }
 
 
@@ -1513,11 +1632,8 @@ void DesyncDialogClass::Notify_Load(int save_frame, int desync_frame)
 	Debug::Log("DesyncDialog: the game master chose the save from frame %d (desync on frame %d).\n",
 		save_frame, desync_frame);
 
-	const bool have_it = std::any_of(Saves.begin(), Saves.end(),
-		[save_frame](const SaveEntry& save) { return save.Frame == save_frame; });
-
-	if (!have_it) {
-		Debug::Log("DesyncDialog: this player has no save from frame %d; leaving.\n", save_frame);
+	if (!Has_Usable_Save(save_frame)) {
+		Debug::Log("DesyncDialog: can't go back to the save from frame %d; leaving.\n", save_frame);
 		QuitPending = true;
 		return;
 	}
@@ -1582,13 +1698,10 @@ void DesyncDialogClass::Notify_Go(int save_frame)
 {
 	Debug::Log("DesyncDialog: told to load the save from frame %d.\n", save_frame);
 
-	const bool have_it = std::any_of(Saves.begin(), Saves.end(),
-		[save_frame](const SaveEntry& save) { return save.Frame == save_frame; });
-
-	if (have_it) {
+	if (Has_Usable_Save(save_frame)) {
 		PendingReloadFrame = save_frame;
 	} else {
-		Debug::Log("DesyncDialog: this player has no save from frame %d; leaving.\n", save_frame);
+		Debug::Log("DesyncDialog: can't go back to the save from frame %d; leaving.\n", save_frame);
 		QuitPending = true;
 	}
 }
@@ -1663,6 +1776,11 @@ void DesyncDialogClass::Perform_Pending_Reload()
 	 *  read after the load would bring a CRC of the old timeline into the new
 	 *  one. It is done before loading, as a faster player may already be
 	 *  sending from the new timeline by the time this one has loaded.
+	 *
+	 *  The engine reads acknowledged packets strictly in ID order. Those thrown
+	 *  away here were received, so their sender won't send them again; they
+	 *  count as read, or the next packet from the new timeline would wait for
+	 *  them forever.
 	 */
 	if (WinsockInterfaceClass::Instance != nullptr) {
 		WinsockInterfaceClass::Instance->DiscardInBuffers();
@@ -1671,6 +1789,7 @@ void DesyncDialogClass::Perform_Pending_Reload()
 		auto* const connection = IPXManagerClass::Instance.Connection[i];
 		if (connection != nullptr && connection->Queue != nullptr) {
 			connection->Queue->Init();
+			connection->LastReadID = connection->LastSeqID;
 		}
 	}
 
@@ -1680,10 +1799,31 @@ void DesyncDialogClass::Perform_Pending_Reload()
 
 	Reload_Hooks::Before_Load();
 
-	if (!LoadOptionsClass::LoadMission(path.c_str())) {
+	Loading = true;
+	SignOffsDuringLoad.clear();
+	const bool loaded = LoadOptionsClass::LoadMission(path.c_str());
+	Loading = false;
+
+	if (!loaded) {
+		/**
+		 *  A save cut short or changed is caught before this player says it is
+		 *  ready (Has_Usable_Save); this is for one that still fails to load.
+		 *  The failed load has cleared the scenario, and the next frame would
+		 *  run on what is left of it: the engine's wait for the others builds a
+		 *  dialog from it and crashes. Sign off so the others drop this player,
+		 *  and leave the game here. The others throw away what arrives just
+		 *  before they load, so the sign-off is sent a few times over seconds.
+		 */
 		Debug::Log("DesyncDialog: loading %s failed; leaving.\n", path.c_str());
-		QuitPending = true;
-		return;
+		for (int i = 0; i < 10; i++) {
+			Send_Sign_Off();
+			Sleep(500);
+		}
+		MessageBoxW(nullptr,
+			StringTable::TryFetchString("GUI:DesyncReloadFailed",
+				L"The game went out of sync, and this player couldn't go back to the save the others went back to."),
+			L"Yuri's Revenge", MB_OK | MB_ICONERROR | MB_TOPMOST);
+		ExitProcess(0);
 	}
 
 	Reload_Hooks::After_Load();
@@ -1707,12 +1847,32 @@ void DesyncDialogClass::Perform_Pending_Reload()
 	Saves.erase(std::remove_if(Saves.begin(), Saves.end(),
 		[save_frame](const SaveEntry& entry) { return entry.Frame > save_frame; }), Saves.end());
 
+	for (const int id : SignOffsDuringLoad) {
+		Debug::Log("DesyncDialog: house %d signed off during the load; dropping it now.\n", id);
+		SessionClass::Destroy_Connection(id, 0);
+		SessionExt::Update_Master_After_Player_Removal();
+	}
+	SignOffsDuringLoad.clear();
+
 	wchar_t message[160];
 	std::swprintf(message, std::size(message),
 		StringTable::TryFetchString("GUI:DesyncReloaded", L"The game went out of sync and has gone back to %02d:%02d."),
 		save_frame / 60 / 60, save_frame / 60 % 60);
 	MessageListClass::Instance.PrintMessage(message, RulesClass::Instance->MessageDelay,
 		HouseClass::CurrentPlayer ? HouseClass::CurrentPlayer->ColorSchemeIndex : -1, false);
+}
+
+
+bool DesyncDialogClass::Defer_Sign_Off(int id)
+{
+	if (!Loading) {
+		return false;
+	}
+
+	if (std::find(SignOffsDuringLoad.begin(), SignOffsDuringLoad.end(), id) == SignOffsDuringLoad.end()) {
+		SignOffsDuringLoad.push_back(id);
+	}
+	return true;
 }
 
 

@@ -105,6 +105,9 @@ public:
 	bool Has_Pending_Reload() const { return PendingReloadFrame >= 0; }
 	void Perform_Pending_Reload();
 
+	// A sign-off that arrives while the save loads is acted on after it; false when not loading.
+	bool Defer_Sign_Off(int id);
+
 private:
 	void Create_Dialog();
 	void Destroy_Dialog();
@@ -158,7 +161,12 @@ private:
 	{
 		int Frame;
 		std::string Path;
+		unsigned long Size; // the file as it was made, to tell one cut short or changed since
+		unsigned long CRC;
 	};
+
+	// Whether this player has the save from that frame, still as it was made.
+	bool Has_Usable_Save(int save_frame) const;
 
 	// Oldest first.
 	std::vector<SaveEntry> Saves;
@@ -183,6 +191,14 @@ private:
 	// The others are going back to a save this player can't load: it leaves rather than play on
 	// in the timeline they leave behind.
 	bool QuitPending = false;
+
+	/**
+	 *  The load services the network from its progress callback, and the houses
+	 *  are freed while it runs: Destroy_Connection there reads a freed house.
+	 *  Those who sign off meanwhile are dropped once it is done.
+	 */
+	bool Loading = false;
+	std::vector<int> SignOffsDuringLoad;
 
 	// The save last loaded after a desync, so another desync before the next save offers the
 	// one before it.
