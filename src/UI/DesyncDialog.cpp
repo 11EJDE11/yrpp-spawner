@@ -1348,10 +1348,35 @@ void DesyncDialogClass::Notify_Heartbeat(int house_id, bool is_host)
  */
 bool DesyncDialogClass::Handle_Global_Packet(const ExtGlobalPacketType* packet, const IPXAddressClass* address)
 {
-	(void)address;
-
 	if (packet == nullptr) {
 		return false;
+	}
+
+	switch (packet->Command) {
+	case EXT_NET_HOST_ANNOUNCE:
+	case EXT_NET_DESYNC_HEARTBEAT:
+	case EXT_NET_DESYNC_CONTINUE:
+	case EXT_NET_DESYNC_CHAT:
+	case EXT_NET_DESYNC_LOAD:
+	case EXT_NET_DESYNC_READY:
+	case EXT_NET_DESYNC_RESUME:
+	case EXT_NET_DESYNC_GO:
+		break;
+
+	default:
+		return false;
+	}
+
+	/**
+	 *  Ours, but only from a player still in the game here; anything else is
+	 *  dropped. A packet that speaks for a house is taken as from the house it
+	 *  came from. Whose decision a packet carries is not checked against who is
+	 *  master: players can briefly disagree on that, and one that dropped the
+	 *  decision would be left waiting.
+	 */
+	const int sender = address != nullptr ? SessionExt::Sender_House(*address) : -1;
+	if (sender < 0 || sender >= SessionExt::MaxPlayers) {
+		return true;
 	}
 
 	switch (packet->Command) {
@@ -1359,34 +1384,47 @@ bool DesyncDialogClass::Handle_Global_Packet(const ExtGlobalPacketType* packet, 
 		// Sent by the host at game start (before any dialog is open), so record
 		// the master unconditionally; this is what makes MasterPlayerID
 		// authoritative everywhere - including for the dialog's host icon.
-		if (SessionClass::Instance.MasterPlayerID() != packet->Heartbeat.HouseID) {
-			Debug::Log("DesyncDialog: house %d is the game master.\n", static_cast<int>(packet->Heartbeat.HouseID));
+		// Only the host itself announces itself.
+		if (packet->Heartbeat.HouseID != sender) {
+			return true;
 		}
-		SessionExt::Set_Master(packet->Heartbeat.HouseID);
+		if (SessionClass::Instance.MasterPlayerID() != sender) {
+			Debug::Log("DesyncDialog: house %d is the game master.\n", sender);
+		}
+		SessionExt::Set_Master(sender);
 		return true;
 
 	case EXT_NET_DESYNC_HEARTBEAT:
-		Notify_Heartbeat(packet->Heartbeat.HouseID, packet->Heartbeat.IsHost != 0);
+		Notify_Heartbeat(sender, packet->Heartbeat.IsHost != 0);
 		return true;
 
 	case EXT_NET_DESYNC_CONTINUE:
 		Notify_Continue();
 		return true;
 
-	case EXT_NET_DESYNC_CHAT:
-		Notify_Chat(packet->Name, packet->Chat.Text);
+	case EXT_NET_DESYNC_CHAT: {
+		// Under the name of the player it came from, whatever name it carries.
+		char name[64] = "";
+		if (sender < HouseClass::Array.Count && HouseClass::Array[sender] != nullptr) {
+			Wide_To_Ansi(HouseClass::Array[sender]->UIName, name, sizeof(name));
+		}
+		char text[sizeof(packet->Chat.Text)];
+		std::memcpy(text, packet->Chat.Text, sizeof(text));
+		text[sizeof(text) - 1] = '\0';
+		Notify_Chat(name, text);
 		return true;
+	}
 
 	case EXT_NET_DESYNC_LOAD:
 		Notify_Load(packet->Load.SaveFrame, packet->Load.DesyncFrame);
 		return true;
 
 	case EXT_NET_DESYNC_READY:
-		Notify_Ready(packet->Heartbeat.HouseID);
+		Notify_Ready(sender);
 		return true;
 
 	case EXT_NET_DESYNC_RESUME:
-		Notify_Resume(packet->Heartbeat.HouseID);
+		Notify_Resume(sender);
 		return true;
 
 	case EXT_NET_DESYNC_GO:
