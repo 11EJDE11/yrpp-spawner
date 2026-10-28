@@ -196,6 +196,9 @@ DEFINE_HOOK(0x55D878, MainLoop_RecordPlaybackFrameState, 0x6)
 	if (ReplayState.Playback && !ReplaySystem::Controls::IsPlaybackPaused())
 		RestoreFrameState();
 
+	// Main_Game and a load set the lock again from the scenario's flag.
+	ReleaseCutsceneInputLock();
+
 	return 0;
 }
 
@@ -366,6 +369,17 @@ DEFINE_HOOK(0x685670, DoWin_FinishReplayRecording, 0x5)
 	if (SessionClass::IsCampaign())
 		FinishRecordingAtMissionEnd();
 
+	return 0;
+}
+
+// Load_Game, once the save has opened and just before Decode_All_Pointers replaces the scenario. A
+// game loaded during a recording - from a campaign mission's in-game menu - goes on from a state the
+// recording's spawn.ini does not describe, and the Clear_Scenario hook would otherwise start a new
+// recording over this one from it, which plays back as the mission's opening driven by events from
+// somewhere else in it. Playback's own loads (seeking) happen while nothing is recording.
+DEFINE_HOOK(0x67E653, LoadGame_FinishReplayRecording, 0x6)
+{
+	FinishRecordingAtSaveLoad();
 	return 0;
 }
 
@@ -778,10 +792,12 @@ DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
 	return 0;
 }
 
-// Restore the observer after the simulation update.
+// Restore the observer after the simulation update, and undo any input lock a trigger took in it
+// before Sync_Delay pumps the window messages that carry the viewer's keys and clicks.
 DEFINE_HOOK(0x55DCA3, MainLoop_Spectator_RestoreObserverAfterLogicAI, 0x5)
 {
 	RestoreSpectatorObserverAfterSimulation();
+	ReleaseCutsceneInputLock();
 	return 0;
 }
 

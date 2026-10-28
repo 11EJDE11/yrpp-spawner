@@ -44,12 +44,14 @@
 #include <SessionClass.h>
 #include <MouseClass.h>
 #include <RadarClass.h>
+#include <ScenarioClass.h>
 #include <StringTable.h>
 #include <TagClass.h>
 #include <TechnoClass.h>
 #include <TacticalClass.h>
 #include <Timer.h>
 #include <Unsorted.h>
+#include <WWMouseClass.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -388,6 +390,35 @@ namespace ReplaySystem
 			MapClass::Instance.MarkNeedsRedraw(1);
 		}
 
+		void ReleaseCutsceneInputLock()
+		{
+			if (!ReplayState.Playback || !Unsorted::UserInputLocked)
+				return;
+
+			// Shows the cursor the way Unlock_Input (0x684290) does, which then finds nothing to show.
+			// A zoom's lock leaves the scenario's flag clear and its cursor to the zoom out.
+			if (ScenarioClass::Instance->UserInputLocked && WWMouseClass::Instance)
+			{
+				while (WWMouseClass::Instance->GetRefCount())
+					WWMouseClass::Instance->ShowCursor();
+			}
+
+			Unsorted::UserInputLocked = false;
+		}
+
+		// The viewer now plays the mission, so a cutscene still running locks them out as Lock_Input
+		// (0x684240) would have.
+		void RestoreCutsceneInputLock()
+		{
+			if (!ScenarioClass::Instance->UserInputLocked || Unsorted::UserInputLocked)
+				return;
+
+			if (WWMouseClass::Instance && !WWMouseClass::Instance->GetRefCount())
+				WWMouseClass::Instance->HideCursor();
+
+			Unsorted::UserInputLocked = true;
+		}
+
 		void ServiceTakeOver()
 		{
 			if (!ReplayState.TakeOverPending)
@@ -421,6 +452,7 @@ namespace ReplaySystem
 			ReplayState.TakenOver = true;
 
 			RedrawAfterPlaybackReveal();
+			RestoreCutsceneInputLock();
 
 			Debug::Log("[Replay] Taken over as %ls at frame %d.\n", pPlayer->UIName, frame);
 			Controls::PrintControlMessage(StringTable::TryFetchString("TXT_REPLAY_TAKEN_OVER",
@@ -654,6 +686,15 @@ namespace ReplaySystem
 
 		void SpringRecordedSelectionTriggers(const PlaybackFrameRecord& frameRecord)
 		{
+			// These are raised from the frame start, outside the steps that spectator playback hides
+			// the observer from, but the actions they run - Change House, Create Team and the like -
+			// are simulation. The recording ran them with no observer, so they run with none here.
+			HouseClass* const pObserver = HouseClass::Observer;
+			const bool hideObserver = ReplaySystem::IsSpectatorPlayback()
+				&& pObserver && pObserver == HouseClass::CurrentPlayer;
+			if (hideObserver)
+				HouseClass::Observer = nullptr;
+
 			for (const auto uniqueID : frameRecord.SelectionTriggerObjectIDs)
 			{
 				// A scan of the object array per spring, which is only ever a handful on the rare
@@ -682,6 +723,9 @@ namespace ReplaySystem
 					break;
 				}
 			}
+
+			if (hideObserver)
+				HouseClass::Observer = pObserver;
 		}
 
 		void RecordSelectionTriggerSpring(TechnoClass* pTechno)
@@ -1141,14 +1185,27 @@ namespace ReplaySystem
 			ReplayState.RecordingFinishedForSession = true;
 		}
 
+		void FinishRecordingAtSaveLoad()
+		{
+			if (!ReplayState.Recording)
+				return;
+
+			Debug::Log("[Replay] A saved game is being loaded at frame %d; finishing the recording in %s. "
+				"The loaded game is not recorded.\n", ReplayState.FrameWriter.LastFrameNumber(), Replay::GetRecordingOutputPath(GetConfig()));
+
+			StopReplaySystem();
+			ReplayState.RecordingFinishedForSession = true;
+		}
+
 		void StartReplayRecording()
 		{
-			// A campaign mission that has already been recorded owns the output file for the rest of the
-			// launch; see FinishRecordingAtMissionEnd.
+			// A recording that has been finished - a campaign mission that ended, or one a saved game
+			// was loaded over - owns the output file for the rest of the launch; see
+			// FinishRecordingAtMissionEnd and FinishRecordingAtSaveLoad.
 			if (ReplayState.RecordingFinishedForSession)
 			{
-				Debug::Log("[Replay] Not recording this scenario: %s already holds this campaign's first "
-					"mission.\n", Replay::GetRecordingOutputPath(GetConfig()));
+				Debug::Log("[Replay] Not recording this scenario: %s already holds this launch's "
+					"recording.\n", Replay::GetRecordingOutputPath(GetConfig()));
 				StopReplaySystem();
 				return;
 			}

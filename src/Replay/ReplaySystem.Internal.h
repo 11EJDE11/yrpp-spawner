@@ -129,6 +129,7 @@ namespace ReplaySystem
 		void StartReplayPlayback(const char* replayPath);
 		void StopReplaySystem();
 		void FinishRecordingAtMissionEnd();
+		void FinishRecordingAtSaveLoad();
 		void ApplyPlaybackInitialState();
 
 		// Per-frame work, driven from the main loop and from the queue event hooks.
@@ -150,6 +151,9 @@ namespace ReplaySystem
 		void PlaybackFrameEvents();
 		// Hands control to the viewer if the take over command asked for it. Runs at frame start.
 		void ServiceTakeOver();
+		// Gives the viewer their input back from a trigger's cutscene lock. The scenario keeps its own
+		// flag, so the simulation and a save still see the lock.
+		void ReleaseCutsceneInputLock();
 
 		bool PlaybackWantsFullMapReveal();
 	}

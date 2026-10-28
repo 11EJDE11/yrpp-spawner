@@ -202,6 +202,25 @@ Losing or restarting a mission is not the same case and is not hooked: both re-e
 scenario, whose spawn.ini is still the right one, so the retry records over the previous attempt and
 the file describes the attempt the player actually finished with.
 
+Loading a saved game from the in-game menu is the same case as winning, though: the game it loads
+goes on from a state no spawn.ini describes, and `Load_Game` reaches the same `Clear_Scenario` hook
+that starts a recording, which used to start a new one over the file from the loaded state. So
+`FinishRecordingAtSaveLoad` closes the recording out from `Load_Game` (0x67E653, after the save has
+opened and before `Decode_All_Pointers`) and latches recording off exactly as a won mission does.
+
+### Difficulty
+
+A campaign's difficulty is not in the map or the scenario: `Read_Scenario_INI` and
+`HouseClass::Read_INI` read `OptionsClass::Difficulty`, which the game loads from RA2MD.INI's
+`[Options] Difficulty`, and that holds whatever the player last picked in the campaign screen. The
+client writes the mission's difficulty to spawn.ini as well, as `DifficultyModeHuman` and
+`DifficultyModeComputer`, and the spawner applies `Difficulty = 2 - DifficultyModeComputer` before
+the scenario starts. `DifficultyModeComputer` and not `DifficultyModeHuman`, because the latter is
+pinned to normal for a mission with `PlayerAlwaysOnNormalDifficulty`, while the engine has always
+used the slider for both sides. The embedded spawn.ini carries the key, so playback starts the
+mission on the difficulty it was recorded on, whatever the viewer played last - recordings made
+before this was applied included.
+
 ### Playback ends when the mission does
 
 The same chain is why **watching** a campaign replay ends the game when the mission does. The score
@@ -1303,6 +1322,30 @@ at all.
 Everything ahead of those three still runs — input, keyboard commands, rendering, arrow-key and edge
 scrolling, the message list — and `Sync_Delay` still paces the loop, so a paused replay does not spin
 the CPU.
+
+### Cutscenes
+
+A mission's cutscene locks input: `Lock_Input` (0x684240), called by the Lock Input trigger action
+(46), the chronosphere screen effect and a win or loss, sets both `Scen->UserInputLocked` and the global
+`UserInputLocked` (0xA8ED9C), and hides the cursor. While the global is set, `Put_Key_Message` drops
+every key but Escape, `Put_Mouse_Message` drops every click, `Keyboard_Process` runs no command, and
+the map does not scroll. In playback that would take the hotkeys and the control bar away for the
+length of the cutscene.
+
+The global is only ever read by input and drawing code; the simulation and a save use the scenario's
+flag. So playback clears the global, and shows the cursor as `Unlock_Input` would, at the frame start
+(0x55D878, after `Main_Game` or a load has copied the scenario's flag back into it) and straight after
+`LogicClass::AI` (0x55DCA3, after a trigger has run and before `Sync_Delay` pumps the window
+messages). The scenario's flag is left set, so the trigger's own Unlock Input finds the cursor shown
+and clears both as usual. A zoom in (trigger action 49) sets only the global; its cursor stays hidden
+until the zoom out shows it.
+
+What the lock does not cover still holds: while a radar movie or the chronosphere effect pauses the
+game (`Pause_Game_For`, 0x684060), `Main_Loop` takes its short path and runs no input at all, and
+`Put_Key_Message` drops every key while the chronosphere effect plays.
+
+A take over during a cutscene sets the global again from the scenario's flag and hides the cursor, as
+`Lock_Input` would have, so the viewer waits for the cutscene to end like the player did.
 
 ## Taking over
 

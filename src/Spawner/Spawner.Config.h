@@ -135,6 +135,9 @@ public:
 	int  Seed;
 	int  TechLevel;
 	bool IsCampaign;
+	// The computer's campaign difficulty as the client writes it - 0 hard, 2 easy - which is the
+	// player's difficulty reversed. -1 when spawn.ini has none.
+	int  DifficultyModeComputer;
 	int  Tournament;
 	DWORD WOLGameID;
 	char ScenarioName[260];
@@ -241,6 +244,7 @@ public:
 		, Seed { 0 }
 		, TechLevel { 10 }
 		, IsCampaign { false }
+		, DifficultyModeComputer { -1 }
 		, Tournament { 0 }
 		, WOLGameID { 0xDEADBEEF }
 		, ScenarioName { "spawnmap.ini" }

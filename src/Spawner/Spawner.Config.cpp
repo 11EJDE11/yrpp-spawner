@@ -83,6 +83,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		Seed               = pINI->ReadInteger(pSettingsSection, "Seed", Seed);
 		TechLevel          = pINI->ReadInteger(pSettingsSection, "TechLevel", TechLevel);
 		IsCampaign         = pINI->ReadBool(pSettingsSection, "IsSinglePlayer", IsCampaign);
+		DifficultyModeComputer = pINI->ReadInteger(pSettingsSection, "DifficultyModeComputer", DifficultyModeComputer);
 		Tournament         = pINI->ReadInteger(pSettingsSection, "Tournament", Tournament);
 		WOLGameID          = pINI->ReadInteger(pSettingsSection, "GameID", WOLGameID);
 		/* ScenarioName   */ pINI->ReadString(pSettingsSection, "Scenario", ScenarioName, ScenarioName, sizeof(ScenarioName));

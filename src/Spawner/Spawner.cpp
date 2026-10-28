@@ -344,6 +344,12 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		if (Config->LoadSaveGame)
 			return Spawner::LoadSavedGame(Config->SaveGameName);
 
+		// A campaign takes its difficulty from RA2MD.INI's [Options] Difficulty, which Read_Scenario_INI
+		// and HouseClass::Read_INI both read, and that only says what the player picked last. spawn.ini
+		// says what this mission was started on, and a replay carries it, so playback gets the same.
+		if (Config->DifficultyModeComputer >= 0 && Config->DifficultyModeComputer <= 2)
+			GameOptionsClass::Instance.Difficulty = 2 - Config->DifficultyModeComputer;
+
 		// Rename MISSIONMD.INI to this
 		// because Ares has LoadScreenText.Color and Phobos has Starkku's PR #1145
 		// 2025-05-28: Moved to a hook in Spawner.Hook.cpp - Starkku
