@@ -41,12 +41,15 @@ DEFINE_HOOK(0x48DAC4, NetworkCallBack_ExtGlobalPacket, 0x5)
 	enum { SkipDefaultHandler = 0x48DAD3 }; // continue past Process_Global_Packet
 
 	auto* const packet = reinterpret_cast<ExtGlobalPacketType*>(&SessionClass::GlobalReceivePacket);
+	const auto& address = SessionClass::GlobalReceiveAddress;
 
 	if (packet->Command == EXT_NET_HOST_ANNOUNCE)
 	{
-		// Sent by the host at game start, so MasterPlayerID is the same everywhere.
+		// Sent by the host at game start, so MasterPlayerID is the same everywhere. Only the host
+		// itself announces itself.
 		const int house = packet->Heartbeat.HouseID;
-		if (house >= 0 && house < SessionExt::MaxPlayers && SessionClass::Instance.MasterPlayerID() != house)
+		if (house >= 0 && house < SessionExt::MaxPlayers && SessionExt::Sender_House(address) == house
+			&& SessionClass::Instance.MasterPlayerID() != house)
 		{
 			Debug::Log("[Spawner] House %d is the game master.\n", house);
 			SessionExt::Set_Master(house);
@@ -54,7 +57,7 @@ DEFINE_HOOK(0x48DAC4, NetworkCallBack_ExtGlobalPacket, 0x5)
 		return SkipDefaultHandler;
 	}
 
-	if (KickAgreement::Handle_Global_Packet(packet))
+	if (KickAgreement::Handle_Global_Packet(packet, address))
 		return SkipDefaultHandler;
 
 	return 0; // not one of ours: run the engine's Process_Global_Packet

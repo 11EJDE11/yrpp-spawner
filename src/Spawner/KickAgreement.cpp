@@ -930,10 +930,16 @@ TimeoutAction KickAgreement::On_Timeout(int connection_index)
 	return TimeoutAction::KeepWaiting;
 }
 
-bool KickAgreement::Handle_Global_Packet(const ExtGlobalPacketType* packet)
+bool KickAgreement::Handle_Global_Packet(const ExtGlobalPacketType* packet, const IPXAddressClass& address)
 {
 	if (packet == nullptr || packet->Command < EXT_NET_KICK_REQUEST || packet->Command > EXT_NET_KICK_EVENTS)
 		return false;
+
+	// Only a player still in the game here takes part, or passes packets on: one from anyone else,
+	// or from a player removed here, is dropped. Whose decision a packet carries is not checked
+	// against who is master: players can briefly disagree on that, and one left out would split.
+	if (SessionExt::Sender_House(address) < 0)
+		return true;
 
 	// Each packet is handled and passed on once.
 	const auto key = Key(*packet);
@@ -953,6 +959,7 @@ bool KickAgreement::Handle_Global_Packet(const ExtGlobalPacketType* packet)
 	case EXT_NET_KICK_REQUEST:
 		if (!Decision.Active && Valid_House(kick.TargetID) && Valid_House(kick.FromID) && kick.TargetID != Me()
 			&& (kick.TargetID == Master() ? Deputy() : Master()) == Me()
+			&& Connected(kick.TargetID) && Connected(kick.FromID)
 			&& CutoffFrame[kick.TargetID] < 0 && CutoffFrame[kick.FromID] < 0)
 		{
 			Debug::Log("[KickAgreement] House %d asks to remove house %d.\n", kick.FromID, kick.TargetID);

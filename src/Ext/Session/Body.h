@@ -23,6 +23,8 @@
 
 #pragma once
 
+class IPXAddressClass;
+
 namespace SessionExt
 {
 	// The engine supports up to 8 multiplayer houses.
@@ -42,4 +44,8 @@ namespace SessionExt
 	// longer connected (or none was announced), promotes the connected player with
 	// the lowest house id.
 	void Update_Master_After_Player_Removal();
+
+	// The house of the connected player a global packet came from, or -1 when it
+	// came from no player still in the game here.
+	int Sender_House(const IPXAddressClass& address);
 }

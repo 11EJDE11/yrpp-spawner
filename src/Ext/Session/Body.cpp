@@ -24,6 +24,7 @@
 #include <SessionClass.h>
 #include <HouseClass.h>
 #include <IPX.h>
+#include <IPXConnClass.h>
 #include <IPXManagerClass.h>
 
 #include <cwchar>
@@ -115,4 +116,21 @@ void SessionExt::Update_Master_After_Player_Removal()
 
 	if (new_master != -1 && new_master != current)
 		Set_Master(new_master);
+}
+
+int SessionExt::Sender_House(const IPXAddressClass& address)
+{
+	// IPXAddressClass::operator==, as Network_Call_Back matches a sign-off to its sender (0x48D84C).
+	using SameFn = bool(__fastcall*)(const IPXAddressClass* self, void* edx, const IPXAddressClass* other);
+	const auto same = reinterpret_cast<SameFn>(0x53EE70);
+
+	auto& ipx = IPXManagerClass::Instance;
+	for (int i = 0; i < static_cast<int>(ipx.NumConnections); i++)
+	{
+		const IPXConnClass* const connection = ipx.Connection[i];
+		if (connection != nullptr && same(&address, nullptr, &connection->Address))
+			return connection->ID;
+	}
+
+	return -1;
 }

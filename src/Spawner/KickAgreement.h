@@ -20,6 +20,7 @@
 #pragma once
 
 struct ExtGlobalPacketType;
+class IPXAddressClass;
 
 // When a wait for a player times out, the engine removes the player that machine heard from last,
 // each machine by itself. If only two players lose each other while both still reach the rest,
@@ -38,8 +39,8 @@ namespace KickAgreement
 
 	TimeoutAction On_Timeout(int connection_index);
 
-	// One of our global packets arrived. Returns whether it was a kick agreement one.
-	bool Handle_Global_Packet(const ExtGlobalPacketType* packet);
+	// One of our global packets arrived, from that address. Returns whether it was a kick agreement one.
+	bool Handle_Global_Packet(const ExtGlobalPacketType* packet, const IPXAddressClass& address);
 
 	// Each pass of Call_Back, which the wait for players runs too.
 	void Update();
