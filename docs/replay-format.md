@@ -792,8 +792,8 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayFileOut` | `replay.yrrp` | Where the recording is written. Relative to the game directory; missing directories are created. |
 | `ReplayFile` | *(empty)* | Non-empty switches the session to playback of that file. |
 | `ReplayShroudEnabled` | `false` | Keep the recording player's shroud instead of revealing the map. |
-| `ReplayFreeCamera` | `false` | Let the viewer move the camera instead of pinning it to the recorded position. |
-| `ReplayShowSelections` | `true` | Reproduce the recorded unit selection. |
+| `ReplayFreeCamera` | `true` | Let the viewer move the camera instead of pinning it to the recorded position. |
+| `ReplayShowSelections` | `false` | Reproduce the recorded unit selection. |
 | `ReplaySpectator` | `false` | Watch from an observer's seat rather than a player's. See below. |
 | `ReplayShowChatAndBeacons` | `true` | Playback only; recording of this data is unconditional. |
 | `ReplayPlaybackSpeed` | `0` | Playback frame rate in FPS. `0` uses the recorded speed. |

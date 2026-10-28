@@ -229,8 +229,8 @@ public:
 		, ReplayFileOut { "replay.yrrp" }
 		, ReplayFile { "" }
 		, ReplayShroudEnabled { false }
-		, ReplayFreeCamera { false }
-		, ReplayShowSelections { true }
+		, ReplayFreeCamera { true }
+		, ReplayShowSelections { false }
 		, ReplayPlaybackSpeed { 0 }
 		, ReplaySpectator { false }
 		, ReplayShowChatAndBeacons { true }
