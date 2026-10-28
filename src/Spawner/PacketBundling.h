@@ -75,4 +75,7 @@ public:
 	// Datagrams sent as bundles, copies carried in them, copies received that this side had not
 	// already had (what bundling made up for), and copies received that it had.
 	static void GetStats(int& bundles, int& copiesSent, int& recovered, int& redundant);
+
+	// GetTickCount when anything last arrived from this peer, 0 if nothing has.
+	static unsigned long LastReceived(int peer);
 };

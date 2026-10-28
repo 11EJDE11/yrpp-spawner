@@ -28,6 +28,7 @@
     <!-- Ext -->
     <ClCompile Include="$(ThisDir)\src\Ext\Event\Body.cpp" />
     <ClCompile Include="$(ThisDir)\src\Ext\INIClass\Body.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Ext\Session\Body.cpp" />
     <!-- CnCNetYR -->
     <ClCompile Include="$(ThisDir)\src\CnCNetYR\AppIcon.cpp" />
     <ClCompile Include="$(ThisDir)\src\CnCNetYR\Misc.cpp" />
@@ -99,6 +100,8 @@
     <!-- Spawner -->
     <ClCompile Include="$(ThisDir)\src\Spawner\CustomMixes.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\FrameGate.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Spawner\GlobalPacketExt.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Spawner\KickAgreement.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\MPStatsFix.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\FastRetransmit.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\NetDiagnostics.cpp" />
@@ -133,6 +136,7 @@
     <!-- Ext -->
     <ClInclude Include="$(ThisDir)\src\Ext\Event\Body.h" />
     <ClInclude Include="$(ThisDir)\src\Ext\INIClass\Body.h" />
+    <ClInclude Include="$(ThisDir)\src\Ext\Session\Body.h" />
     <!-- CnCNetYR -->
     <ClInclude Include="$(ThisDir)\src\CnCNetYR\Ra2Mode.h" />
     <!-- Misc -->
@@ -162,6 +166,8 @@
     <ClInclude Include="$(ThisDir)\src\Misc\Blowfish\blowfish.h" />
     <!-- Spawner -->
     <ClInclude Include="$(ThisDir)\src\Spawner\FrameGate.h" />
+    <ClInclude Include="$(ThisDir)\src\Spawner\GlobalPacketExt.h" />
+    <ClInclude Include="$(ThisDir)\src\Spawner\KickAgreement.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\FastRetransmit.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\NetDiagnostics.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\NetHack.h" />
