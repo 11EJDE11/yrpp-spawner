@@ -24,6 +24,8 @@
 //   0x493DF0 BlitTransXlatAlpha::Blit         - the bar behind every selected unit's health pips
 //   0x491820 RLEBlitTransXlat<BYTE>::Blit     - decoding that voxel image into the 8-bit scratch surface
 //   0x4984D0/0x4986D0/0x4988C0 RLEBlitTransLucent75/50/25AlphaZRead::Blit - smoke and missile trails
+//   0x4950C0/0x495250 BlitTransLucent50/25AlphaZRead::Blit - the same for shapes that are not RLE
+//   0x496820 RLEBlitTransDarkenZRead::Blit    - the shadows of buildings, infantry and other shapes
 // The 16-bit ones light each pixel through the alpha buffer, and all but 0x493DF0 test it against the
 // Z buffer first.
 //
@@ -603,6 +605,212 @@ public:
 	{
 		return Dispatch<Lucent::Level::Lucent25>(pDst, pSrc, count, skip, zBase, pZ, pA, alphaLevel, unused, pZShape);
 	}
+
+	// The same blends for shapes that are not RLE (0x4950C0, 0x495250: BlitTransLucent50/25AlphaZRead::
+	// Blit), whose originals store each source byte to the stack and read it back as a dword, and keep
+	// the source pointer and the count on the stack. The 75% one (0x494F20) is left alone: no replay
+	// used it to check a replacement against. Nothing patches these that this
+	// knows of, so the routine is checked against the game's own bytes, and anything else runs it.
+	struct PlainVariant
+	{
+		uintptr_t Function;
+		size_t Size;
+		DWORD Hash;
+		uintptr_t BlendAt;
+		DWORD BlendKey;
+		Lucent::Blend Installed;
+	};
+
+	static inline PlainVariant PlainVariants[3] = {
+		{ 0x494F20, 0x10B, 0x1F6AE85A, 0x494FCC },
+		{ 0x4950C0, 0x100, 0x5D7C34C1, 0x495169 },
+		{ 0x495250, 0x10B, 0x8BF6835B, 0x4952FC },
+	};
+
+	// Unchanged from the game's, past the first eight bytes (the jump here and the rest of the
+	// instruction it cuts into). Hashed again whenever the blend's first bytes change.
+	static Lucent::Blend PlainInstalled(PlainVariant& variant)
+	{
+		const DWORD key = *reinterpret_cast<const DWORD*>(variant.BlendAt);
+		if (variant.Installed != Lucent::Blend::Unread && key == variant.BlendKey)
+			return variant.Installed;
+
+		DWORD hash = 0x811C9DC5u;
+		for (auto p = reinterpret_cast<const BYTE*>(variant.Function) + 8; p < reinterpret_cast<const BYTE*>(variant.Function + variant.Size); ++p)
+			hash = (hash ^ *p) * 0x01000193u;
+
+		variant.BlendKey = key;
+		variant.Installed = hash == variant.Hash ? Lucent::Blend::Game : Lucent::Blend::Other;
+		return variant.Installed;
+	}
+
+	using PlainFunction = void(__thiscall*)(const LucentBlitterPerf*, WORD*, const BYTE*, int, int, WORD*, WORD*, int, int);
+
+	// Its first eight bytes (four pushes and a mov), then on into the rest of it.
+	static PlainFunction PlainOriginal(int index)
+	{
+		static PlainFunction trampolines[3] {};
+		if (!trampolines[index])
+		{
+			const uintptr_t function = PlainVariants[index].Function;
+			auto const pCode = static_cast<BYTE*>(VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+			const BYTE entry[3][8] = {
+				{ 0x51, 0x53, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x2C },
+				{ 0x51, 0x53, 0x55, 0x56, 0x8B, 0x74, 0x24, 0x2C },
+				{ 0x51, 0x53, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x2C },
+			};
+			memcpy(pCode, entry[index], 8);
+			pCode[8] = 0xE9;
+			*reinterpret_cast<int32_t*>(pCode + 9) = static_cast<int32_t>(function + 8 - reinterpret_cast<uintptr_t>(pCode + 13));
+			trampolines[index] = reinterpret_cast<PlainFunction>(pCode);
+		}
+
+		return trampolines[index];
+	}
+
+	template <Lucent::Level level>
+	void BlitPlain(WORD* pDst, const BYTE* pSrc, int size, int zValue, WORD* pZ, WORD* pA, int alphaLevel, int warp) const
+	{
+		constexpr int index = static_cast<int>(level);
+		if (PlainInstalled(PlainVariants[index]) != Lucent::Blend::Game)
+			return PlainOriginal(index)(this, pDst, pSrc, size, zValue, pZ, pA, alphaLevel, warp);
+
+		const WORD* const pAlphaRow = reinterpret_cast<const AlphaBlitterPerf*>(this)->AlphaRow(alphaLevel);
+		if (size <= 0)
+			return;
+
+		const WORD mask = Mask;
+		auto const pZBuffer = ZBuffer::Instance;
+		auto const pABuffer = ABuffer::Instance;
+		PrefetchNextRow(pZBuffer, pZ, size);
+		PrefetchNextRow(pABuffer, pA, size);
+
+		while (size > 0)
+		{
+			const ptrdiff_t block = std::min<ptrdiff_t>(
+				std::min(PixelsBeforeWrap(pZBuffer, pZ), PixelsBeforeWrap(pABuffer, pA)), size);
+
+			ptrdiff_t i = 0;
+			for (; i + 16 <= block; i += 16)
+			{
+				const __m128i src = _mm_loadu_si128(reinterpret_cast<const __m128i*>(pSrc + i));
+				unsigned int opaque = ~_mm_movemask_epi8(_mm_cmpeq_epi8(src, _mm_setzero_si128())) & 0xFFFFu;
+				while (opaque)
+				{
+					unsigned long bit;
+					_BitScanForward(&bit, opaque);
+					const ptrdiff_t at = i + static_cast<ptrdiff_t>(bit);
+					opaque &= opaque - 1;
+					if (zValue < pZ[at])
+						pDst[at] = Lucent::Mix<level, Lucent::Blend::Game>(&Palette[pAlphaRow[pA[at]] | pSrc[at]], pDst + at, 0, mask);
+				}
+			}
+
+			for (; i < block; ++i)
+			{
+				if (zValue < pZ[i] && pSrc[i])
+					pDst[i] = Lucent::Mix<level, Lucent::Blend::Game>(&Palette[pAlphaRow[pA[i]] | pSrc[i]], pDst + i, 0, mask);
+			}
+
+			pSrc += block;
+			pDst += block;
+			pZ += block;
+			pA += block;
+			size -= static_cast<int>(block);
+			pZBuffer->AdjustPointer(pZ);
+			pABuffer->AdjustPointer(pA);
+		}
+	}
+
+	void Blit50(WORD* pDst, const BYTE* pSrc, int size, int zValue, WORD* pZ, WORD* pA, int alphaLevel, int warp) const
+	{
+		BlitPlain<Lucent::Level::Lucent50>(pDst, pSrc, size, zValue, pZ, pA, alphaLevel, warp);
+	}
+
+	void Blit25(WORD* pDst, const BYTE* pSrc, int size, int zValue, WORD* pZ, WORD* pA, int alphaLevel, int warp) const
+	{
+		BlitPlain<Lucent::Level::Lucent25>(pDst, pSrc, size, zValue, pZ, pA, alphaLevel, warp);
+	}
+};
+
+// RLEBlitTransDarkenZRead::Blit (0x496820) - the shadows of buildings, infantry and other shapes: a
+// shadow pixel in front of the Z buffer halves the pixel under it through the mask at +4. The original
+// re-reads the Z buffer global, its own pointer and the Z base from memory for every pixel.
+class DarkenBlitterPerf
+{
+public:
+	void* VTable;
+	WORD Mask;
+
+	// Returns what the original leaves in eax: the Z buffer after drawing anything, the Z pointer when
+	// only skipping, or the skip count when there was nothing to do.
+	int BlitRLE(WORD* pDst, const BYTE* pSrc, int count, int skip, int zBase, WORD* pZ, WORD* pA,
+		int alphaLevel, int unused, const signed char* pZShape) const
+	{
+		auto const pZBuffer = ZBuffer::Instance;
+		int result = skip;
+
+		if (skip > 0)
+		{
+			int remaining = skip;
+			do
+			{
+				if (*pSrc++)
+					--remaining;
+				else
+					remaining -= *pSrc++;
+			}
+			while (remaining > 0);
+
+			const int overshoot = -remaining;
+			pDst += overshoot;
+			count -= overshoot;
+			pZ += overshoot;
+			pZBuffer->AdjustPointer(pZ);
+			result = reinterpret_cast<int>(pZ);
+		}
+
+		if (count <= 0)
+			return result;
+
+		const WORD mask = Mask;
+		for (;;)
+		{
+			if (const BYTE first = *pSrc++)
+			{
+				const ptrdiff_t block = std::min<ptrdiff_t>(PixelsBeforeWrap(pZBuffer, pZ), count);
+				ptrdiff_t done = 0;
+				for (;;)
+				{
+					if (zBase - *pZShape++ < *pZ)
+						*pDst = static_cast<WORD>((*pDst >> 1) & mask);
+
+					++pDst;
+					++pZ;
+
+					if (++done == block || !*pSrc)
+						break;
+
+					++pSrc;
+				}
+
+				count -= static_cast<int>(done);
+			}
+			else
+			{
+				const BYTE run = *pSrc++;
+				count -= run;
+				pZShape += run;
+				pDst += run;
+				pZ += run;
+			}
+
+			pZBuffer->AdjustPointer(pZ);
+
+			if (count <= 0)
+				return reinterpret_cast<int>(pZBuffer);
+		}
+	}
 };
 
 // The 8-bit blitter: a byte map at +4.
@@ -660,3 +868,6 @@ DEFINE_FUNCTION_JUMP(LJMP, 0x491820, ByteBlitterPerf::BlitRLE);
 DEFINE_FUNCTION_JUMP(LJMP, 0x4984D0, LucentBlitterPerf::BlitRLE75);
 DEFINE_FUNCTION_JUMP(LJMP, 0x4986D0, LucentBlitterPerf::BlitRLE50);
 DEFINE_FUNCTION_JUMP(LJMP, 0x4988C0, LucentBlitterPerf::BlitRLE25);
+DEFINE_FUNCTION_JUMP(LJMP, 0x4950C0, LucentBlitterPerf::Blit50);
+DEFINE_FUNCTION_JUMP(LJMP, 0x495250, LucentBlitterPerf::Blit25);
+DEFINE_FUNCTION_JUMP(LJMP, 0x496820, DarkenBlitterPerf::BlitRLE);
