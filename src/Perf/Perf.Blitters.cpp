@@ -839,6 +839,32 @@ public:
 			count += remaining;
 		}
 
+		// Decoding a cached voxel image goes through a table that maps every byte to itself, so a
+		// literal run is copied whole; any other table is looked up a byte at a time.
+		if (IsIdentity(Table))
+		{
+			while (count > 0)
+			{
+				if (*pSrc)
+				{
+					const int length = LiteralLength(pSrc, count);
+					memcpy(pDst, pSrc, static_cast<size_t>(length));
+					pSrc += length;
+					pDst += length;
+					count -= length;
+				}
+				else
+				{
+					const BYTE run = pSrc[1];
+					pSrc += 2;
+					count -= run;
+					pDst += run;
+				}
+			}
+
+			return;
+		}
+
 		while (count > 0)
 		{
 			if (const BYTE first = *pSrc++)
@@ -857,6 +883,62 @@ public:
 				pDst += run;
 			}
 		}
+	}
+
+private:
+	// Whether the table maps every byte to itself, checked again every 1024 calls.
+	static bool IsIdentity(const BYTE* pTable)
+	{
+		static const BYTE* pChecked = nullptr;
+		static bool identity = false;
+		static unsigned int calls = 0;
+		if (pTable != pChecked || (++calls & 1023) == 0)
+		{
+			const __m128i step = _mm_set1_epi8(16);
+			__m128i expected = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+			int same = 0xFFFF;
+			for (int i = 0; i < 256; i += 16)
+			{
+				same &= _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(pTable + i)), expected));
+				expected = _mm_add_epi8(expected, step);
+			}
+
+			pChecked = pTable;
+			identity = same == 0xFFFF;
+		}
+
+		return identity;
+	}
+
+	// How many bytes from pSrc on, up to limit, are not zero. Reads 16 at a time where that cannot
+	// cross into the next page.
+	static int LiteralLength(const BYTE* pSrc, int limit)
+	{
+		int length = 0;
+		while (length < limit)
+		{
+			const BYTE* const p = pSrc + length;
+			if ((reinterpret_cast<uintptr_t>(p) & 0xFFF) <= 0xFF0)
+			{
+				const unsigned int zero = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p)), _mm_setzero_si128()));
+				if (zero)
+				{
+					unsigned long bit;
+					_BitScanForward(&bit, zero);
+					return std::min(length + static_cast<int>(bit), limit);
+				}
+
+				length += 16;
+			}
+			else
+			{
+				if (!*p)
+					return length;
+				++length;
+			}
+		}
+
+		return limit;
 	}
 };
 
