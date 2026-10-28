@@ -68,6 +68,7 @@
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.HealthPips.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.LightRedraw.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.MapRevealer.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.Spotlight.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.TileBlit.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.VoxelShadowCache.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.VoxelShadowMask.cpp" />
