@@ -26,6 +26,7 @@
 #pragma once
 
 class HouseClass;
+class IPXAddressClass;
 
 namespace SessionExt
 {
@@ -53,4 +54,8 @@ namespace SessionExt
 	// Recomputes the master after a player has been removed: if the current
 	// master is gone, promotes the first remaining non-defeated human house.
 	void Update_Master_After_Player_Removal();
+
+	// The house of the connected player a global packet came from, or -1 when it
+	// came from no player still in the game here.
+	int Sender_House(const IPXAddressClass& address);
 }

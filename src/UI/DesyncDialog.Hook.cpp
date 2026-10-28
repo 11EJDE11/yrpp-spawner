@@ -177,7 +177,7 @@ DEFINE_HOOK(0x48DAC4, NetworkCallBack_DesyncPacket, 0x5)
 	auto* const packet = reinterpret_cast<ExtGlobalPacketType*>(&SessionClass::GlobalReceivePacket);
 	auto* const address = reinterpret_cast<IPXAddressClass*>(&SessionClass::GlobalReceiveAddress);
 
-	if (DesyncDialog.Handle_Global_Packet(packet, address) || KickAgreement::Handle_Global_Packet(packet))
+	if (DesyncDialog.Handle_Global_Packet(packet, address) || KickAgreement::Handle_Global_Packet(packet, *address))
 		return SkipDefaultHandler;
 
 	return 0; // not one of ours: run the engine's Process_Global_Packet

@@ -24,6 +24,7 @@
 #include <SessionClass.h>
 #include <HouseClass.h>
 #include <IPX.h>
+#include <IPXConnClass.h>
 #include <IPXManagerClass.h>
 
 #include <Utilities/Macro.h>
@@ -182,3 +183,20 @@ static bool __fastcall SessionClass_Am_I_Master(SessionClass* pThis, void*, Hous
 	return false;
 }
 DEFINE_FUNCTION_JUMP(LJMP, 0x697E70, SessionClass_Am_I_Master)
+
+int SessionExt::Sender_House(const IPXAddressClass& address)
+{
+	// IPXAddressClass::operator==, as Network_Call_Back matches a sign-off to its sender (0x48D84C).
+	using SameFn = bool(__fastcall*)(const IPXAddressClass* self, void* edx, const IPXAddressClass* other);
+	const auto same = reinterpret_cast<SameFn>(0x53EE70);
+
+	auto& ipx = IPXManagerClass::Instance;
+	for (int i = 0; i < static_cast<int>(ipx.NumConnections); i++)
+	{
+		const IPXConnClass* const connection = ipx.Connection[i];
+		if (connection != nullptr && same(&address, nullptr, &connection->Address))
+			return connection->ID;
+	}
+
+	return -1;
+}
