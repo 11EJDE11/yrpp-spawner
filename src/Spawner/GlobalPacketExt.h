@@ -48,6 +48,7 @@ enum ExtNetCommandType : int
 	EXT_NET_KICK_STATE       = 0xE9, // A player's reply to KICK_PREPARE: the last frame it executed.
 	EXT_NET_KICK_COMMIT      = 0xEA, // The game master's decision: the removed player's orders count up to a cutoff frame.
 	EXT_NET_KICK_EVENTS      = 0xEB, // The removed player's orders up to the cutoff, for those who did not get them.
+	EXT_NET_DESYNC_RESUME    = 0xEC, // A player has the decision to continue and resumes; it will no longer leave from the dialog.
 };
 
 #pragma pack(push, 1)

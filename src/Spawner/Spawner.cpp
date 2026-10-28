@@ -34,6 +34,7 @@
 #include <Misc/Bugfixes.Desyncs.h>
 
 #include <Ext/Session/Body.h>
+#include <UI/DesyncDialog.h>
 
 #include <GameOptionsClass.h>
 #include <GameStrings.h>
@@ -375,8 +376,9 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		pSession->GameMode = GameMode::LAN;
 
 		// Until the host announces itself there is no known game master. This
-		// clears any stale value from a previous game (the session is a reused
-		// singleton). Mirrors Vinifera's spawner.
+		// makes our Am_I_Master replacement fall back to the "first human house"
+		// heuristic, and clears any stale value from a previous game (the session
+		// is a reused singleton). Mirrors Vinifera's spawner.
 		pSession->MasterPlayerID() = -1;
 		pSession->MasterPlayerName()[0] = L'\0';
 
@@ -400,6 +402,9 @@ bool Spawner::StartScenario(const char* pScenarioName)
 		}
 		else if (Config->LoadSaveGame && !Spawner::Reconcile_Players())
 			return false;
+
+		if (Config->LoadSaveGame)
+			DesyncDialog.Note_Save_Loaded(Config->SaveGameName, Unsorted::CurrentFrame);
 
 		if (!isReplayPlayback && !pSession->CreateConnections())
 			return false;
@@ -737,10 +742,12 @@ void Spawner::After_Main_Loop()
 
 		auto SaveGame = [PrintMessage](const char* fName, const wchar_t* description)
 		{
-			if (ScenarioClass::SaveGame(fName, description))
+			const bool saved = ScenarioClass::SaveGame(fName, description);
+			if (saved)
 				PrintMessage(StringTable::LoadString(GameStrings::TXT_GAME_WAS_SAVED));
 			else
 				PrintMessage(StringTable::LoadString(GameStrings::TXT_ERROR_SAVING_GAME));
+			return saved;
 		};
 
 		// Send the message.
@@ -801,7 +808,8 @@ void Spawner::After_Main_Loop()
 			// regardless as it shouldn't impact anything. The suffix for it is unavailable
 			// though as it would require a custom event (seems overkill for such).
 			saveGameDescription += StringTable::LoadString(GameStrings::TXT_MULTIPLAYER_GAME);
-			SaveGame(GameStrings::SAVEGAME_NET, saveGameDescription.c_str());
+			const bool saved = SaveGame(GameStrings::SAVEGAME_NET, saveGameDescription.c_str());
+			DesyncDialog.Note_Save_Made(Unsorted::CurrentFrame, saved);
 
 			Spawner::NextAutoSaveFrame = Unsorted::CurrentFrame + pConfig->AutoSaveInterval;
 		}

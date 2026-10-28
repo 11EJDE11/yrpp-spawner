@@ -1,0 +1,262 @@
+/**
+*  yrpp-spawner
+*
+*  Copyright(C) 2022-present CnCNet
+*
+*  This program is free software: you can redistribute it and/or modify
+*  it under the terms of the GNU General Public License as published by
+*  the Free Software Foundation, either version 3 of the License, or
+*  (at your option) any later version.
+*
+*  This program is distributed in the hope that it will be useful,
+*  but WITHOUT ANY WARRANTY; without even the implied warranty of
+*  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.See the
+*  GNU General Public License for more details.
+*
+*  You should have received a copy of the GNU General Public License
+*  along with this program.If not, see <http://www.gnu.org/licenses/>.
+*
+*  Dialog shown to the players when a multiplayer game goes out of sync.
+*/
+
+#pragma once
+
+#include <windows.h>
+
+#include <Ext/Session/Body.h>
+#include <Spawner/GlobalPacketExt.h>
+
+#include <chrono>
+#include <string>
+#include <vector>
+
+class IPXAddressClass;
+
+/**
+ *  The decision the desync dialog was closed with.
+ */
+enum DesyncDialogOutcomeType
+{
+	DESYNC_OUTCOME_CONTINUE,    // Continue playing without the desynced players.
+	DESYNC_OUTCOME_QUIT,        // The local player wants to exit the game.
+	DESYNC_OUTCOME_LOAD,        // Everyone goes back to a save made before the desync.
+};
+
+// What Execute_DoList does after a desync check.
+enum DesyncActionType
+{
+	DESYNC_ACTION_PROCEED,      // Execute the frame as usual.
+	DESYNC_ACTION_QUIT,         // Stop the game.
+	DESYNC_ACTION_SKIP_FRAME,   // Execute nothing this frame; a save is loaded before the next.
+};
+
+/**
+ *  Manages the modal "Synchronization Error" dialog that is shown when a
+ *  multiplayer game goes out of sync. The game master gets a dialog with
+ *  Continue/Quit options; everyone else gets a dialog asking them
+ *  to wait for the master's decision. Both variants have a chat box.
+ *
+ *  While the dialog is open, game logic is halted, but the network is
+ *  serviced and connections are kept alive with periodic heartbeats.
+ */
+class DesyncDialogClass
+{
+public:
+	DesyncDialogClass() = default;
+	~DesyncDialogClass() = default;
+
+	/**
+	 *  Shows the dialog and pumps it until a decision has been made.
+	 */
+	DesyncDialogOutcomeType Run();
+
+	bool Is_Active() const { return Window != nullptr; }
+
+	/**
+	 *  Notifications from the incoming global packet processor.
+	 *  All of these are no-ops while the dialog is not open.
+	 */
+	void Notify_Chat(const char* name, const char* text);
+	void Notify_Player_Left(int house_id);
+	void Notify_Continue();
+	void Notify_Heartbeat(int house_id, bool is_host);
+
+	/**
+	 *  Routes a received spawner global packet to the right notification.
+	 *  Returns true if the packet was one of ours and was consumed.
+	 *  Meant to be called from the global-packet receive hook (to be wired
+	 *  in separately); see DesyncDialog.cpp.
+	 */
+	bool Handle_Global_Packet(const ExtGlobalPacketType* packet, const IPXAddressClass* address);
+
+	/**
+	 *  Detects per-player desync for the current frame; if any player has
+	 *  diverged, shows the dialog and applies the chosen outcome. Returns true
+	 *  if the game should stop (quit), false to resume. Called from the
+	 *  Execute_DoList hook.
+	 */
+	DesyncActionType Check_And_Handle_Desync();
+
+	// Multiplayer saves: those made during the game, and the one it was started from.
+	void Note_Save_Made(int frame, bool saved);
+	void Note_Save_Loaded(const char* path, int frame);
+
+	// The load the game master chose, done at the top of the main loop.
+	bool Has_Pending_Reload() const { return PendingReloadFrame >= 0; }
+	void Perform_Pending_Reload();
+
+	// A sign-off that arrives while the save loads is acted on after it; false when not loading.
+	bool Defer_Sign_Off(int id);
+
+private:
+	void Create_Dialog();
+	void Destroy_Dialog();
+	void Morph_To_Host_Dialog_If_Needed();
+	void Update_Player_List();
+	void Refill_Chat_List();
+	void Append_Chat_Line(const char* line);
+	void Send_Chat();
+	void Update_Chat_Placeholder();
+	void Send_Heartbeat();
+	void Send_Continue();
+	void Send_Sign_Off();
+	void Check_Heartbeat_Timeouts();
+	bool Has_Save_To_Offer() const;
+	int Preferred_Save_Index() const;
+	void Fill_Save_List();
+	int Selected_Save_Frame() const;
+	void Send_Load(int save_frame);
+	void Notify_Load(int save_frame, int desync_frame);
+	void Send_Ready();
+	void Send_Go(int save_frame);
+	void Notify_Ready(int house_id);
+	void Notify_Resume(int house_id);
+	void Notify_Go(int save_frame);
+	bool Everything_Sent_Acknowledged() const;
+	bool Everyone_Ready() const;
+
+	static BOOL CALLBACK Dialog_Proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
+
+private:
+	/**
+	 *  The dialog window, null while the dialog is not open.
+	 */
+	HWND Window = nullptr;
+
+	/**
+	 *  Is the currently open dialog the host (game master) variant?
+	 */
+	bool IsHostDialog = false;
+
+	/**
+	 *  Control ID of the button the player pressed, consumed by the pump loop.
+	 */
+	int Decision = 0;
+
+	/**
+	 *  Has the game master decided to continue without the desynced players?
+	 */
+	bool ContinueReceived = false;
+
+	/**
+	 *  Continuing also takes a step: a player that leaves from the dialog has
+	 *  orders in flight that some may have read and others not. So each player
+	 *  says it resumes, and nobody does until every other player has resumed or
+	 *  left; then all agree on who left, and drop their orders alike.
+	 */
+	bool ResumeSent = false;
+	bool ResumeFrom[SessionExt::MaxPlayers] = {};
+	void Send_Resume();
+	bool Everyone_Resumed() const;
+
+	// This player is outside the largest group that agrees: on a continue it leaves, and nobody waits for it.
+	bool OutOfMajority = false;
+
+	struct SaveEntry
+	{
+		int Frame;
+		std::string Path;
+		unsigned long Size; // the file as it was made, to tell one cut short or changed since
+		unsigned long CRC;
+	};
+
+	// Whether this player has the save from that frame, still as it was made.
+	bool Has_Usable_Save(int save_frame) const;
+
+	// Oldest first.
+	std::vector<SaveEntry> Saves;
+
+	// The frame the dialog was opened for.
+	int DesyncFrame = -1;
+
+	/**
+	 *  Going back to a save takes two steps, so that nothing sent in the timeline
+	 *  being left is still in flight when it is loaded: once the game master has
+	 *  chosen the save, everyone stays in the dialog until all they sent has been
+	 *  acknowledged and says so; when all have, the game master says to load.
+	 */
+	int LoadDecidedFrame = -1;
+	std::chrono::steady_clock::time_point LoadDecidedAt;
+	bool ReadySent = false;
+	bool ReadyFrom[SessionExt::MaxPlayers] = {};
+
+	// The save to load at the top of the next main loop, by its frame; -1 for none.
+	int PendingReloadFrame = -1;
+
+	// The others are going back to a save this player can't load: it leaves rather than play on
+	// in the timeline they leave behind.
+	bool QuitPending = false;
+
+	/**
+	 *  The load services the network from its progress callback, and the houses
+	 *  are freed while it runs: Destroy_Connection there reads a freed house.
+	 *  Those who sign off meanwhile are dropped once it is done.
+	 */
+	bool Loading = false;
+	std::vector<int> SignOffsDuringLoad;
+
+	// The save last loaded after a desync, so another desync before the next save offers the
+	// one before it.
+	int LastReloadFrame = -1;
+
+	// The desync that led to that load.
+	int LastReloadDesyncFrame = -1;
+
+	// Saves that went out of sync again soon after being loaded.
+	std::vector<int> FailedSaveFrames;
+
+	bool Is_Failed_Save(int frame) const;
+
+	/**
+	 *  Is the chat edit box currently showing its hint text?
+	 */
+	bool ChatPlaceholderActive = false;
+
+	/**
+	 *  Players that have left the game while the dialog was open, by house ID.
+	 */
+	bool PlayerLeft[SessionExt::MaxPlayers] = {};
+
+	// Players already dropped for going out of sync, so each is dropped and announced once.
+	bool PlayerRemoved[SessionExt::MaxPlayers] = {};
+
+	// Players the dialog shows as out of sync: those outside the largest group that agrees,
+	// which for a player outside it is itself and those agreeing with it.
+	bool ShownOutOfSync[SessionExt::MaxPlayers] = {};
+
+	// Removes the houses of players no longer in the game, as the engine does for a lost connection.
+	void Remove_Departed_Houses();
+
+	/**
+	 *  Heartbeat bookkeeping for detecting players that silently disappear.
+	 */
+	std::chrono::steady_clock::time_point LastHeartbeatFrom[SessionExt::MaxPlayers] = {};
+
+	/**
+	 *  All chat lines shown so far, so the list can be refilled when the
+	 *  dialog is re-created (e.g. when a waiting player becomes the master).
+	 */
+	std::vector<std::string> ChatBacklog;
+};
+
+extern DesyncDialogClass DesyncDialog;

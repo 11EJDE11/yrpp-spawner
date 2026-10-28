@@ -100,7 +100,6 @@
     <!-- Spawner -->
     <ClCompile Include="$(ThisDir)\src\Spawner\CustomMixes.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\FrameGate.cpp" />
-    <ClCompile Include="$(ThisDir)\src\Spawner\GlobalPacketExt.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\KickAgreement.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\MPStatsFix.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\FastRetransmit.cpp" />
@@ -120,6 +119,9 @@
     <ClCompile Include="$(ThisDir)\src\Spawner\Statistics.cpp" />
     <!-- UI -->
     <ClCompile Include="$(ThisDir)\src\UI\Hooks.SaveButton.cpp" />
+    <ClCompile Include="$(ThisDir)\src\UI\DesyncDialog.cpp" />
+    <ClCompile Include="$(ThisDir)\src\UI\DesyncDialog.Hook.cpp" />
+    <ResourceCompile Include="$(ThisDir)\src\UI\DesyncDialog.rc" />
     <!-- Utilities -->
     <ClCompile Include="$(ThisDir)\src\Utilities\Debug.cpp" />
     <ClCompile Include="$(ThisDir)\src\Utilities\Patch.cpp" />
@@ -140,6 +142,8 @@
     <!-- CnCNetYR -->
     <ClInclude Include="$(ThisDir)\src\CnCNetYR\Ra2Mode.h" />
     <!-- Misc -->
+    <ClInclude Include="$(ThisDir)\src\UI\DesyncDialog.h" />
+    <ClInclude Include="$(ThisDir)\src\UI\DesyncDialog.Resource.h" />
     <ClInclude Include="$(ThisDir)\src\Misc\Bugfixes.Desyncs.h" />
     <!-- Perf -->
     <ClInclude Include="$(ThisDir)\src\Perf\Perf.h" />

@@ -21,6 +21,7 @@
 #include "NetHack.h"
 #include <Replay/ReplaySeek.h>
 #include <Replay/ReplaySystem.h>
+#include <UI/DesyncDialog.h>
 
 #include <HouseClass.h>
 #include <SessionClass.h>
@@ -235,6 +236,10 @@ DEFINE_HOOK_AGAIN(0x60D407, SomeFunc_InterceptMainLoop, 0x5);
 DEFINE_HOOK_AGAIN(0x608206, SomeFunc_InterceptMainLoop, 0x5);
 DEFINE_HOOK(0x48CE8A, SomeFunc_InterceptMainLoop, 0x5)
 {
+	// A save the game master chose after a desync is loaded between frames.
+	if (DesyncDialog.Has_Pending_Reload())
+		DesyncDialog.Perform_Pending_Reload();
+
 	//  Main loop.
 	Game::MainLoop();
 	ReplaySystem::Seek::SetRecordingSimulationInProgress(false);
