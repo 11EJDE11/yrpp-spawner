@@ -17,14 +17,17 @@
 *  along with this program.If not, see <http://www.gnu.org/licenses/>.
 */
 
-// The four blitters that draw most of a busy battlefield, one scanline per call:
+// The blitters that draw most of a busy battlefield, one scanline per call:
 //   0x497FD0 RLEBlitTransXlatAlphaZRead::Blit - building animations and other RLE shapes
 //   0x4990E0 the same blitter writing Z      - terrain objects and other shapes drawn into the tile layer
 //   0x494B60 BlitTransXlatAlphaZRead::Blit    - every vehicle's cached voxel image
+//   0x493DF0 BlitTransXlatAlpha::Blit         - the bar behind every selected unit's health pips
 //   0x491820 RLEBlitTransXlat<BYTE>::Blit     - decoding that voxel image into the 8-bit scratch surface
-// The 16-bit ones test each pixel against the Z buffer and light it through the alpha buffer.
+// The 16-bit ones light each pixel through the alpha buffer, and all but 0x493DF0 test it against the
+// Z buffer first.
 //
-// The originals re-load the buffer globals and spill their counters to the stack every pixel. These
+// The originals re-load the buffer globals and spill their counters to the stack every pixel; 0x493DF0
+// also stores each source byte to the stack and reads it back as a dword, which stalls. These
 // keep everything in registers, run through stretches of pixels where neither ring buffer can wrap
 // before testing for the wrap, and fetch the next row of both buffers ahead of the next call, which
 // is where the time actually went. A voxel image is mostly transparent, so the voxel blitter skips
@@ -300,6 +303,31 @@ public:
 			pABuffer->AdjustPointer(pA);
 		}
 	}
+
+	// 0x493DF0, the same without a Z test
+	void BlitNoZ(WORD* pDst, const BYTE* pSrc, int size, int zValue, WORD* pZ, WORD* pA, int alphaLevel, int warp) const
+	{
+		const WORD* const pAlphaRow = AlphaRow(alphaLevel);
+		if (size <= 0)
+			return;
+
+		auto const pABuffer = ABuffer::Instance;
+		while (size > 0)
+		{
+			const ptrdiff_t block = std::min<ptrdiff_t>(PixelsBeforeWrap(pABuffer, pA), size);
+			for (ptrdiff_t i = 0; i < block; ++i)
+			{
+				if (pSrc[i])
+					pDst[i] = Lit(pSrc[i], pAlphaRow, pA + i);
+			}
+
+			pSrc += block;
+			pDst += block;
+			pA += block;
+			size -= static_cast<int>(block);
+			pABuffer->AdjustPointer(pA);
+		}
+	}
 };
 
 // The 8-bit blitter: a byte map at +4.
@@ -352,4 +380,5 @@ public:
 DEFINE_FUNCTION_JUMP(LJMP, 0x497FD0, AlphaBlitterPerf::BlitRLE);
 DEFINE_FUNCTION_JUMP(LJMP, 0x4990E0, AlphaBlitterPerf::BlitRLEWriteZ);
 DEFINE_FUNCTION_JUMP(LJMP, 0x494B60, AlphaBlitterPerf::Blit);
+DEFINE_FUNCTION_JUMP(LJMP, 0x493DF0, AlphaBlitterPerf::BlitNoZ);
 DEFINE_FUNCTION_JUMP(LJMP, 0x491820, ByteBlitterPerf::BlitRLE);

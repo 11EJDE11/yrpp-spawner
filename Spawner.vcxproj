@@ -65,6 +65,7 @@
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.Blitters.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.CellShadow.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.FillRectTrans.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.HealthPips.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.LightRedraw.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.MapRevealer.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.TileBlit.cpp" />
