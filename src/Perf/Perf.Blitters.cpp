@@ -23,6 +23,7 @@
 //   0x494B60 BlitTransXlatAlphaZRead::Blit    - every vehicle's cached voxel image
 //   0x493DF0 BlitTransXlatAlpha::Blit         - the bar behind every selected unit's health pips
 //   0x491820 RLEBlitTransXlat<BYTE>::Blit     - decoding that voxel image into the 8-bit scratch surface
+//   0x4984D0/0x4986D0/0x4988C0 RLEBlitTransLucent75/50/25AlphaZRead::Blit - smoke and missile trails
 // The 16-bit ones light each pixel through the alpha buffer, and all but 0x493DF0 test it against the
 // Z buffer first.
 //
@@ -39,6 +40,7 @@
 #include <Utilities/Macro.h>
 
 #include <algorithm>
+#include <cstring>
 #include <emmintrin.h>
 #include <intrin.h>
 
@@ -330,6 +332,279 @@ public:
 	}
 };
 
+// The translucent RLE blitters - smoke, missile trails, explosions: the lit pixel blended with the one
+// under it. The game blends through the converter's shift mask at +0xC in 16-bit arithmetic. Phobos'
+// translucency fix (BlittersFix.cpp, applied when its INI asks for it) rewrites that blend in place
+// with a rounding average in 32-bit arithmetic, whose mask register keeps the Z value's upper half.
+// Which one is installed is read from the code itself, and anything else runs the original.
+namespace Lucent
+{
+	enum class Level { Lucent75, Lucent50, Lucent25 };
+	enum class Blend { Unread, Game, Phobos, Other };
+
+	struct Site
+	{
+		uintptr_t Address;
+		size_t Size;
+		const BYTE* Game;
+		const BYTE* Phobos;
+	};
+
+	constexpr BYTE Game75[] = {
+		0x83, 0xC7, 0x02, 0x66, 0x8B, 0x70, 0x0C, 0x66, 0x8B, 0x0A, 0x33, 0xC0, 0x66, 0x8B, 0x44, 0x4D, 0x00,
+		0x8B, 0x4C, 0x24, 0x18, 0x81, 0xE1, 0xFF, 0x00, 0x00, 0x00, 0x8B, 0x6C, 0x24, 0x2C, 0x0B, 0xC1, 0x8B,
+		0x4C, 0x24, 0x10, 0x8B, 0x49, 0x04, 0x66, 0x8B, 0x0C, 0x41, 0x66, 0x8B, 0x47, 0xFE, 0x66, 0xC1, 0xE8,
+		0x02, 0x23, 0xC6, 0x66, 0xC1, 0xE9, 0x02, 0x23, 0xCE, 0x8D, 0x04, 0x40, 0x03, 0xC8, 0x8B, 0x44, 0x24,
+		0x20, 0x66, 0x89, 0x4F, 0xFE };
+	constexpr BYTE Phobos75[] = {
+		0x66, 0xBE, 0xDE, 0xF7, 0x66, 0x8B, 0x0A, 0x31, 0xC0, 0x66, 0x8B, 0x44, 0x4D, 0x00, 0x8B, 0x4C, 0x24,
+		0x18, 0x81, 0xE1, 0xFF, 0x00, 0x00, 0x00, 0x8B, 0x6C, 0x24, 0x2C, 0x09, 0xC8, 0x8B, 0x4C, 0x24, 0x10,
+		0x8B, 0x49, 0x04, 0x8B, 0x04, 0x41, 0x89, 0xC1, 0x33, 0x0F, 0x21, 0xF1, 0xD1, 0xE9, 0x0B, 0x07, 0x29,
+		0xC8, 0x89, 0xC1, 0x33, 0x07, 0x09, 0xC1, 0x21, 0xF0, 0xD1, 0xE8, 0x29, 0xC1, 0x8B, 0x44, 0x24, 0x20,
+		0x66, 0x89, 0x0F, 0x47, 0x47 };
+	constexpr BYTE Game25[] = {
+		0x83, 0xC7, 0x02, 0x66, 0x8B, 0x70, 0x0C, 0x66, 0x8B, 0x0A, 0x33, 0xC0, 0x66, 0x8B, 0x44, 0x4D, 0x00,
+		0x8B, 0x4C, 0x24, 0x18, 0x81, 0xE1, 0xFF, 0x00, 0x00, 0x00, 0x8B, 0x6C, 0x24, 0x2C, 0x0B, 0xC1, 0x8B,
+		0x4C, 0x24, 0x10, 0x8B, 0x49, 0x04, 0x66, 0x8B, 0x04, 0x41, 0x66, 0x8B, 0x4F, 0xFE, 0x66, 0xC1, 0xE8,
+		0x02, 0x23, 0xC6, 0x66, 0xC1, 0xE9, 0x02, 0x8D, 0x04, 0x40, 0x23, 0xCE, 0x03, 0xC1, 0x66, 0x89, 0x47,
+		0xFE };
+	constexpr BYTE Phobos25[] = {
+		0x66, 0xBE, 0xDE, 0xF7, 0x66, 0x8B, 0x0A, 0x31, 0xC0, 0x66, 0x8B, 0x44, 0x4D, 0x00, 0x8B, 0x4C, 0x24,
+		0x18, 0x81, 0xE1, 0xFF, 0x00, 0x00, 0x00, 0x8B, 0x6C, 0x24, 0x2C, 0x09, 0xC8, 0x8B, 0x4C, 0x24, 0x10,
+		0x8B, 0x49, 0x04, 0x8B, 0x04, 0x41, 0x89, 0xC1, 0x33, 0x0F, 0x21, 0xF1, 0xD1, 0xE9, 0x50, 0x0B, 0x07,
+		0x29, 0xC8, 0x59, 0x31, 0xC1, 0x09, 0xC8, 0x21, 0xF1, 0xD1, 0xE9, 0x29, 0xC8, 0x66, 0x89, 0x07, 0x47,
+		0x47 };
+	constexpr BYTE Game50Mask[] = { 0x66, 0x8B, 0x50, 0x0C };
+	constexpr BYTE Phobos50Mask[] = { 0x66, 0xBA, 0xDE, 0xF7 };
+	constexpr BYTE Game50Blend[] = {
+		0x66, 0x8B, 0x04, 0x41, 0x66, 0x8B, 0x0B, 0x66, 0xD1, 0xE8, 0x66, 0xD1, 0xE9, 0x23, 0xC2, 0x23, 0xCA,
+		0x03, 0xC1 };
+	constexpr BYTE Phobos50Blend[] = {
+		0x8B, 0x04, 0x41, 0x89, 0xC1, 0x33, 0x0B, 0x21, 0xD1, 0xD1, 0xE9, 0x0B, 0x03, 0x29, 0xC8, 0x90, 0x90,
+		0x90, 0x90 };
+	static_assert(sizeof(Game75) == sizeof(Phobos75) && sizeof(Game25) == sizeof(Phobos25)
+		&& sizeof(Game50Blend) == sizeof(Phobos50Blend));
+
+	struct Variant
+	{
+		uintptr_t Function;
+		Site Sites[2];
+		int SiteCount;
+		DWORD Key[2];
+		Blend Installed;
+	};
+
+	Variant Variants[3] = {
+		{ 0x4984D0, { { 0x4985FE, sizeof(Game75), Game75, Phobos75 } }, 1 },
+		{ 0x4986D0, { { 0x4987F7, sizeof(Game50Mask), Game50Mask, Phobos50Mask }, { 0x498817, sizeof(Game50Blend), Game50Blend, Phobos50Blend } }, 2 },
+		{ 0x4988C0, { { 0x4989EE, sizeof(Game25), Game25, Phobos25 } }, 1 },
+	};
+
+	// Which blend the code holds now. A patch site's first four bytes are checked every call, and the
+	// whole site again whenever they change.
+	Blend Installed(Variant& variant)
+	{
+		bool same = variant.Installed != Blend::Unread;
+		for (int i = 0; i < variant.SiteCount; ++i)
+			same = same && *reinterpret_cast<const DWORD*>(variant.Sites[i].Address) == variant.Key[i];
+
+		if (same)
+			return variant.Installed;
+
+		bool game = true, phobos = true;
+		for (int i = 0; i < variant.SiteCount; ++i)
+		{
+			auto const& site = variant.Sites[i];
+			auto const pCode = reinterpret_cast<const BYTE*>(site.Address);
+			game = game && !memcmp(pCode, site.Game, site.Size);
+			phobos = phobos && !memcmp(pCode, site.Phobos, site.Size);
+			variant.Key[i] = *reinterpret_cast<const DWORD*>(site.Address);
+		}
+
+		variant.Installed = game ? Blend::Game : phobos ? Blend::Phobos : Blend::Other;
+		return variant.Installed;
+	}
+
+	template <Level level, Blend blend>
+	__forceinline WORD Mix(const WORD* pLit, const WORD* pUnder, int z, WORD mask)
+	{
+		if constexpr (blend == Blend::Game)
+		{
+			const WORD lit = *pLit, under = *pUnder;
+			if constexpr (level == Level::Lucent75)
+				return static_cast<WORD>(((lit >> 2) & mask) + 3 * ((under >> 2) & mask));
+			else if constexpr (level == Level::Lucent50)
+				return static_cast<WORD>(((lit >> 1) & mask) + ((under >> 1) & mask));
+			else
+				return static_cast<WORD>(3 * ((lit >> 2) & mask) + ((under >> 2) & mask));
+		}
+		else if constexpr (level == Level::Lucent50)
+		{
+			// The mask register's upper half is clear here.
+			const unsigned int lit = *pLit, under = *pUnder;
+			return static_cast<WORD>((lit | under) - (((lit ^ under) & 0xF7DEu) >> 1));
+		}
+		else
+		{
+			// Both pixels are read as dwords, so the next pixel's low bit reaches bit 15 through the
+			// shift when the Z value is negative.
+			const unsigned int m = (static_cast<unsigned int>(z) & 0xFFFF0000u) | 0xF7DEu;
+			const unsigned int lit = *reinterpret_cast<const unsigned int*>(pLit);
+			const unsigned int under = *reinterpret_cast<const unsigned int*>(pUnder);
+			const unsigned int half = (lit | under) - (((lit ^ under) & m) >> 1);
+			if constexpr (level == Level::Lucent75)
+				return static_cast<WORD>((half | under) - (((half ^ under) & m) >> 1));
+			else
+				return static_cast<WORD>((half | lit) - (((lit ^ half) & m) >> 1));
+		}
+	}
+}
+
+class LucentBlitterPerf
+{
+public:
+	void* VTable;
+	const WORD* Palette;
+	const WORD* AlphaTable;
+	WORD Mask;
+
+	using Function = int(__thiscall*)(const LucentBlitterPerf*, WORD*, const BYTE*, int, int, int, WORD*, WORD*, int, int, const signed char*);
+
+	template <Lucent::Level level, Lucent::Blend blend>
+	int BlitRLE(WORD* pDst, const BYTE* pSrc, int count, int skip, int zBase, WORD* pZ, WORD* pA,
+		int alphaLevel, int unused, const signed char* pZShape) const
+	{
+		const WORD* const pAlphaRow = reinterpret_cast<const AlphaBlitterPerf*>(this)->AlphaRow(alphaLevel);
+		auto const pZBuffer = ZBuffer::Instance;
+		auto const pABuffer = ABuffer::Instance;
+		const WORD mask = Mask;
+
+		if (skip > 0)
+		{
+			int remaining = skip;
+			do
+			{
+				if (*pSrc++)
+					--remaining;
+				else
+					remaining -= *pSrc++;
+			}
+			while (remaining > 0);
+
+			const int overshoot = -remaining;
+			pDst += overshoot;
+			count -= overshoot;
+			pZ += overshoot;
+			pZBuffer->AdjustPointer(pZ);
+			pA += overshoot;
+			pABuffer->AdjustPointer(pA);
+		}
+
+		if (count <= 0)
+			return count;
+
+		PrefetchNextRow(pZBuffer, pZ, count);
+		PrefetchNextRow(pABuffer, pA, count);
+
+		for (;;)
+		{
+			if (const BYTE first = *pSrc++)
+			{
+				const ptrdiff_t block = std::min<ptrdiff_t>(
+					std::min(PixelsBeforeWrap(pZBuffer, pZ), PixelsBeforeWrap(pABuffer, pA)), count);
+
+				BYTE pixel = first;
+				ptrdiff_t done = 0;
+				for (;;)
+				{
+					const int z = zBase - *pZShape++;
+					if (z < *pZ)
+						*pDst = Lucent::Mix<level, blend>(&Palette[pAlphaRow[*pA] | pixel], pDst, z, mask);
+
+					++pDst;
+					++pZ;
+					++pA;
+
+					if (++done == block || !*pSrc)
+						break;
+
+					pixel = *pSrc++;
+				}
+
+				count -= static_cast<int>(done);
+			}
+			else
+			{
+				const BYTE run = *pSrc++;
+				count -= run;
+				pZShape += run;
+				pDst += run;
+				pZ += run;
+				pA += run;
+			}
+
+			pZBuffer->AdjustPointer(pZ);
+			pABuffer->AdjustPointer(pA);
+
+			if (count <= 0)
+				return count;
+		}
+	}
+
+	// The original, for a blend this does not know: its first five bytes (push ecx; mov eax,
+	// [esp+2Ch]), which the jump here replaced, then on into the rest of it.
+	static Function Original(int index, uintptr_t function)
+	{
+		static Function trampolines[3] {};
+		if (!trampolines[index])
+		{
+			auto const pCode = static_cast<BYTE*>(VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+			const BYTE entry[] = { 0x51, 0x8B, 0x44, 0x24, 0x2C, 0xE9 };
+			memcpy(pCode, entry, sizeof(entry));
+			*reinterpret_cast<int32_t*>(pCode + 6) = static_cast<int32_t>(function + 5 - reinterpret_cast<uintptr_t>(pCode + 10));
+			trampolines[index] = reinterpret_cast<Function>(pCode);
+		}
+
+		return trampolines[index];
+	}
+
+	template <Lucent::Level level>
+	__forceinline int Dispatch(WORD* pDst, const BYTE* pSrc, int count, int skip, int zBase, WORD* pZ, WORD* pA,
+		int alphaLevel, int unused, const signed char* pZShape) const
+	{
+		constexpr int index = static_cast<int>(level);
+		auto& variant = Lucent::Variants[index];
+		switch (Lucent::Installed(variant))
+		{
+		case Lucent::Blend::Game:
+			return BlitRLE<level, Lucent::Blend::Game>(pDst, pSrc, count, skip, zBase, pZ, pA, alphaLevel, unused, pZShape);
+		case Lucent::Blend::Phobos:
+			return BlitRLE<level, Lucent::Blend::Phobos>(pDst, pSrc, count, skip, zBase, pZ, pA, alphaLevel, unused, pZShape);
+		default:
+			return Original(index, variant.Function)(this, pDst, pSrc, count, skip, zBase, pZ, pA, alphaLevel, unused, pZShape);
+		}
+	}
+
+	// 0x4984D0, 0x4986D0, 0x4988C0: RLEBlitTransLucent75/50/25AlphaZRead::Blit
+	int BlitRLE75(WORD* pDst, const BYTE* pSrc, int count, int skip, int zBase, WORD* pZ, WORD* pA,
+		int alphaLevel, int unused, const signed char* pZShape) const
+	{
+		return Dispatch<Lucent::Level::Lucent75>(pDst, pSrc, count, skip, zBase, pZ, pA, alphaLevel, unused, pZShape);
+	}
+
+	int BlitRLE50(WORD* pDst, const BYTE* pSrc, int count, int skip, int zBase, WORD* pZ, WORD* pA,
+		int alphaLevel, int unused, const signed char* pZShape) const
+	{
+		return Dispatch<Lucent::Level::Lucent50>(pDst, pSrc, count, skip, zBase, pZ, pA, alphaLevel, unused, pZShape);
+	}
+
+	int BlitRLE25(WORD* pDst, const BYTE* pSrc, int count, int skip, int zBase, WORD* pZ, WORD* pA,
+		int alphaLevel, int unused, const signed char* pZShape) const
+	{
+		return Dispatch<Lucent::Level::Lucent25>(pDst, pSrc, count, skip, zBase, pZ, pA, alphaLevel, unused, pZShape);
+	}
+};
+
 // The 8-bit blitter: a byte map at +4.
 class ByteBlitterPerf
 {
@@ -382,3 +657,6 @@ DEFINE_FUNCTION_JUMP(LJMP, 0x4990E0, AlphaBlitterPerf::BlitRLEWriteZ);
 DEFINE_FUNCTION_JUMP(LJMP, 0x494B60, AlphaBlitterPerf::Blit);
 DEFINE_FUNCTION_JUMP(LJMP, 0x493DF0, AlphaBlitterPerf::BlitNoZ);
 DEFINE_FUNCTION_JUMP(LJMP, 0x491820, ByteBlitterPerf::BlitRLE);
+DEFINE_FUNCTION_JUMP(LJMP, 0x4984D0, LucentBlitterPerf::BlitRLE75);
+DEFINE_FUNCTION_JUMP(LJMP, 0x4986D0, LucentBlitterPerf::BlitRLE50);
+DEFINE_FUNCTION_JUMP(LJMP, 0x4988C0, LucentBlitterPerf::BlitRLE25);
