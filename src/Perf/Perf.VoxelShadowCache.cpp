@@ -32,14 +32,54 @@
 
 #include <Utilities/Macro.h>
 
+#include <unordered_map>
+
+namespace
+{
+	// A BalloonHover unit above the ground - a Kirov - has its shadow masked by its own body, drawn
+	// where the locomotor's shadow point puts it. Its key is the body's, which says nothing about that
+	// point, so the game drops it and renders the shadow every frame. Each body key and shadow point
+	// pair gets a key of its own instead, so the same shadow over the same body is drawn from the cache.
+	// Bit 30 keeps these clear of every key the game makes (bits 0-21, and bit 31 on the ground).
+	std::unordered_map<unsigned long long, int> BalloonShadowKeys;
+	constexpr int BalloonKeyBase = 0x40000000;
+	constexpr int MaxBalloonKeys = 0x00FFFFFF;
+
+	bool KeyBalloonShadow(UnitClass* pThis, VoxelIndexKey& key)
+	{
+		if (!key.Is_Valid_Key() || pThis->GetHeight() <= 0)
+			return false;
+
+		auto const pLocomotor = pThis->Locomotor.GetInterfacePtr();
+		if (!pLocomotor)
+			return false;
+
+		const Point2D point = pLocomotor->Shadow_Point();
+		const unsigned long long pair = static_cast<unsigned int>(key.Value)
+			| static_cast<unsigned long long>(static_cast<unsigned short>(point.X)) << 32
+			| static_cast<unsigned long long>(static_cast<unsigned short>(point.Y)) << 48;
+
+		auto const [it, added] = BalloonShadowKeys.try_emplace(pair, static_cast<int>(BalloonShadowKeys.size()));
+		if (it->second > MaxBalloonKeys)
+			return false;
+
+		key = BalloonKeyBase | it->second;
+		return true;
+	}
+}
+
 DEFINE_HOOK(0x73C459, UnitClass_DrawAsVXL_ShadowCacheKey, 0x5)
 {
 	enum { KeepKey = 0x73C47A };
 
 	GET(UnitClass* const, pThis, EBP);
+	REF_STACK(VoxelIndexKey, key, 0x14);
 
 	auto const pType = pThis->Type;
-	const bool mayDrop = pType->BalloonHover || pThis->IsAttackedByLocomotor
+	if (pType->BalloonHover && !pThis->IsAttackedByLocomotor)
+		return KeyBalloonShadow(pThis, key) ? KeepKey : 0;
+
+	const bool mayDrop = pThis->IsAttackedByLocomotor
 		|| pType->SpeedType == SpeedType::Track || pType->SpeedType == SpeedType::Wheel;
 
 	return mayDrop ? 0 : KeepKey;
