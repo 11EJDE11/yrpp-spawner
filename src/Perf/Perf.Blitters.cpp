@@ -813,6 +813,54 @@ public:
 	}
 };
 
+// The plain 16-bit blitter: the converter's palette at +4, no Z or alpha.
+class PlainBlitterPerf
+{
+public:
+	void* VTable;
+	const WORD* Palette;
+
+	// 0x4960A0, RLEBlitTransXlat: the building placement grid, among others. The original stores each
+	// pixel byte to the stack and reads it back as a dword. Returns where the line ended, as the
+	// original leaves it in EAX.
+	WORD* BlitRLE(WORD* pDst, const BYTE* pSrc, int count, int skip, int, int, int, int, int, int) const
+	{
+		if (skip > 0)
+		{
+			int remaining = skip;
+			do
+			{
+				if (*pSrc++)
+					--remaining;
+				else
+					remaining -= *pSrc++;
+			}
+			while (remaining > 0);
+
+			pDst -= remaining;
+			count += remaining;
+		}
+
+		auto const pPalette = Palette;
+		while (count > 0)
+		{
+			if (const BYTE pixel = *pSrc++)
+			{
+				*pDst++ = pPalette[pixel];
+				--count;
+			}
+			else
+			{
+				const BYTE run = *pSrc++;
+				count -= run;
+				pDst += run;
+			}
+		}
+
+		return pDst;
+	}
+};
+
 // The 8-bit blitter: a byte map at +4.
 class ByteBlitterPerf
 {
@@ -947,6 +995,7 @@ DEFINE_FUNCTION_JUMP(LJMP, 0x4990E0, AlphaBlitterPerf::BlitRLEWriteZ);
 DEFINE_FUNCTION_JUMP(LJMP, 0x494B60, AlphaBlitterPerf::Blit);
 DEFINE_FUNCTION_JUMP(LJMP, 0x493DF0, AlphaBlitterPerf::BlitNoZ);
 DEFINE_FUNCTION_JUMP(LJMP, 0x491820, ByteBlitterPerf::BlitRLE);
+DEFINE_FUNCTION_JUMP(LJMP, 0x4960A0, PlainBlitterPerf::BlitRLE);
 DEFINE_FUNCTION_JUMP(LJMP, 0x4984D0, LucentBlitterPerf::BlitRLE75);
 DEFINE_FUNCTION_JUMP(LJMP, 0x4986D0, LucentBlitterPerf::BlitRLE50);
 DEFINE_FUNCTION_JUMP(LJMP, 0x4988C0, LucentBlitterPerf::BlitRLE25);
