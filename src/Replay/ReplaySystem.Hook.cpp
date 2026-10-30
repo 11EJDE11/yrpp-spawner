@@ -749,30 +749,14 @@ DEFINE_HOOK(0x4E1EBA, GameControlsApply_ApplyPlaybackSpeedDirectly, 0x6)
 // Pause replay simulation without blocking input or menus. The related hooks stop event processing,
 // logic and the frame counter together so the current frame remains unchanged.
 
-// Hide the observer from the simulation while a step runs, so a spectated house is not treated as
-// an observer by gameplay code the way it is by the display. Spectator playback only.
+// Spectator playback: the simulation must run with no observer, as the recording did. The pointer
+// is already out by now (ReplaySystem::OnSpectatorRenderDone at the end of drawing); this keeps it
+// out even if something set it again between drawing and a simulation step.
 namespace
 {
-	HouseClass* HiddenSpectatorObserver = nullptr;
-
-	void HideSpectatorObserverFromSimulation()
+	void KeepSpectatorObserverOutOfSimulation()
 	{
-		if (ReplaySystem::IsSpectatorPlayback()
-			&& HouseClass::Observer
-			&& HouseClass::Observer == HouseClass::CurrentPlayer)
-		{
-			HiddenSpectatorObserver = HouseClass::Observer;
-			HouseClass::Observer = nullptr;
-		}
-	}
-
-	void RestoreSpectatorObserverAfterSimulation()
-	{
-		if (HiddenSpectatorObserver)
-		{
-			HouseClass::Observer = HiddenSpectatorObserver;
-			HiddenSpectatorObserver = nullptr;
-		}
+		ReplaySystem::OnSpectatorRenderDone();
 	}
 }
 
@@ -788,15 +772,14 @@ DEFINE_HOOK(0x55DC99, MainLoop_ReplayPause_SkipLogicAI, 0x5)
 	if (ReplaySystem::Controls::IsPlaybackPaused())
 		return SkipLogicAI;
 
-	HideSpectatorObserverFromSimulation();
+	KeepSpectatorObserverOutOfSimulation();
 	return 0;
 }
 
-// Restore the observer after the simulation update, and undo any input lock a trigger took in it
-// before Sync_Delay pumps the window messages that carry the viewer's keys and clicks.
-DEFINE_HOOK(0x55DCA3, MainLoop_Spectator_RestoreObserverAfterLogicAI, 0x5)
+// After the simulation update: undo any input lock a trigger took in it before Sync_Delay pumps the
+// window messages that carry the viewer's keys and clicks.
+DEFINE_HOOK(0x55DCA3, MainLoop_ReleaseCutsceneInputLockAfterLogicAI, 0x5)
 {
-	RestoreSpectatorObserverAfterSimulation();
 	ReleaseCutsceneInputLock();
 	return 0;
 }
@@ -809,14 +792,14 @@ DEFINE_HOOK(0x55DE3A, MainLoop_ReplayPause_SkipQueueAI, 0x6)
 	if (ReplaySystem::Controls::IsPlaybackPaused())
 		return SkipQueueAI;
 
-	HideSpectatorObserverFromSimulation();
+	KeepSpectatorObserverOutOfSimulation();
 	return 0;
 }
 
-// Restore the observer after the event pump.
-DEFINE_HOOK(0x55DE45, MainLoop_Spectator_RestoreObserverAfterQueueAI, 0x5)
+// Main_Loop's entry: the spectator's observer pointer goes back in for input, the sidebar and drawing.
+DEFINE_HOOK(0x55D360, MainLoop_Spectator_SetObserverForInterface, 0x5)
 {
-	RestoreSpectatorObserverAfterSimulation();
+	ReplaySystem::OnSpectatorLoopStart();
 	return 0;
 }
 

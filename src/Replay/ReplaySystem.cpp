@@ -364,8 +364,8 @@ namespace ReplaySystem
 			if (Seek::IsSeeking())
 				return L"Wait for the seek to finish before taking over.";
 
-			// The spectator seat is the recording player's own house made the observer and hidden from
-			// the simulation only while each frame runs, so there is no ordinary house to hand over.
+			// The spectator seat is the recording player's own house made the observer, and shown as one
+			// only to the interface each frame, so there is no ordinary house to hand over.
 			if (ReplayState.SpectatorView)
 				return L"Taking over is not available while watching as a spectator.";
 
@@ -1361,6 +1361,23 @@ bool ReplaySystem::IsSpectatorPlayback()
 
 namespace
 {
+	// The house the spectator seat belongs to; HouseClass::Observer points at it only part of each
+	// iteration (see OnSpectatorLoopStart).
+	HouseClass* SpectatorObserverHouse = nullptr;
+	HouseClass* ObserverBeforeDraw = nullptr;
+	bool DrawingAsSpectator = false;
+
+	void SetSpectatorObserver(bool present)
+	{
+		if (!SpectatorObserverHouse || !ReplaySystem::IsSpectatorPlayback())
+			return;
+
+		if (present && HouseClass::CurrentPlayer == SpectatorObserverHouse)
+			HouseClass::Observer = SpectatorObserverHouse;
+		else if (HouseClass::Observer == SpectatorObserverHouse)
+			HouseClass::Observer = nullptr;
+	}
+
 	bool TakeSpectatorSeat()
 	{
 		if (!ReplaySystem::IsSpectatorPlayback())
@@ -1372,8 +1389,14 @@ namespace
 
 		Game::ObserverMode = true;
 
-		if (pPlayer->MakeObserver())
-			TabClass::Instance.ThumbActive = false;
+		if (!pPlayer->MakeObserver())
+			return false;
+
+		TabClass::Instance.ThumbActive = false;
+
+		// Taken out again until the next iteration starts; see OnSpectatorLoopStart.
+		SpectatorObserverHouse = pPlayer;
+		HouseClass::Observer = nullptr;
 
 		return true;
 	}
@@ -1408,8 +1431,40 @@ void ReplaySystem::RequestTakeOver()
 	ReplayState.TakeOverPending = true;
 }
 
+void ReplaySystem::OnSpectatorLoopStart()
+{
+	SetSpectatorObserver(true);
+}
+
+void ReplaySystem::OnSpectatorRenderDone()
+{
+	SetSpectatorObserver(false);
+}
+
+void ReplaySystem::BeginSpectatorDraw()
+{
+	if (!SpectatorObserverHouse || DrawingAsSpectator)
+		return;
+
+	ObserverBeforeDraw = HouseClass::Observer;
+	DrawingAsSpectator = true;
+	SetSpectatorObserver(true);
+}
+
+void ReplaySystem::EndSpectatorDraw()
+{
+	if (!DrawingAsSpectator)
+		return;
+
+	DrawingAsSpectator = false;
+	if (SpectatorObserverHouse && ReplaySystem::IsSpectatorPlayback())
+		HouseClass::Observer = ObserverBeforeDraw;
+}
+
 void ReplaySystem::OnGameStartReset()
 {
+	SpectatorObserverHouse = nullptr;
+	DrawingAsSpectator = false;
 	StopReplaySystem();
 	ReplayState.InitRandomHandled = false;
 	ReplayState.RecordingFinishedForSession = false;

@@ -451,6 +451,7 @@ namespace ReplaySystem
 			if (!TacticalClass::Instance)
 				return;
 
+			ReplaySystem::SpectatorDrawScope spectatorDraw;
 			TacticalClass::Instance->Update();
 			MapClass::Instance.Render();
 
