@@ -820,6 +820,24 @@ DEFINE_HOOK(0x55DE45, MainLoop_Spectator_RestoreObserverAfterQueueAI, 0x5)
 	return 0;
 }
 
+// Deleting the frame's dead objects is part of the simulation too. ~BuildingClass (0x43BEF0) updates
+// the superweapons of its house when its type grants one, and Ares (0x50AF10) counts an observer as
+// having none. Selling or losing such a building, or placing such an upgrade, would take away every
+// superweapon the watched house has and restart their timers when the next house update gives them
+// back, so a launch the recording made later would be dropped as not ready.
+DEFINE_HOOK(0x55DE9F, MainLoop_Spectator_HideObserverFromRemoveAllInactive, 0x5)
+{
+	HideSpectatorObserverFromSimulation();
+	return 0;
+}
+
+// Restore the observer after the dead objects are gone.
+DEFINE_HOOK(0x55DEA4, MainLoop_Spectator_RestoreObserverAfterRemoveAllInactive, 0x5)
+{
+	RestoreSpectatorObserverAfterSimulation();
+	return 0;
+}
+
 // Holds the frame counter, and is where a paused iteration gets its viewport committed and drawn.
 DEFINE_HOOK(0x55DE73, MainLoop_ReplayPause_SkipFrameAdvance, 0x6)
 {

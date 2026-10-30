@@ -1528,6 +1528,15 @@ disguised units visible, pips on everything, and no "you have been defeated" mes
 presentation. The recording player's house is left exactly as the recording has it, so the
 simulation is unchanged and the frame hashes still match.
 
+The pointer itself is not presentation, because gameplay code reads it. `Main_Loop` hides it during
+the three steps that change the game: `LogicClass::AI`, `Queue_AI` and `Remove_All_Inactive`. The last
+one is easy to miss. `~BuildingClass` (0x43BEF0) updates its house's superweapons when its type has
+`SuperWeapon` or `SuperWeapon2`, and Ares' status check (hook at 0x50AF10) treats an observer as having
+none. With the pointer visible, selling or losing such a building, or placing such an upgrade (its
+temporary building is removed at 0x440A20), takes away every superweapon the watched house has. The next
+`HouseClass::AI` gives them back with full recharge timers, and `SuperClass::Discharged` (0x6CB920)
+then drops a launch the recording made in the meantime.
+
 Two things about the timing, both in `ReplaySystem::ApplyPlaybackSpectator`:
 
 - It runs **after** the scenario has loaded. The observer sidebar's player list is built during the
