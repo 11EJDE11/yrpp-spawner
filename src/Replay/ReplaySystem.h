@@ -41,6 +41,24 @@ namespace ReplaySystem
 	// savegame carries and the load rebuilds every house, so a seek leaves it on a dead one.
 	void ReapplyPlaybackSpectator();
 
+	// Spectator playback keeps the watched house as HouseClass::Observer only from the start of each
+	// Main_Loop iteration until the screen has been drawn (input, sidebar update and rendering). For
+	// the rest of the iteration the pointer is empty, because gameplay code reached from there reads
+	// it: on Mental Omega 3.3.6 a recording diverged from its recording 20 frames after the recording
+	// player's first support power when the pointer stayed set after Queue_AI.
+	void OnSpectatorLoopStart();
+	void OnSpectatorRenderDone();
+	void BeginSpectatorDraw();
+	void EndSpectatorDraw();
+
+	struct SpectatorDrawScope
+	{
+		SpectatorDrawScope() { BeginSpectatorDraw(); }
+		~SpectatorDrawScope() { EndSpectatorDraw(); }
+		SpectatorDrawScope(const SpectatorDrawScope&) = delete;
+		SpectatorDrawScope& operator=(const SpectatorDrawScope&) = delete;
+	};
+
 	// Hands the viewer the house being watched at the start of the next frame: playback stops and
 	// the game carries on as an ordinary one, still with no network. Refused with a notice while
 	// seeking, from a spectator or observer seat, or once that house has been defeated.

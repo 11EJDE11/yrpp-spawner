@@ -28,6 +28,7 @@
 #include <Utilities/Debug.h>
 #include <Replay/ReplaySeek.h>
 #include <Replay/ReplayControls.h>
+#include <Replay/ReplaySystem.h>
 
 bool RenderSkip::Enabled = true;
 int  RenderSkip::MinProcessMs = 20;
@@ -266,6 +267,13 @@ bool RenderSkip::ShouldRenderThisFrame()
 DEFINE_HOOK(0x55D8F2, MainLoop_Render_RenderSkip, 0x5)
 {
 	enum { Resume = 0x55D8F7 };
+
+	// Whichever way this returns, the spectator's observer pointer comes out for the rest of the
+	// iteration (see ReplaySystem::OnSpectatorLoopStart).
+	struct SpectatorRenderDone
+	{
+		~SpectatorRenderDone() { ReplaySystem::OnSpectatorRenderDone(); }
+	} spectatorRenderDone;
 
 	GET(GScreenClass*, screen, ECX);
 
