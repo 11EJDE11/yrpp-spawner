@@ -148,6 +148,7 @@ namespace ReplaySystem
 		void RecordExecutedEvent(const EventClass* pEvent);
 		void RecordCapturedEventsForCurrentFrame();
 		void RemoveReplayGameplayEventsFromDoList();
+		void OpenLocalOptionsMenuWhilePaused();
 		void PlaybackFrameEvents();
 		// Hands control to the viewer if the take over command asked for it. Runs at frame start.
 		void ServiceTakeOver();

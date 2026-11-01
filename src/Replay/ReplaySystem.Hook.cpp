@@ -807,7 +807,10 @@ DEFINE_HOOK(0x55DE3A, MainLoop_ReplayPause_SkipQueueAI, 0x6)
 	enum { SkipQueueAI = 0x55DE45 };
 
 	if (ReplaySystem::Controls::IsPlaybackPaused())
+	{
+		ReplaySystem::Internal::OpenLocalOptionsMenuWhilePaused();
 		return SkipQueueAI;
+	}
 
 	HideSpectatorObserverFromSimulation();
 	return 0;

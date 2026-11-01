@@ -349,6 +349,34 @@ namespace ReplaySystem
 			});
 		}
 
+		// Escape queues an Options event (Queue_Options, 0x647040) that only Queue_AI moves on and runs,
+		// and a paused frame skips Queue_AI, so the in-game menu would wait for playback to resume. Do
+		// what EventClass::Execute does for the event (0x4C7929) here, and drop it from the queue so the
+		// menu does not open a second time once playback resumes.
+		void OpenLocalOptionsMenuWhilePaused()
+		{
+			const auto pPlayer = HouseClass::CurrentPlayer;
+			if (!pPlayer)
+				return;
+
+			const auto isLocalOptions = [pPlayer](const EventClass& event)
+			{
+				return event.Type == EventType::Options
+					&& event.HouseIndex == pPlayer->ArrayIndex
+					&& (event.IsExecuted & 1) == 0;
+			};
+
+			bool pending = false;
+			for (int i = 0; i < EventClass::OutList.Count && !pending; ++i)
+				pending = isLocalOptions(EventClass::OutList[i]);
+
+			if (!pending)
+				return;
+
+			RemoveQueuedEvents(EventClass::OutList, isLocalOptions);
+			Game::SpecialDialog = 1; // SDLG_OPTIONS
+		}
+
 		// An order the viewer gave while watching that has not run. Playback strips these on their own
 		// frame, but one queued for a later frame is still waiting when control passes.
 		bool IsUnrunViewerOrder(const EventClass& event)
