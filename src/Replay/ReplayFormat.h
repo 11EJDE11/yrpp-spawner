@@ -165,6 +165,8 @@ namespace Replay
 		StatisticsHouseArray_KilledAircraft,
 		StatisticsHouseArray_KilledInfantry,
 		StatisticsHouseArray_KilledUnits,
+		// The engine's KilledBuildingTypes plus the tech buildings the recorder saw this house destroy,
+		// which the engine never counts; those are the entries whose type is Insignificant.
 		StatisticsHouseArray_KilledBuildings,
 		StatisticsHouseArray_CapturedBuildings,
 		StatisticsHouseArray_CollectedCrates,

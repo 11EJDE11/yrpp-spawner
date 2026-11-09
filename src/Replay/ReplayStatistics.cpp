@@ -92,6 +92,8 @@ namespace ReplaySystem::Statistics
 		struct HouseCounters
 		{
 			std::array<std::vector<int32_t>, Lost_Count> Lost;
+			// Tech buildings this house destroyed, by building type; see RecordTechBuildingKilled.
+			std::vector<int32_t> KilledTechBuildings;
 		};
 
 		struct StatisticsState
@@ -471,15 +473,32 @@ namespace ReplaySystem::Statistics
 		{
 			const size_t chunk = out.Begin(StatisticsChunk_Houses);
 			out.Value(static_cast<uint32_t>(State.Houses.size()));
+			std::vector<int32_t> killedBuildings;
 			for (auto& snapshot : State.Houses)
 			{
 				ApplyCounters(snapshot);
 				out.Value(snapshot.Record);
 				out.Value(static_cast<uint32_t>(snapshot.Arrays.size()));
-				for (const auto& values : snapshot.Arrays)
+				for (size_t which = 0; which < snapshot.Arrays.size(); ++which)
 				{
-					out.Value(static_cast<uint32_t>(values.size()));
-					out.Raw(values.data(), values.size() * sizeof(int32_t));
+					const auto* pValues = &snapshot.Arrays[which];
+					// The engine's tracker never counts an Insignificant type, so the recorder's tech
+					// building kills fill entries the engine leaves at zero. Merged into a copy, so the
+					// snapshot stays the engine's own and a second write does not count them twice.
+					if (which == StatisticsHouseArray_KilledBuildings)
+					{
+						killedBuildings = *pValues;
+						const auto& tech = CountersFor(snapshot.Record.HouseIndex).KilledTechBuildings;
+						if (killedBuildings.size() < tech.size())
+							killedBuildings.resize(tech.size(), 0);
+						for (size_t i = 0; i < tech.size(); ++i)
+							killedBuildings[i] += tech[i];
+						TrimTrailingZeros(killedBuildings);
+						pValues = &killedBuildings;
+					}
+
+					out.Value(static_cast<uint32_t>(pValues->size()));
+					out.Raw(pValues->data(), pValues->size() * sizeof(int32_t));
 				}
 			}
 			out.End(chunk);
@@ -719,4 +738,39 @@ void ReplaySystem::RecordObjectLost(TechnoClass* pTechno, bool scoringTypesOnly)
 	if (static_cast<size_t>(index) >= lost.size())
 		lost.resize(static_cast<size_t>(index) + 1, 0);
 	++lost[static_cast<size_t>(index)];
+}
+
+// Record_The_Kill_Object and Record_The_Kill_House credit a building kill only for a type that is
+// not Insignificant, so the engine never counts destroying a tech building. A tech building here is
+// an Insignificant one that is not garrisonable (that is the civilian houses) and is either
+// Capturable - the stock oil derrick, outpost, airport, power plant, machine shop, hospital, secret
+// lab - or owned by a real house when it dies, which catches the map-made precaptured derricks that
+// are not Capturable. Counted on the engine's other conditions: a type without DontScore, credited
+// to the killer's house. A capture also runs Record_The_Kill_Object, with no killer, and so is not
+// counted here.
+void ReplaySystem::RecordTechBuildingKilled(TechnoClass* pTechno, HouseClass* pKillerHouse)
+{
+	if (!ReplaySystem::IsRecordingActive() || !pTechno || !pKillerHouse || pKillerHouse->ArrayIndex < 0
+		|| pTechno->WhatAmI() != AbstractType::Building)
+	{
+		return;
+	}
+
+	const auto* pType = static_cast<BuildingClass*>(pTechno)->Type;
+	if (!pType || !pType->Insignificant || pType->DontScore || pType->CanBeOccupied)
+		return;
+
+	const auto* pOwner = pTechno->Owner;
+	const bool ownedByRealHouse = pOwner && pOwner->Type && !pOwner->Type->MultiplayPassive;
+	if (!pType->Capturable && !ownedByRealHouse)
+		return;
+
+	const int index = pType->GetArrayIndex();
+	if (index < 0 || index >= 0x1000)
+		return;
+
+	auto& killed = Statistics::CountersFor(pKillerHouse->ArrayIndex).KilledTechBuildings;
+	if (static_cast<size_t>(index) >= killed.size())
+		killed.resize(static_cast<size_t>(index) + 1, 0);
+	++killed[static_cast<size_t>(index)];
 }

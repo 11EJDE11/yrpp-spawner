@@ -64,6 +64,10 @@ namespace ReplaySystem
 	// TechnoClass::Record_The_Kill_Object / Record_The_Kill_House: the object is being lost.
 	// The first only counts a loss for a type that scores; the second counts it regardless.
 	void RecordObjectLost(TechnoClass* pTechno, bool scoringTypesOnly);
+	// TechnoClass::Record_The_Kill_Object / Record_The_Kill_House: a tech building destroyed by the
+	// killer's house, which the engine does not count as a kill. Added into the written
+	// KilledBuildings array.
+	void RecordTechBuildingKilled(TechnoClass* pTechno, HouseClass* pKillerHouse);
 
 	// Chat fingerprints, multiplayer only: the sender puts a fresh salt in the chat packet and queues a
 	// ChatFingerprint event of the message, and the message is recorded with the salt it was sent with

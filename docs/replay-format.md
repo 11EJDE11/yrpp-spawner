@@ -549,6 +549,26 @@ object by type on the engine's own condition: any vehicle, infantry or aircraft;
 when it is not `Insignificant` and its `OwnerCountryIndex` (+0x53C) is not -1; and, for
 `Record_The_Kill_Object`, whose whole tally sits inside the test, only a type without `DontScore`.
 
+### Tech buildings destroyed
+
+`Record_The_Kill_Object` and `Record_The_Kill_House` credit the killer with a building only when its
+type is not `Insignificant`, and every tech building is - so destroying an oil derrick, outpost,
+airport and so on counted nowhere, not in `KilledBuildingTypes`, `KilledBuildingsOfHouses` or
+`stats.dmp`. The same two hooks count them, crediting the killer's house (the `source` techno's owner,
+or the `source` house) by type, for a building whose type is `Insignificant`, without `DontScore`, not
+`CanBeOccupied` (the civilian houses), and either `Capturable` (the stock tech buildings) or owned by
+a house that is not `MultiplayPassive` when it dies (map-made precaptured derricks such as
+`CAOILD6` are not `Capturable`). The count is added into the written `KilledBuildings` array, where
+the engine can never have put anything for an `Insignificant` type; a reader that wants only the
+engine's count skips the entries whose type has the `Insignificant` flag. The house record's
+`KilledBuildingsOfHouses`, and the samples' `BuildingsKilled` summed from it, stay the engine's own.
+
+`KilledUnitsOfHouses`/`KilledBuildingsOfHouses` are not only kills: `TechnoClass::Captured`
+(0x7014A0) increments the new owner's entry for the old owner on every capture or mind control,
+`Insignificant` buildings included - so a map's precaptured tech buildings show there as buildings
+"killed" of the neutral house at the start of the game. The capture runs `Record_The_Kill_Object`
+with no source, so it is not counted as a tech building kill.
+
 ### The statistics section
 
 Written by `StopReplaySystem` after the checkpoint archive, as one raw deflate block of

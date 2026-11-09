@@ -32,6 +32,7 @@
 #include <Utilities/Macro.h>
 
 #include <EventClass.h>
+#include <Helpers/Cast.h>
 #include <HouseClass.h>
 #include <PowerClass.h>
 #include <ProgressScreenClass.h>
@@ -414,18 +415,24 @@ DEFINE_HOOK(0x4F9950, HouseClass_RefundMoney_ReplayIncome, 0xA)
 	return 0;
 }
 
-// Both functions that count a house's units and buildings lost.
+// Both functions that count a house's units and buildings lost. Both also credit the killer, the
+// first an object and the second a house, except for tech buildings, which the recorder counts.
 DEFINE_HOOK(0x702D40, TechnoClass_RecordTheKillObject_ReplayLosses, 0x6)
 {
 	GET(TechnoClass*, pTechno, ECX);
+	GET_STACK(ObjectClass*, pSource, 0x4);
 	ReplaySystem::RecordObjectLost(pTechno, true);
+	if (const auto* pKiller = abstract_cast<TechnoClass*>(pSource))
+		ReplaySystem::RecordTechBuildingKilled(pTechno, pKiller->Owner);
 	return 0;
 }
 
 DEFINE_HOOK(0x703230, TechnoClass_RecordTheKillHouse_ReplayLosses, 0x6)
 {
 	GET(TechnoClass*, pTechno, ECX);
+	GET_STACK(HouseClass*, pSource, 0x4);
 	ReplaySystem::RecordObjectLost(pTechno, false);
+	ReplaySystem::RecordTechBuildingKilled(pTechno, pSource);
 	return 0;
 }
 
