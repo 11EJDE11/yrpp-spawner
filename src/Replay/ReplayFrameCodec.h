@@ -39,6 +39,7 @@ namespace Replay
 		std::vector<uint32_t> SelectedObjectIDs;
 		std::vector<uint32_t> SelectionTriggerObjectIDs;
 		std::vector<SideChannelRecord> SideChannelEvents;
+		std::vector<DroppedHouseRecord> DroppedHouses;
 		// The low 16 bits of the recorded hash; only those are stored.
 		uint16_t GameCRC = 0;
 		int32_t GameSpeed = 0;
@@ -68,6 +69,9 @@ namespace Replay
 		std::vector<MoneyInRecord> MoneyIn;
 		// Canonical seals that closed by this frame.
 		std::vector<SealRecord> Seals;
+		// Houses flagged to die outside the event stream since the previous frame's capture, so before
+		// this frame's logic; playback flags them at the same point.
+		std::vector<DroppedHouseRecord> DroppedHouses;
 	};
 
 	// Tracks the last serialized values so unchanged viewer state can be omitted.

@@ -114,6 +114,10 @@ namespace ReplaySystem
 			// Payments made after the current frame's capture was written; they go into the next one.
 			std::vector<MoneyInRecord> CarriedMoneyIn;
 
+			// Houses Destroy_Connection flagged to die outside the event stream since the last capture;
+			// they go into the next one. See RecordDroppedHouse.
+			std::vector<DroppedHouseRecord> PendingDroppedHouses;
+
 			// The recording's canonical hash chain, and the buffer each frame's canonical bytes are
 			// built in.
 			Replay::SealChain Seals;

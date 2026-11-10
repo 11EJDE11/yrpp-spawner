@@ -223,10 +223,11 @@ namespace Replay
 		const bool hasHouseStats = capture.HasHouseStats && !capture.HouseStats.empty();
 		const bool hasMoneyIn = !capture.MoneyIn.empty();
 		const bool hasSeals = !capture.Seals.empty();
+		const bool hasDroppedHouses = !capture.DroppedHouses.empty();
 
 		if (eventsThisFrame == 0 && !tacticalPosChanged && !selectionChanged && !hasSideChannelEvents
 			&& !hasGameCRC && !capture.HasGameSpeed && !hasSelectionTriggers && !hasHouseStats && !hasMoneyIn
-			&& !hasSeals)
+			&& !hasSeals && !hasDroppedHouses)
 		{
 			return true;
 		}
@@ -343,6 +344,19 @@ namespace Replay
 			block.clear();
 			AppendBytes(block, &seal, sizeof(seal));
 			writeBlock(FrameBlock_Seal);
+		}
+
+		if (hasDroppedHouses)
+		{
+			block.clear();
+			const size_t count = std::min<size_t>(capture.DroppedHouses.size(), MaxDroppedHousesPerFrame);
+			AppendVarint(block, static_cast<uint32_t>(count));
+			for (size_t i = 0; i < count; ++i)
+			{
+				AppendVarint(block, static_cast<uint32_t>(capture.DroppedHouses[i].HouseIndex));
+				AppendVarint(block, static_cast<uint32_t>(capture.DroppedHouses[i].FlaggedFrame));
+			}
+			writeBlock(FrameBlock_DroppedHouses);
 		}
 
 		AppendVarint(record, FrameBlock_End);
@@ -518,6 +532,22 @@ namespace Replay
 				ok = cursor.IDList(record.SelectionTriggerObjectIDs, MaxSelectionTriggersPerFrame, false);
 				record.Flags |= FrameRecordFlag_SelectionTriggers;
 				break;
+
+			case FrameBlock_DroppedHouses:
+			{
+				uint32_t count = 0;
+				ok = cursor.Varint(count) && count <= static_cast<uint32_t>(MaxDroppedHousesPerFrame);
+				for (uint32_t i = 0; ok && i < count; ++i)
+				{
+					uint32_t house = 0, frame = 0;
+					ok = cursor.Varint(house) && cursor.Varint(frame)
+						&& house <= static_cast<uint32_t>(INT32_MAX) && frame <= static_cast<uint32_t>(INT32_MAX);
+					if (ok)
+						record.DroppedHouses.push_back({ static_cast<int32_t>(house), static_cast<int32_t>(frame) });
+				}
+				record.Flags |= FrameRecordFlag_DroppedHouses;
+				break;
+			}
 
 			default:
 				// House statistics, payments and seals are for readers outside the game, and a tag this

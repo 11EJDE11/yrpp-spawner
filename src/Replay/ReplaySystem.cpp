@@ -106,6 +106,7 @@ namespace ReplaySystem
 			ReplayState.LastMismatchFrame = -1;
 			ReplayState.PendingFrameStates.clear();
 			ReplayState.CarriedMoneyIn.clear();
+			ReplayState.PendingDroppedHouses.clear();
 			SideChannels::Reset();
 			Statistics::Reset();
 			ReplayState.Seals.Reset();
@@ -583,6 +584,15 @@ namespace ReplaySystem
 
 			RecordedFrameCapture& capture = ReplayState.PendingFrameStates.back();
 
+			// Flagged since the last capture, so before this frame's logic: the point playback
+			// flags them at.
+			if (!ReplayState.PendingDroppedHouses.empty())
+			{
+				capture.DroppedHouses.insert(capture.DroppedHouses.end(),
+					ReplayState.PendingDroppedHouses.begin(), ReplayState.PendingDroppedHouses.end());
+				ReplayState.PendingDroppedHouses.clear();
+			}
+
 			capture.TacticalPos = TacticalClass::Instance
 				? TacticalClass::Instance->TacticalCoord1
 				: Point2D { 0, 0 };
@@ -661,6 +671,35 @@ namespace ReplaySystem
 						record.FrameNumber);
 					return false;
 				}
+			}
+		}
+
+		// Flags each recorded house to die as Destroy_Connection did. Flag_To_Die does nothing to a house
+		// already dying, won or lost, so a drop the events have already applied is harmless. BorrowedTime
+		// starts on the frame the recording flagged it on, which is the previous frame when the drop came
+		// after that frame's logic.
+		void ApplyDroppedHouses(const PlaybackFrameRecord& frameRecord)
+		{
+			for (const auto& drop : frameRecord.DroppedHouses)
+			{
+				if (drop.HouseIndex < 0 || drop.HouseIndex >= HouseClass::Array.Count)
+				{
+					Debug::Log("[Replay] Skipping a dropped house %d; there are %d houses.\n",
+						drop.HouseIndex, HouseClass::Array.Count);
+					continue;
+				}
+
+				HouseClass* pHouse = HouseClass::Array.Items[drop.HouseIndex];
+				if (!pHouse)
+					continue;
+
+				const bool wasDying = pHouse->IsGameOver;
+				pHouse->FlagToDie();
+				if (!wasDying && pHouse->IsGameOver)
+					pHouse->BorrowedTime.StartTime = drop.FlaggedFrame;
+
+				Debug::Log("[Replay] %ls was dropped outside the event stream at frame %d.\n",
+					pHouse->UIName, drop.FlaggedFrame);
 			}
 		}
 
@@ -1076,6 +1115,10 @@ namespace ReplaySystem
 				ReplayState.HasExpectedGameCRC = true;
 			}
 
+			// Before this frame's logic, where the recording's Destroy_Connection had flagged them.
+			if ((frameRecord.Flags & FrameRecordFlag_DroppedHouses) != 0u)
+				ApplyDroppedHouses(frameRecord);
+
 
 			// Applied from the same point in the frame the recording read it from.
 			if ((frameRecord.Flags & FrameRecordFlag_GameSpeed) != 0u)
@@ -1357,6 +1400,20 @@ bool ReplaySystem::IsPlaybackRequested()
 bool ReplaySystem::IsRecordingActive()
 {
 	return ReplayState.Recording;
+}
+
+void ReplaySystem::RecordDroppedHouse(HouseClass* pHouse)
+{
+	if (!ReplayState.Recording || !pHouse || pHouse->ArrayIndex < 0)
+		return;
+
+	auto& pending = ReplayState.PendingDroppedHouses;
+	if (pending.size() >= static_cast<size_t>(MaxDroppedHousesPerFrame))
+		return;
+
+	pending.push_back({ pHouse->ArrayIndex, static_cast<int32_t>(Unsorted::CurrentFrame) });
+	Debug::Log("[Replay] Recording that %ls was dropped outside the event stream at frame %d.\n",
+		pHouse->UIName, Unsorted::CurrentFrame);
 }
 
 void ReplaySystem::RecordIncome(HouseClass* pHouse, int amount, uintptr_t returnAddress)

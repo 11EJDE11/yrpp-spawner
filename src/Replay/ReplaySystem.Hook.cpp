@@ -404,6 +404,26 @@ DEFINE_HOOK(0x6851F0, ClearScenario_ReplayFinalSnapshot, 0x5)
 	return 0;
 }
 
+// Destroy_Connection (0x5DA750) removes a player through an E_REMOVEPLAYER event, which the stream
+// records - except on frame 0, a player Scenario_Load_Wait drops for not finishing loading, and a
+// tournament Internet game's player leaving, where it flags the house to die itself. Both are
+// `mov ecx, ebx; call Flag_To_Die` (7 bytes); the hooks make the call so as not to relocate it.
+DEFINE_HOOK(0x5DA873, DestroyConnection_FlagToDieAtLoad_Replay, 0x7)
+{
+	GET(HouseClass*, pHouse, EBX);
+	pHouse->FlagToDie();
+	ReplaySystem::RecordDroppedHouse(pHouse);
+	return 0x5DA87A;
+}
+
+DEFINE_HOOK(0x5DA90D, DestroyConnection_FlagToDieTournamentLeave_Replay, 0x7)
+{
+	GET(HouseClass*, pHouse, EBX);
+	pHouse->FlagToDie();
+	ReplaySystem::RecordDroppedHouse(pHouse);
+	return 0x5DA914;
+}
+
 // Every kind of income goes through HouseClass::Refund_Money; the return address says which.
 DEFINE_HOOK(0x4F9950, HouseClass_RefundMoney_ReplayIncome, 0xA)
 {

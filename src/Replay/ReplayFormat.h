@@ -53,6 +53,7 @@ namespace Replay
 		FrameRecordFlag_GameCRC = 1u << 3,
 		FrameRecordFlag_GameSpeed = 1u << 4,
 		FrameRecordFlag_SelectionTriggers = 1u << 5,
+		FrameRecordFlag_DroppedHouses = 1u << 6,
 	};
 
 	// A frame record's blocks. Each is written as varint tag, varint length, then that many bytes, and
@@ -69,6 +70,21 @@ namespace Replay
 		FrameBlock_HouseStats = 6,        // varint count, then that many HouseStatsSample
 		FrameBlock_MoneyIn = 7,           // varint count, then that many MoneyInRecord
 		FrameBlock_Seal = 8,              // SealRecord: the canonical hash chain so far
+		// varint count, then per house varint house index, varint the Frame it was flagged on: houses
+		// Destroy_Connection flagged to die directly instead of through an E_REMOVEPLAYER event - a
+		// player dropped while the game loads, or leaving a tournament game. Not canonical: only the
+		// machines that dropped the player have it.
+		FrameBlock_DroppedHouses = 9,
+	};
+
+	constexpr int32_t MaxDroppedHousesPerFrame = 32;
+
+	// A house Destroy_Connection flagged to die outside the event stream; see FrameBlock_DroppedHouses.
+	struct DroppedHouseRecord
+	{
+		int32_t HouseIndex = -1;
+		// Frame when it was flagged, which Flag_To_Die starts the house's BorrowedTime on.
+		int32_t FlaggedFrame = 0;
 	};
 
 	constexpr uint32_t MaxFrameBlockBytes = 1u << 20;

@@ -289,8 +289,25 @@ recordings made before it:
 | 6 | HouseStats | varint count (1-32), then that many `HouseStatsSample` (84 bytes); every `HouseStatsIntervalFrames` (60) |
 | 7 | MoneyIn | varint count (1-1024), then that many `MoneyInRecord` (12 bytes) |
 | 8 | Seal | a `SealRecord` (36 bytes); see [Canonical hash](#canonical-hash). One block per seal |
+| 9 | DroppedHouses | varint count (1-32), then per house varint house index and varint the `Frame` it was flagged on; see [Players dropped outside the event stream](#players-dropped-outside-the-event-stream) |
 
-Playback reads the first five and skips the rest, which are for readers outside the game.
+Playback reads the first five and DroppedHouses, and skips the rest, which are for readers outside the game.
+
+### Players dropped outside the event stream
+
+`Destroy_Connection` (0x5DA750) normally removes a player by queueing `E_REMOVEPLAYER`, which the
+stream records like any event. Twice it flags the house to die itself instead, and nothing in the
+events says so: on frame 0, which is how `Scenario_Load_Wait` (0x684370) drops a player whose load
+never reached 100% ("Player %s failed to make it into the game"), and for a player leaving an
+Internet game with `bTournament` set. Without a record, playback keeps that house alive and diverges
+from the first frame - the house is blown up by its first `HouseClass::AI`.
+
+Both are `mov ecx, ebx; call Flag_To_Die` (0x5DA873 and 0x5DA90D, 7 bytes), hooked to make the call
+and note the house and `Frame`. The note goes into the next frame captured at `Main_Loop` 0x55D878,
+which is before that frame's logic, and playback calls `Flag_To_Die` at the same point and sets the
+house's `BorrowedTime` to start on the recorded frame. The block is not part of the
+[canonical hash](#canonical-hash): only the machines that dropped the player have it, and a split at
+load leaves the others with a different game.
 
 A side-channel record: uint8 type, zigzag house, zigzag aux, zigzag X, Y and Z, a varint length and
 that many bytes of UTF-8 sender name, the same for the text, then for a chat message a uint8 of flags -

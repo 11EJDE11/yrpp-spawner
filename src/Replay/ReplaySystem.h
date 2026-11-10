@@ -64,6 +64,10 @@ namespace ReplaySystem
 	// TechnoClass::Record_The_Kill_Object / Record_The_Kill_House: the object is being lost.
 	// The first only counts a loss for a type that scores; the second counts it regardless.
 	void RecordObjectLost(TechnoClass* pTechno, bool scoringTypesOnly);
+	// Destroy_Connection flagged the house to die itself instead of queueing E_REMOVEPLAYER: a player
+	// dropped while the game loads, or leaving a tournament game. Nothing in the event stream says so.
+	void RecordDroppedHouse(HouseClass* pHouse);
+
 	// TechnoClass::Record_The_Kill_Object / Record_The_Kill_House: a tech building destroyed by the
 	// killer's house, which the engine does not count as a kill. Added into the written
 	// KilledBuildings array.
