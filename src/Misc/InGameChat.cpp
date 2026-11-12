@@ -20,6 +20,7 @@
 #include "InGameChat.h"
 
 #include <Spawner/Spawner.h>
+#include <Utilities/Debug.h>
 #include <Utilities/Macro.h>
 #include <HouseClass.h>
 #include <HouseTypeClass.h>
@@ -209,11 +210,13 @@ DEFINE_HOOK(0x55EF38, MessageSend_DisableChat, 0x6)
 		if (currentFrame < LastDisableChatFeedbackFrame)
 			LastDisableChatFeedbackFrame = -1000; // new match started
 
-		if (currentFrame - LastDisableChatFeedbackFrame >= 90)
+		// A defeated player is not told; the log says so instead.
+		if (!disableChat)
+			Debug::Log("[Chat] Not sent on frame %d: the local player is defeated (DisableChatWhenDefeated).\n",
+				currentFrame);
+		else if (currentFrame - LastDisableChatFeedbackFrame >= 90)
 		{
-			MessageListClass::Instance.PrintMessage(disableChat
-				? L"Chat is disabled. Message not sent."
-				: L"Chat is disabled for defeated players. Message not sent.");
+			MessageListClass::Instance.PrintMessage(L"Chat is disabled. Message not sent.");
 			LastDisableChatFeedbackFrame = currentFrame;
 		}
 
@@ -326,7 +329,11 @@ DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 
 	// The sender's own client refuses to send these. This covers one that sent anyway.
 	if (IsDefeatedChatBlocked(pRecordHouse))
+	{
+		Debug::Log("[Chat] Message from defeated house %d dropped on frame %d (DisableChatWhenDefeated).\n",
+			houseIndex, static_cast<int>(Unsorted::CurrentFrame));
 		return SkipMessage;
+	}
 
 	if (houseIndex < 8 && Game::ChatMask[houseIndex])
 	{
