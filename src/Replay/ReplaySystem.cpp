@@ -45,6 +45,7 @@
 #include <MouseClass.h>
 #include <RadarClass.h>
 #include <ScenarioClass.h>
+#include <SidebarClass.h>
 #include <StringTable.h>
 #include <TagClass.h>
 #include <TechnoClass.h>
@@ -1477,6 +1478,44 @@ void ReplaySystem::ReapplyPlaybackSpectator()
 
 	if (!TakeSpectatorSeat())
 		Debug::Log("[Replay] The observer seat could not be taken again after the keyframe load.\n");
+}
+
+bool ReplaySystem::SwitchToSpectatorView()
+{
+	if (!ReplayState.Playback)
+		return false;
+
+	if (ReplayState.SpectatorView)
+		return true;
+
+	HouseClass* const pPlayer = HouseClass::CurrentPlayer;
+	if (!pPlayer)
+		return false;
+
+	// Everything spectator playback changes reads the setting, and a keyframe load takes the seat
+	// again from it.
+	if (auto const pConfig = Spawner::GetConfig())
+		pConfig->ReplaySpectator = true;
+
+	ReplayState.SpectatorView = true;
+	Game::ObserverMode = true;
+	pPlayer->MakeObserver();
+
+	// A launch also closes the command bar before the game starts. Mid-game it is left as the viewer
+	// has it: Toggle_Thumb here would relink its buttons, the loop 0x4FC591 guards against.
+
+	// Spectator view shows the whole map, which the radar and the tactical view have cached.
+	RedrawAfterPlaybackReveal();
+
+	auto& sidebar = SidebarClass::Instance;
+	sidebar.SidebarNeedsRedraw = true;
+	sidebar.SidebarBackgroundNeedsRedraw = true;
+	for (auto& strip : sidebar.Tabs)
+		strip.NeedsRedraw = true;
+
+	Debug::Log("[Replay] Switched to watching from an observer seat on frame %d.\n",
+		static_cast<int>(Unsorted::CurrentFrame));
+	return true;
 }
 
 void ReplaySystem::RequestTakeOver()

@@ -41,6 +41,10 @@ namespace ReplaySystem
 	// savegame carries and the load rebuilds every house, so a seek leaves it on a dead one.
 	void ReapplyPlaybackSpectator();
 
+	// Moves the viewer into the observer seat mid-playback, as if the replay had been launched with
+	// ReplaySpectator. Taken by the in-game menu's Observe. One-way: Take Over is refused from it.
+	bool SwitchToSpectatorView();
+
 	// Hands the viewer the house being watched at the start of the next frame: playback stops and
 	// the game carries on as an ordinary one, still with no network. Refused with a notice while
 	// seeking, from a spectator or observer seat, or once that house has been defeated.

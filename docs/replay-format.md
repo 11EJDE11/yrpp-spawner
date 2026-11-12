@@ -1596,6 +1596,24 @@ definition, and `PlaybackWantsFullMapReveal` reveals it whether or not `ReplaySh
 The client greys the "Shroud enabled" box out when Spectator is chosen in the "Watch as" drop-down,
 and launches with no perspective, rather than leaving a control that does nothing.
 
+### Observe from the in-game menu
+
+Viewers who did not know about "Watch as" reached for the game's own Observe instead (Options, Quit,
+Observe). Live, that button queues a resign for the local house and clears the flag that lets the
+in-game menu open in multiplayer (0x822CFC, set by `Main_Game` at 0x48CE7E); the defeat the resign
+brings sets it again (`Special_Dialog`, 0x48C911). Playback drops the viewer's resign, so the flag
+stayed clear and Escape did nothing for the rest of the replay - there was no way out but killing
+the game.
+
+During playback Observe instead takes the spectator seat, as if the replay had been launched with
+`ReplaySpectator` (`ReplaySystem::SwitchToSpectatorView`, from a hook on the dialog's result at
+0x48CAB2). No resign is queued and the menu flag is left alone. It sets `ReplaySpectator` in the live
+config, so every spectator hook follows and a keyframe load takes the seat again. The observer
+scoreboard was built at load with no observer, so the watched player is still on it. Two things a
+launch does are left out: the command bar is not closed (toggling it mid-game is what the
+`MPlayer_Defeated` hook at 0x4FC591 guards against), and the switch is one-way, since Take Over is
+refused from the observer seat. Once spectating, the dialog no longer offers Observe (0x4F19C4).
+
 ## Watching from another player
 
 `ReplayViewPlayer` names a spawn.ini player slot by index: `0` is `[Settings]`, which is always the

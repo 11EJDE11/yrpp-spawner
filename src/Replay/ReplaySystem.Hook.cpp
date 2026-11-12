@@ -333,6 +333,38 @@ DEFINE_HOOK(0x64806E, Queue_AI_Multiplayer_ReplaySkipWaitForPlayers, 0x8)
 	return R->ESI<int>() == R->EBX<int>() ? WaitSucceeded : WaitFailed;
 }
 
+#pragma region In-game menu Observe
+
+// Special_Dialog, the Abort Mission dialog's Observe (result 4). Live, it queues a resign for the
+// local house and clears the flag that lets the in-game menu open in multiplayer (0x822CFC, set by
+// Main_Game at 0x48CE7E), counting on the defeat the resign brings to set it again (0x48C911).
+// Playback drops the viewer's resign, so the menu stayed shut for the rest of the replay and the
+// viewer had no way out. Take the spectator seat instead, and leave both alone.
+DEFINE_HOOK(0x48CAB2, SpecialDialog_AbortObserve_ReplaySpectator, 0x5)
+{
+	enum { DialogDone = 0x48CC31 };
+
+	if (!ReplaySystem::IsPlaybackActive())
+		return 0;
+
+	ReplaySystem::SwitchToSpectatorView();
+	return DialogDone;
+}
+
+// Abort_Mission_Dialog's setup, where it offers Observe unless the local player is defeated (the
+// spawner's skip of the human count, 0x4F1993, lands here too). A viewer already in the observer
+// seat has nothing to switch to.
+DEFINE_HOOK(0x4F19C4, AbortMissionDialog_HideObserveForReplaySpectator, 0x6)
+{
+	enum { HideObserve = 0x4F1A0B };
+
+	return ReplaySystem::IsPlaybackActive() && HouseClass::IsCurrentPlayerObserver()
+		? HideObserve
+		: 0;
+}
+
+#pragma endregion In-game menu Observe
+
 #pragma region Closing the replay file
 
 // The ways a game can end, all of which close the replay file out. StopReplaySystem does nothing
