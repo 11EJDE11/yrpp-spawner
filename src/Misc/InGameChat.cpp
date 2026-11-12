@@ -185,13 +185,24 @@ static bool inline IsDisableChatEnabled()
 	return Spawner::Enabled && Spawner::GetConfig()->DisableChat;
 }
 
-// Don't send message to others when DisableChat is active.
+// DisableChatWhenDefeated: a defeated house, spawned spectators included (they are defeated from the
+// start), has no chat. Vanilla already limits a defeated player to messages every house receives
+// (TXT_OBSERVER_CANT_SEND, 0x55EE71), which is still enough to ghost for a teammate.
+static bool inline IsDefeatedChatBlocked(const HouseClass* pHouse)
+{
+	return Spawner::Enabled && Spawner::GetConfig()->DisableChatWhenDefeated
+		&& pHouse && pHouse->Defeated;
+}
+
+// Don't send message to others when DisableChat is active, or DisableChatWhenDefeated and the local
+// player is defeated.
 // Mirrors: hack 0x0055EF38, 0x0055EF3E in chat_disable.asm
 DEFINE_HOOK(0x55EF38, MessageSend_DisableChat, 0x6)
 {
 	static int LastDisableChatFeedbackFrame = -1000;
 
-	if (IsDisableChatEnabled())
+	const bool disableChat = IsDisableChatEnabled();
+	if (disableChat || IsDefeatedChatBlocked(HouseClass::CurrentPlayer))
 	{
 		const int currentFrame = Unsorted::CurrentFrame;
 
@@ -200,7 +211,9 @@ DEFINE_HOOK(0x55EF38, MessageSend_DisableChat, 0x6)
 
 		if (currentFrame - LastDisableChatFeedbackFrame >= 90)
 		{
-			MessageListClass::Instance.PrintMessage(L"Chat is disabled. Message not sent.");
+			MessageListClass::Instance.PrintMessage(disableChat
+				? L"Chat is disabled. Message not sent."
+				: L"Chat is disabled for defeated players. Message not sent.");
 			LastDisableChatFeedbackFrame = currentFrame;
 		}
 
@@ -309,6 +322,10 @@ DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
 	}
 
 	if (IsDisableChatEnabled())
+		return SkipMessage;
+
+	// The sender's own client refuses to send these. This covers one that sent anyway.
+	if (IsDefeatedChatBlocked(pRecordHouse))
 		return SkipMessage;
 
 	if (houseIndex < 8 && Game::ChatMask[houseIndex])

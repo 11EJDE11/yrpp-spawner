@@ -151,6 +151,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		DefeatedBecomesObserver  = pINI->ReadBool(pSettingsSection, "DefeatedBecomesObserver", DefeatedBecomesObserver);
 		Observer_ShowAIOnSidebar = pINI->ReadBool(pSettingsSection, "Observer.ShowAIOnSidebar", Observer_ShowAIOnSidebar);
 		DisableChat              = pINI->ReadBool(pSettingsSection, "DisableChat", DisableChat);
+		DisableChatWhenDefeated  = pINI->ReadBool(pSettingsSection, "DisableChatWhenDefeated", DisableChatWhenDefeated);
 	}
 }
 

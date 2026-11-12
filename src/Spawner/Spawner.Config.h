@@ -193,6 +193,9 @@ public:
 	bool DefeatedBecomesObserver;
 	bool Observer_ShowAIOnSidebar;
 	bool DisableChat;
+	// A defeated player, spawned spectators included, can no longer send chat, and their messages are
+	// dropped on arrival. For ladder games, against ghosting.
+	bool DisableChatWhenDefeated;
 
 	SpawnerConfig() // default values
 		// Game Mode Options
@@ -320,6 +323,7 @@ public:
 		, DefeatedBecomesObserver { false }
 		, Observer_ShowAIOnSidebar { false }
 		, DisableChat { false }
+		, DisableChatWhenDefeated { false }
 	{ }
 
 	void LoadFromINIFile(CCINIClass* pINI);
