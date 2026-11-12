@@ -26,7 +26,8 @@ namespace ReplaySystem
 	{
 		bool ProcessMouseInput(int mouseX, int mouseY);
 
-		// Draws the panel. Does nothing when playback is not running or the bar is hidden.
+		// Draws the panel, or while the bar is hidden the tab that shows it again (only with the mouse over
+		// where the bar sits). Does nothing outside playback.
 		void Draw();
 
 		// Drops any half-finished press or drag - a keyframe load rebuilds the world underneath the

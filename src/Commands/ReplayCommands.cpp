@@ -21,7 +21,6 @@
 #include "Commands.h"
 
 #include <Replay/ReplayControls.h>
-#include <Replay/ReplaySeek.h>
 #include <Replay/ReplaySystem.h>
 
 #include <StringTable.h>
@@ -30,20 +29,6 @@ namespace Commands
 {
 	namespace
 	{
-		// How far the jump hotkeys move, in seconds of recorded game time. The seek bar is for
-		// anything longer than a nudge.
-		constexpr int HotkeySeekSeconds = 10;
-
-		void SeekBySeconds(int seconds)
-		{
-			if (!ReplaySystem::IsPlaybackActive())
-				return;
-
-			const int target = ReplaySystem::Seek::CurrentFrame() + seconds * ReplaySystem::Seek::RecordedFPS();
-			if (!ReplaySystem::Seek::RequestSeek(target))
-				ReplaySystem::Controls::PrintControlMessage(L"Nothing to rewind to yet.");
-		}
-
 		const wchar_t* ReplayCategory()
 		{
 			return StringTable::TryFetchString("TXT_REPLAY_CATEGORY", L"Replay");
@@ -55,7 +40,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplayTogglePause"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_PAUSE", L"Replay: Pause/Resume"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_PAUSE", L"Pause/Resume"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 
@@ -74,7 +59,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplaySpeedUp"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_SPEED_UP", L"Replay: Speed Up"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_SPEED_UP", L"Speed Up"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 
@@ -93,7 +78,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplaySpeedDown"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_SLOW_DOWN", L"Replay: Slow Down"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_SLOW_DOWN", L"Slow Down"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 
@@ -112,7 +97,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplayStepFrame"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_STEP_FRAME", L"Replay: Advance One Frame"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_STEP_FRAME", L"Advance One Frame"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 
@@ -131,7 +116,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplaySeekBack"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_BACK", L"Replay: Jump Back"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_BACK", L"Jump Back"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 
@@ -141,7 +126,7 @@ namespace Commands
 					L"Jumps ten seconds back, restarting from the nearest keyframe.");
 			}
 
-			virtual void Execute(WWKey) const override { SeekBySeconds(-HotkeySeekSeconds); }
+			virtual void Execute(WWKey) const override { ReplaySystem::Controls::SeekBySeconds(-ReplaySystem::Controls::JumpSeconds); }
 		};
 
 		class ReplaySeekForwardCommandClass : public CommandClass
@@ -150,7 +135,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplaySeekForward"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_FORWARD", L"Replay: Jump Forward"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_FORWARD", L"Jump Forward"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 
@@ -160,7 +145,7 @@ namespace Commands
 					L"Jumps ten seconds forward, running the frames in between without drawing them.");
 			}
 
-			virtual void Execute(WWKey) const override { SeekBySeconds(HotkeySeekSeconds); }
+			virtual void Execute(WWKey) const override { ReplaySystem::Controls::SeekBySeconds(ReplaySystem::Controls::JumpSeconds); }
 		};
 
 		class ReplayToggleControlBarCommandClass : public CommandClass
@@ -169,7 +154,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplayToggleControlBar"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_CONTROL_BAR", L"Replay: Show/Hide Controls"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_CONTROL_BAR", L"Show/Hide Controls"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 
@@ -188,7 +173,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplayToggleViewportLock"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_VIEWPORT_LOCK", L"Replay: Lock/Unlock Viewport"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_VIEWPORT_LOCK", L"Lock/Unlock Viewport"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 
@@ -207,7 +192,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplayToggleSelection"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_SELECTION", L"Replay: Follow/Free Unit Selection"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_SELECTION", L"Follow/Free Unit Selection"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 
@@ -226,7 +211,7 @@ namespace Commands
 			virtual const char* GetName() const override { return "ReplayTakeOver"; }
 
 			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_TAKE_OVER", L"Replay: Take Over"); }
+				{ return StringTable::TryFetchString("TXT_REPLAY_TAKE_OVER", L"Take Over"); }
 
 			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
 

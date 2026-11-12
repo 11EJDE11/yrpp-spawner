@@ -433,6 +433,32 @@ namespace ReplaySystem
 				: L"Recorded unit selection disabled.");
 		}
 
+		void SeekBySeconds(int seconds)
+		{
+			if (!ReplayState.Playback || seconds == 0)
+				return;
+
+			const int currentFrame = Seek::CurrentFrame();
+			int target = currentFrame + seconds * Seek::RecordedFPS();
+
+			if (seconds < 0)
+			{
+				target = std::max(target, Seek::EarliestSeekableFrame());
+				if (target >= currentFrame)
+				{
+					PrintControlMessage(L"Nothing to rewind to yet.");
+					return;
+				}
+			}
+			else
+			{
+				target = std::min(target, Seek::TotalFrames());
+			}
+
+			if (!Seek::RequestSeek(target))
+				PrintControlMessage(L"Nothing to rewind to yet.");
+		}
+
 		void StepPlaybackSpeed(int direction)
 		{
 			if (!ReplayState.Playback || direction == 0)

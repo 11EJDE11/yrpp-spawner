@@ -836,7 +836,7 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayPlaybackSpeed` | `0` | Playback frame rate in FPS. `0` uses the recorded speed. |
 | `ReplayViewPlayer` | `-1` | Which player's screen to watch the recording from. See below. |
 | `ReplayRenderAtDisplayRate` | `true` | When playback runs faster than the monitor refreshes, simulate every frame but only draw at the refresh rate. Never applies while paused, seeking, or at or below the refresh rate. |
-| `ReplayControlBar` | `false` | Draw the on-screen playback controls during playback. Toggled with a hotkey; no client UI sets this. See below. |
+| `ReplayControlBar` | `true` | Draw the on-screen playback controls during playback. Hidden by the bar's own hide button or the hotkey; when hidden, hovering where the bar sits shows a tab that brings it back. No client UI sets this. |
 | `ReplayKeyframeInterval` | `750` | Frames between playback-generated keyframes. `0` still permits embedded checkpoints. |
 | `ReplayKeyframeStorageLimitMB` | `512` | Maximum temporary keyframe storage in MB. `0` disables the limit. |
 
@@ -1218,7 +1218,6 @@ ReplaySpeedDown=189     ; VK_OEM_MINUS, the '-' key
 ReplayToggleControlBar=72       ; 'H'
 ReplayToggleViewportLock=86     ; 'V'
 ReplayToggleSelection=85        ; 'U'
-ReplayToggleDiagnostics=68      ; 'D'
 ```
 
 They ship unbound on purpose. `Init_Commands` runs once per process rather than once per session, so
@@ -1235,34 +1234,29 @@ and nothing breaks:
 | Label | Fallback |
 |---|---|
 | `TXT_REPLAY_CATEGORY` | Replay |
-| `TXT_REPLAY_PAUSE` | Replay: Pause/Resume |
+| `TXT_REPLAY_PAUSE` | Pause/Resume |
 | `TXT_REPLAY_PAUSE_DESC` | Freezes replay playback. The map can still be scrolled while paused. |
-| `TXT_REPLAY_SPEED_UP` | Replay: Speed Up |
+| `TXT_REPLAY_SPEED_UP` | Speed Up |
 | `TXT_REPLAY_SPEED_UP_DESC` | Plays the replay back faster, past the speed a live game allows. |
-| `TXT_REPLAY_SLOW_DOWN` | Replay: Slow Down |
+| `TXT_REPLAY_SLOW_DOWN` | Slow Down |
 | `TXT_REPLAY_SLOW_DOWN_DESC` | Plays the replay back slower. |
-| `TXT_REPLAY_STEP_FRAME` | Replay: Advance One Frame |
+| `TXT_REPLAY_STEP_FRAME` | Advance One Frame |
 | `TXT_REPLAY_STEP_FRAME_DESC` | Runs a single frame and freezes again. Pauses playback first if it is running. |
-| `TXT_REPLAY_SEEK_BACK` | Replay: Jump Back |
+| `TXT_REPLAY_SEEK_BACK` | Jump Back |
 | `TXT_REPLAY_SEEK_BACK_DESC` | Jumps ten seconds back, restarting from the nearest keyframe. |
-| `TXT_REPLAY_SEEK_FORWARD` | Replay: Jump Forward |
+| `TXT_REPLAY_SEEK_FORWARD` | Jump Forward |
 | `TXT_REPLAY_SEEK_FORWARD_DESC` | Jumps ten seconds forward, running the frames in between without drawing them. |
-| `TXT_REPLAY_CONTROL_BAR` | Replay: Show/Hide Controls |
+| `TXT_REPLAY_CONTROL_BAR` | Show/Hide Controls |
 | `TXT_REPLAY_CONTROL_BAR_DESC` | Shows or hides the on-screen playback controls. |
-| `TXT_REPLAY_VIEWPORT_LOCK` | Replay: Lock/Unlock Viewport |
+| `TXT_REPLAY_VIEWPORT_LOCK` | Lock/Unlock Viewport |
 | `TXT_REPLAY_VIEWPORT_LOCK_DESC` | Toggles following the viewport recorded in the replay. |
-| `TXT_REPLAY_SELECTION` | Replay: Follow/Free Unit Selection |
+| `TXT_REPLAY_SELECTION` | Follow/Free Unit Selection |
 | `TXT_REPLAY_SELECTION_DESC` | Toggles reproducing the unit selection recorded in the replay. |
-| `TXT_REPLAY_TAKE_OVER` | Replay: Take Over |
+| `TXT_REPLAY_TAKE_OVER` | Take Over |
 | `TXT_REPLAY_TAKE_OVER_DESC` | Ends playback and gives you control of the player you are watching, from this moment on. |
 | `TXT_REPLAY_TAKEN_OVER` | You have taken over. Replay playback has ended. |
-| `TXT_REPLAY_DIAGNOSTICS` | Replay: Enable/Disable Diagnostics |
-| `TXT_REPLAY_DIAGNOSTICS_DESC` | Toggles expensive divergence diagnostics and starts a fresh capture window when enabled. |
 
-The numeric assignments above are examples, not built-in defaults. Diagnostics can be enabled in
-the middle of playback. Enabling it clears the samples retained by an earlier diagnostic window,
-so a useful workflow is to leave it off while seeking near a known frame, turn it on, play past the
-suspect frame, then seek back through that newly captured window while leaving it on.
+The numeric assignments above are examples, not built-in defaults.
 
 ### Speed
 

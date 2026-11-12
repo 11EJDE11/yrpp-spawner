@@ -66,7 +66,8 @@ namespace ReplaySystem
 		// The frame rate playback is running at.
 		int PlaybackFPS();
 
-		// Whether the on-screen playback controls are being drawn, and its toggle. Starts at the
+		// Whether the on-screen playback controls are being drawn, and its toggle (the hotkey, the bar's
+		// hide button and the show tab). Starts at the
 		// ReplayControlBar setting.
 		bool IsControlBarVisible();
 		void ToggleControlBar();
@@ -80,6 +81,13 @@ namespace ReplaySystem
 
 		// Walks the ladder by one rung: +1 faster, -1 slower. Does nothing outside playback.
 		void StepPlaybackSpeed(int direction);
+
+		// How far the jump buttons and hotkeys move, in seconds of recorded game time.
+		constexpr int JumpSeconds = 10;
+
+		// Seeks by a number of seconds of recorded game time. Backwards stops at the oldest keyframe
+		// still held rather than refusing, and says so when there is nothing to go back to.
+		void SeekBySeconds(int seconds);
 
 		// Commits and draws whatever the viewer scrolled to during a paused frame, in place of the
 		// per-frame work that would normally do it.

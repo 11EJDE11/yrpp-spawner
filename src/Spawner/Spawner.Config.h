@@ -238,7 +238,7 @@ public:
 		, ReplaySpectator { false }
 		, ReplayShowChatAndBeacons { true }
 		, ReplayViewPlayer { -1 }
-		, ReplayControlBar { false }
+		, ReplayControlBar { true }
 		, ReplayRenderAtDisplayRate { true }
 		, ReplayKeyframeInterval { 750 }
 		, ReplayKeyframeStorageLimitMB { 512 }

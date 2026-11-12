@@ -58,15 +58,22 @@ namespace ReplaySystem
 			constexpr int KeyframeTickWidth = 1;
 			constexpr int MaxDrawnKeyframes = 256;
 
+			// The tab that brings a hidden bar back, sitting at the bottom of where the bar was.
+			constexpr int ShowTabWidth = 44;
+			constexpr int ShowTabHeight = 14;
+
+			// Frame stepping is left to the hotkeys: it is a debugging aid, and a step back costs a
+			// whole keyframe load per click.
 			enum ButtonID
 			{
 				Button_JumpStart = 0,
-				Button_StepBack,
+				Button_JumpBack,
 				Button_Slower,
 				Button_PlayPause,
 				Button_Faster,
-				Button_StepForward,
+				Button_JumpForward,
 				Button_JumpEnd,
+				Button_Hide,
 				ButtonCount
 			};
 
@@ -76,6 +83,7 @@ namespace ReplaySystem
 				RectangleStruct Panel {};
 				RectangleStruct Buttons[ButtonCount] {};
 				RectangleStruct Track {};
+				RectangleStruct ShowTab {};
 				Point2D ClockRight {};
 				Point2D SpeedRight {};
 			};
@@ -110,15 +118,26 @@ namespace ReplaySystem
 
 				int buttonX = layout.Panel.X + PanelPadding;
 				const int buttonY = layout.Panel.Y + ButtonRowTop;
-				for (int i = 0; i < ButtonCount; ++i)
+				for (int i = 0; i < Button_Hide; ++i)
 				{
 					layout.Buttons[i] = { buttonX, buttonY, ButtonWidth, ButtonHeight };
 					buttonX += ButtonWidth + ButtonGap;
 				}
 
+				// Hide sits apart at the right-hand end, after the clock and speed readout.
 				const int panelRight = layout.Panel.X + layout.Panel.Width - PanelPadding;
-				layout.SpeedRight = { panelRight, buttonY + 4 };
-				layout.ClockRight = { panelRight - 60, buttonY + 4 };
+				layout.Buttons[Button_Hide] = { panelRight - ButtonWidth, buttonY, ButtonWidth, ButtonHeight };
+
+				const int textRight = layout.Buttons[Button_Hide].X - 8;
+				layout.SpeedRight = { textRight, buttonY + 4 };
+				layout.ClockRight = { textRight - 60, buttonY + 4 };
+
+				layout.ShowTab = {
+					layout.Panel.X + (layout.Panel.Width - ShowTabWidth) / 2,
+					layout.Panel.Y + layout.Panel.Height - ShowTabHeight,
+					ShowTabWidth,
+					ShowTabHeight
+				};
 
 				layout.Track.X = layout.Panel.X + PanelPadding;
 				layout.Track.Y = layout.Panel.Y + TrackTop;
@@ -213,6 +232,21 @@ namespace ReplaySystem
 				}
 			}
 
+			void DrawTriangleVertical(int x, int y, int width, int height, bool pointsDown, int color)
+			{
+				if (height <= 0)
+					return;
+
+				for (int row = 0; row < height; ++row)
+				{
+					const int fromBase = pointsDown ? row : height - 1 - row;
+					const int rowWidth = std::max(1, width - (fromBase * width) / height);
+					const int rowX = x + (width - rowWidth) / 2;
+
+					FillRect({ rowX, y + row, rowWidth, 1 }, color);
+				}
+			}
+
 			void DrawPauseBars(int x, int y, int width, int height, int color)
 			{
 				const int barWidth = std::max(2, width / 3);
@@ -243,6 +277,12 @@ namespace ReplaySystem
 				int HoveredButton = -1;
 				int HoveredTrackFrame = -1;
 				int HoveredTrackX = 0;
+
+				// While the bar is hidden: the show tab is drawn only with the mouse over the bar's
+				// footprint, so a hidden bar leaves the screen clear.
+				bool ShowTabRevealed = false;
+				bool ShowTabHovered = false;
+				bool ShowTabPressed = false;
 			};
 
 			InteractionState Interaction;
@@ -297,9 +337,12 @@ namespace ReplaySystem
 					Seek::RequestSeek(Seek::EarliestSeekableFrame());
 					break;
 
-				case Button_StepBack:
-					if (!Seek::RequestSeek(Seek::CurrentFrame() - 1, /* pauseOnArrival: */ true))
-						Controls::PrintControlMessage(L"Nothing to rewind to yet.");
+				case Button_JumpBack:
+					Controls::SeekBySeconds(-Controls::JumpSeconds);
+					break;
+
+				case Button_JumpForward:
+					Controls::SeekBySeconds(Controls::JumpSeconds);
 					break;
 
 				case Button_Slower:
@@ -314,12 +357,12 @@ namespace ReplaySystem
 					Controls::StepPlaybackSpeed(1);
 					break;
 
-				case Button_StepForward:
-					Controls::RequestSingleStep();
-					break;
-
 				case Button_JumpEnd:
 					Seek::RequestSeek(Seek::TotalFrames());
+					break;
+
+				case Button_Hide:
+					Controls::ToggleControlBar();
 					break;
 
 				default:
@@ -353,10 +396,18 @@ namespace ReplaySystem
 					DrawTriangle(centreX - GlyphWidth + 2, glyphTop, GlyphWidth, GlyphHeight, false, glyph);
 					break;
 
-				case Button_StepBack:
-					DrawTriangle(centreX - GlyphWidth / 2 - 2, glyphTop, GlyphWidth, GlyphHeight, false, glyph);
-					FillRect({ centreX + GlyphWidth / 2 + 1, glyphTop, 2, GlyphHeight }, glyph);
+				case Button_JumpBack:
+				case Button_JumpForward:
+				{
+					wchar_t label[8] = { 0 };
+					swprintf_s(label, L"%c%d", index == Button_JumpBack ? L'-' : L'+', Controls::JumpSeconds);
+
+					RectangleStruct bounds = DSurface::Composite->GetRect();
+					Point2D location = { centreX, rect.Y + 4 };
+					DSurface::Composite->DrawText(label, &bounds, &location, glyph, 0,
+						TextPrintType::Point6 | TextPrintType::Center | TextPrintType::FullShadow);
 					break;
+				}
 
 				case Button_Slower:
 					DrawTriangle(centreX - GlyphWidth - 1, glyphTop, GlyphWidth, GlyphHeight, false, glyph);
@@ -375,14 +426,13 @@ namespace ReplaySystem
 					DrawTriangle(centreX + 1, glyphTop, GlyphWidth, GlyphHeight, true, glyph);
 					break;
 
-				case Button_StepForward:
-					FillRect({ centreX - GlyphWidth / 2 - 3, glyphTop, 2, GlyphHeight }, glyph);
-					DrawTriangle(centreX - GlyphWidth / 2, glyphTop, GlyphWidth, GlyphHeight, true, glyph);
-					break;
-
 				case Button_JumpEnd:
 					DrawTriangle(centreX - GlyphWidth + 1, glyphTop, GlyphWidth, GlyphHeight, true, glyph);
 					FillRect({ centreX + GlyphWidth - 3, glyphTop, 2, GlyphHeight }, glyph);
+					break;
+
+				case Button_Hide:
+					DrawTriangleVertical(centreX - 5, centreY - 3, 11, 6, true, glyph);
 					break;
 
 				default:
@@ -467,7 +517,63 @@ namespace ReplaySystem
 					TextPrintType::Point6 | TextPrintType::FullShadow);
 			}
 
+			void DrawShowTab(const PanelLayout& layout)
+			{
+				const RectangleStruct& tab = layout.ShowTab;
+
+				if (Interaction.ShowTabPressed)
+					FillRect(tab, ColorButtonPressed());
+				else if (Interaction.ShowTabHovered)
+					FillRect(tab, ColorButtonHover());
+				else
+					FillRectTranslucent(tab, PanelFill(), 78);
+
+				DrawRect(tab, ColorPanelEdge());
+				DrawTriangleVertical(tab.X + (tab.Width - 11) / 2, tab.Y + (tab.Height - 6) / 2,
+					11, 6, false, ColorGlyph());
+			}
+
 #pragma endregion Panel drawing
+
+			// Input while the bar is hidden: only the show tab responds, and it only takes the
+			// click when the press and release both land on it.
+			bool ProcessHiddenBarInput(const PanelLayout& layout, int mouseX, int mouseY, bool leftDown)
+			{
+				Interaction.PressedButton = -1;
+				Interaction.DraggingHandle = false;
+				Interaction.HoveredButton = -1;
+				Interaction.HoveredTrackFrame = -1;
+
+				const bool justPressed = leftDown && !Interaction.LeftDownLastFrame;
+				const bool justReleased = !leftDown && Interaction.LeftDownLastFrame;
+				Interaction.LeftDownLastFrame = leftDown;
+
+				Interaction.ShowTabHovered = Contains(layout.ShowTab, mouseX, mouseY);
+				Interaction.ShowTabRevealed = Interaction.ShowTabPressed
+					|| Contains(layout.Panel, mouseX, mouseY);
+
+				if (justPressed && Interaction.ShowTabHovered)
+					Interaction.ShowTabPressed = true;
+
+				const bool holding = Interaction.ShowTabPressed;
+
+				if (justReleased)
+				{
+					if (Interaction.ShowTabPressed && Interaction.ShowTabHovered)
+						Controls::ToggleControlBar();
+
+					Interaction.ShowTabPressed = false;
+				}
+
+				return holding || Interaction.ShowTabHovered;
+			}
+
+			void ResetShowTab()
+			{
+				Interaction.ShowTabRevealed = false;
+				Interaction.ShowTabHovered = false;
+				Interaction.ShowTabPressed = false;
+			}
 		}
 
 		bool ProcessMouseInput(int mouseX, int mouseY)
@@ -489,11 +595,16 @@ namespace ReplaySystem
 			const bool leftDown = IsLeftButtonDown();
 			const PanelLayout layout = ComputeLayout();
 
-			if (!Controls::IsControlBarVisible() || !layout.Valid)
+			if (!IsPlaybackActive() || !layout.Valid)
 			{
 				CancelInteraction();
 				return false;
 			}
+
+			if (!Controls::IsControlBarVisible())
+				return ProcessHiddenBarInput(layout, mouseX, mouseY, leftDown);
+
+			ResetShowTab();
 
 			const bool overTrack = Contains(TrackHitArea(layout), mouseX, mouseY);
 			Interaction.HoveredTrackFrame = overTrack ? FrameAtTrackPosition(layout, mouseX) : -1;
@@ -573,17 +684,26 @@ namespace ReplaySystem
 			Interaction.DraggingHandle = false;
 			Interaction.HoveredButton = -1;
 			Interaction.HoveredTrackFrame = -1;
+			ResetShowTab();
 			Interaction.LeftDownLastFrame = IsLeftButtonDown();
 		}
 
 		void Draw()
 		{
-			if (!Controls::IsControlBarVisible() || !DSurface::Composite)
+			if (!IsPlaybackActive() || !DSurface::Composite)
 				return;
 
 			const PanelLayout layout = ComputeLayout();
 			if (!layout.Valid)
 				return;
+
+			if (!Controls::IsControlBarVisible())
+			{
+				if (Interaction.ShowTabRevealed)
+					DrawShowTab(layout);
+
+				return;
+			}
 
 			// Percent, not 0-255: DSurface::Fill_Rect_Trans clamps to 100 and scales by /100.
 			FillRectTranslucent(layout.Panel, PanelFill(), 78);
@@ -592,7 +712,7 @@ namespace ReplaySystem
 			const bool canRewind = Seek::EarliestSeekableFrame() < Seek::CurrentFrame();
 			for (int i = 0; i < ButtonCount; ++i)
 			{
-				const bool needsRewind = (i == Button_JumpStart || i == Button_StepBack);
+				const bool needsRewind = (i == Button_JumpStart || i == Button_JumpBack);
 				DrawButton(layout.Buttons[i], i, !needsRewind || canRewind);
 			}
 
