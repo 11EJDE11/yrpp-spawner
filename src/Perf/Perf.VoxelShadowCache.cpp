@@ -27,6 +27,7 @@
 // It is clear of the bytes Phobos' hook returns to, so it stays correct once Phobos is fixed.
 // Phobos #2484 fixes the hook (merged for Phobos 0.5, not in 0.4.0.2). The Kirov key below is not
 // part of that fix and stays either way.
+// TODO: remove the non-BalloonHover rule below with Phobos 0.5.
 
 #include <UnitClass.h>
 #include <UnitTypeClass.h>
@@ -80,13 +81,16 @@ DEFINE_HOOK(0x73C459, UnitClass_DrawAsVXL_ShadowCacheKey, 0x5)
 	if (pType->BalloonHover && !pThis->IsAttackedByLocomotor)
 		return KeyBalloonShadow(pThis, key) ? KeepKey : 0;
 
+	// TODO: remove with Phobos 0.5 (return 0 here instead), which fixes its hook at 0x73C43F.
 	const bool mayDrop = pThis->IsAttackedByLocomotor
 		|| pType->SpeedType == SpeedType::Track || pType->SpeedType == SpeedType::Wheel;
 
 	return mayDrop ? 0 : KeepKey;
 }
 
-// The voxel cache is one 4 MB block (0x40F270), and a game full of Siege Choppers fills it, which throws
-// every cached image away. Phobos 0.5 makes it 128 MB with this same patch (not in 0.4.0.2); writing
-// the same bytes twice does no harm.
+// The voxel cache is one 4 MB block (0x40F270). Shadows cached by many keys - Siege Choppers, or
+// Nighthawks once their art no longer disables the cache - fill it quickly, which throws every cached
+// image away. Phobos 0.5 makes it 128 MB with this same patch (not in 0.4.0.2); writing the same bytes
+// twice does no harm.
+// TODO: remove with Phobos 0.5.
 DEFINE_PATCH(0x40F271, 0x00, 0x00, 0x00, 0x08);
