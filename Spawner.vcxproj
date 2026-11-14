@@ -74,6 +74,7 @@
     <!-- Utilities -->
     <ClCompile Include="$(ThisDir)\src\Utilities\Debug.cpp" />
     <ClCompile Include="$(ThisDir)\src\Utilities\Patch.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.TileBlit.cpp" />
   </ItemGroup>
   <!-- Header files -->
   <ItemGroup>
