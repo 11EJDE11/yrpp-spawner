@@ -60,7 +60,8 @@ DEFINE_HOOK(0x6497DC, WaitForPlayers_CommandStallStat_Fix, 0x7)
 	const int count = std::min(static_cast<int>(IPXManagerClass::Instance.NumConnections), MaxConnections);
 	for (int i = 0; i < count; ++i)
 	{
-		if (Their[i].CommandsReceived < Their[i].CommandsSent)
+		// Compared unsigned, as the game does (`jb`, 0x6495E6).
+		if (static_cast<unsigned int>(Their[i].CommandsReceived) < static_cast<unsigned int>(Their[i].CommandsSent))
 		{
 			++SessionClass::Instance.MPStats[i].CommandCoundStalls;
 			break;
