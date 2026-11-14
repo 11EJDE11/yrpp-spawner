@@ -121,13 +121,13 @@ same in practice. It is only ever used to show a duration.
 with the process leaves both fields zero. That flag - not `TotalFrames > 0` - is what tells a
 truncated recording apart from one that was quit on frame 0.
 
-`IsReplayHeaderValid` checks the magic, minimum header size, RNG cursors, object ID counter,
+`ClassifyReplayHeader` checks the magic, minimum header size, RNG cursors, object ID counter,
 embedded file size limits (stored and inflated, and that the two agree on whether a file is there),
 and game speed. A larger `HeaderSize` is accepted and the surplus is skipped. Playback also checks
 that `HeaderSize + SpawnIniSize + SpawnMapSize` fits the file before seeking. Version compatibility
 belongs to the client.
 
-`ClassifyReplayHeader` retains distinct errors for unreadable input, a non-replay file, and malformed
+`ClassifyReplayHeader` keeps distinct errors for unreadable input, a non-replay file, and malformed
 headers. Playback failure is fatal because `StartScenario` has already skipped `CreateConnections`.
 
 `ReplayFormat.h` static-asserts `sizeof(ReplayHeader) == 1096`, `sizeof(HouseStatsSample) == 84`,
@@ -157,13 +157,14 @@ treating the resulting `TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS` as end of data
 the pre-1.16 behavior of leaving the flag set: older miniz zero-padded the input and decoded
 plausible-looking garbage past the end of a cut-short recording.
 
-The stream is sync-flushed every 60 recorded frames. A sync flush ends the current deflate block
-without resetting the dictionary, so everything written before it decodes on its own. That is what
-keeps a recording a crash cut short usable: the reader inflates up to the last bytes that reached
-the disk and then reports a short stream. At most one second of play is lost, and the header's
-`CleanShutdown` flag stays clear, which is how a reader knows the recording is incomplete.
+The stream is sync-flushed every 60 game frames (`SyncFlushFrameInterval`). A sync flush ends the
+current deflate block without resetting the dictionary, so everything written before it decodes on
+its own. That is what keeps a recording a crash cut short usable: the reader inflates up to the last
+bytes that reached the disk and then reports a short stream. At most 60 frames of play are lost - one
+second at the fastest game speed, more at slower ones - and the header's `CleanShutdown` flag stays
+clear, which is how a reader knows the recording is incomplete.
 
-Independent per-block compression bounded to the same one second of loss needs 16 KB blocks, which
+Independent per-block compression bounded to the same 60 frames of loss needs 16 KB blocks, which
 compress about 8% worse than the single stream because each block restarts the dictionary.
 
 `TotalFrames` and `Flags` are stamped together by `StopReplaySystem()`, which seeks back to
@@ -416,10 +417,17 @@ player sent or was addressed to receive. A message between two other players nev
 recording machine and is absent from the file rather than filtered on read.
 
 Replays get shared, so these records are treated as untrusted on read.
-`SanitizeSideChannelRecord` terminates `SenderName` and `Text` - the codec decodes them from
-untrusted UTF-8 into fixed arrays - and range-checks `House` against `BeaconManagerClass::Beacons[8][3]`
-and `Aux` against the beacon slot count, `ColorScheme::Array`, or the 16 taunt commands. Records
-that fail are still read, to keep the stream aligned, and then dropped.
+`SideChannels::ValidateRecord` (`ReplaySideChannels.cpp`) terminates `SenderName` and `Text` - the
+codec decodes them from untrusted UTF-8 into fixed arrays - and then checks each type:
+
+- chat: `House` within the 8 houses `BeaconManagerClass::Beacons[8][3]` allows for. An `Aux` outside
+  `ColorScheme::Array` is not a reason to drop the line; it falls back to scheme 0;
+- beacon place: `House`, `Aux` from -1 (the engine picks a free slot, which is how a local placement
+  is recorded) to 2, and X and Y inside the 512x512-cell map;
+- beacon delete and beacon text: `House`, and `Aux` a slot from 0 to 2;
+- taunt: `Aux` a valid taunt command (`VoxClass::IsValidTauntCommand`). The house is not checked.
+
+Records that fail are still read, to keep the stream aligned, and then dropped.
 
 ## Desync detection
 
@@ -431,8 +439,8 @@ that quietly stopped matching what happened, with nothing saying so.
 The engine already computes the hash needed to catch it. `Compute_Game_CRC` (0x64DAB0) folds every
 infantry, unit and building's coordinates and facings, every house's tally byte, the display layers
 and the logic queue into `GameCRC` (0xAC51FC), and `Queue_AI_Multiplayer` calls it once per frame
-and stores the result into `CRC[Frame & 0xFF]` for the network sync check. The replay system reads
-that same value and never hashes anything itself.
+and stores the result into `CRC[Frame & 0xFF]` for the network sync check. In a multiplayer
+recording the replay system reads that same value and never hashes anything itself.
 
 `Queue_AI_Multiplayer_ReplayGameCRC` (0x647689) sits on the instruction straight after that call.
 Recording stores the hash on the frame's pending capture; playback compares its low 16 bits against
@@ -445,6 +453,12 @@ That site, and not the event pump at 0x64820E, because 0x64820E does not run eve
 is not a multiple of `FrameSendRate`, long before reaching it. The hash site is ahead of that
 return, so it is reached on every frame in both modes.
 
+Campaign and skirmish never reach `Queue_AI_Multiplayer`, and `Queue_AI`'s own branch for them never
+computes the hash. There `Queue_AI_Singleplayer_ReplayGameCRC` (0x6475B3) calls `Compute_Game_CRC`
+itself, through `ComputeAndCaptureGameCRCForCurrentFrame`, once per frame while recording or playing
+back. That site is after `Execute_DoList` has run the frame's events, not before it as in
+multiplayer; recording and playback both read it there, so the two values are still comparable.
+
 On a mismatch, playback logs the frame and both hashes and prints *"Replay playback has diverged
 from the recording."* in-game, then **keeps playing**. A diverged replay is wrong, not broken, and
 stopping would take away the only view of what actually went wrong.
@@ -456,10 +470,14 @@ that only the hash reads, and stopping at the first one throws that distinction 
 divergences are logged with their frame and both hashes, a return to matching is logged with the
 range it covered, and a total is written when playback ends.
 
-Nothing in this path may call `Compute_Game_CRC` itself: its last act is to draw from
-`ScenarioClass::Random` **and fold the drawn number into the hash**, which makes it part of the
-simulation. An extra call would pull the RNG out of step and cause the very divergence it is there
-to report.
+`Compute_Game_CRC`'s last act is to draw from `ScenarioClass::Random` **and fold the drawn number
+into the hash**, which makes it part of the simulation. In multiplayer nothing in this path may call
+it: an extra call would pull the RNG out of step with the recording and cause the very divergence
+it is there to report. The single-player call above is safe only because it is made exactly once a
+frame in recording and in playback alike, so its draw is part of the recorded game. A campaign or
+skirmish that is recorded therefore takes a different random course from the same game unrecorded,
+which matters to nothing. Any new call - or a frame where only one of the two modes makes it - breaks
+playback.
 
 ### What the hash reads
 
@@ -841,11 +859,17 @@ All in `[Settings]`. Recording and playback are mutually exclusive — a non-emp
 | `ReplayKeyframeStorageLimitMB` | `512` | Maximum temporary keyframe storage in MB. `0` disables the limit. |
 
 Playback speed is deliberately kept out of `OptionsClass Options.GameSpeed` (0xA8EB60): simulation
-code reads that through `GetAnimSpeed`, so it stays pinned to `RecordedGameSpeed` for the whole of
-playback. The in-game options dialog binds its speed slider to the same variable, so three hooks in
-`ReplaySystem.Hook.cpp` (0x4E209E, 0x4E1E1B, 0x4E1EBA) give that dialog a view of the playback
-speed instead. Recorded `GameSpeed` events are harvested for their requested speed and then dropped
-rather than executed, so the engine never writes the pinned value.
+code reads that through `GetAnimSpeed`, so during playback it holds what the recording had and only
+the recording changes it. It starts at `RecordedGameSpeed`, `RestoreFrameState` writes it from each
+frame's `GameSpeed` block (and the seek's record scan does the same for the frames it skips), and a
+recorded `GameSpeed` event is injected and executed like any other order.
+
+The viewer's own speed changes go to the playback rate instead. The in-game options dialog binds its
+speed slider to `Options.GameSpeed`, so three hooks in `ReplaySystem.Hook.cpp` (0x4E209E, 0x4E1E1B,
+0x4E1EBA) show the dialog the playback speed and, in campaign and skirmish, take the new value in
+place of the dialog's direct write. In multiplayer the dialog queues a `GameSpeed` event instead;
+`RemoveReplayGameplayEventsFromDoList` takes its speed as the new playback rate and then strips it
+from `DoList` with the viewer's other local orders, before the frame's recorded events are injected.
 
 ## Seeking, and the playback controls
 
@@ -906,7 +930,8 @@ runs before the logic tick), the campaign's first-frame save at `0x55DC92`, and 
 Multiplayer save events only set `Spawner::DoSave` mid-frame; the save itself runs in
 `After_Main_Loop()`.
 
-The four supplied `.SAV` samples measured with the vendored miniz were:
+For scale, four sample `.SAV` files compressed with the vendored miniz at its default 128 probes - not
+the 6 (`RecordedCheckpointProbes`) the recorder uses now, which comes out about 4% larger:
 
 | Save | Original bytes | Deflated bytes | Remaining |
 | --- | ---: | ---: | ---: |
@@ -915,8 +940,9 @@ The four supplied `.SAV` samples measured with the vendored miniz were:
 | SAVE6952.SAV | 1,694,217 | 1,027,926 | 60.7% |
 | SAVE72AE.SAV | 1,728,756 | 1,053,256 | 60.9% |
 
-That is about 3.88 MiB for four compressed saves, before their sidecars, so the conservative
-four-checkpoint limit is used. Compression at 128 probes took about 98-108 ms per sample on the test machine.
+That is about 3.88 MiB for four compressed saves, before their sidecars - comfortably inside the
+16 MiB archive budget, which is why four (`MaxRecordedCheckpoints`) are embedded. At 128 probes each
+took about 98-108 ms on the test machine; 6 probes is about two and a half times faster.
 
 ### What must run before a checkpoint can resume
 
@@ -983,9 +1009,10 @@ A seek runs in two halves, in `src/Replay/ReplaySeek.cpp`:
    behind the current frame, or whenever it can skip forward over frames already watched.
    Otherwise playback is already closer and no load is needed. Loads go through
    `LoadOptionsClass::LoadMission` (0x559D60), the engine's own in-game load.
-2. **Run to the target.** Frames go by with the pacing off (`ApplyPlaybackFramePacing` returns
-   early), the drawing mostly off (`MainLoop_SkipRenderWhileSeeking` at 0x55D8F2 keeps one frame
-   in 241 so it reads as progress rather than as a hang) and the sound off (`VocAllowed` at
+2. **Run to the target.** Frames go by with the pacing off (`Controls::ApplyFramePacing` zeroes the
+   engine's frame timers and returns without waiting), the drawing mostly off
+   (`MainLoop_Render_RenderSkip` at 0x55D8F2, in `src/Spawner/RenderSkip.cpp`, keeps one frame in
+   241 so it reads as progress rather than as a hang) and the sound off (`VocAllowed` at
    0x8464AC, which every `VocClass::Play` path tests, is cleared for the duration).
 
 Pause/resume (the hotkey or the overlay button) during a seek stops it: `Seek::CancelSeek` ends the
@@ -1206,18 +1233,23 @@ Keyframes live in `<SavedGameDir>\Replay Keyframes`, are deleted after playback,
 
 ## Playback controls
 
-Replay `CommandClass` commands, registered from `Init_Commands` (0x533066) and implemented in
+Ten replay `CommandClass` commands, defined and registered in `src/Commands/ReplayCommands.cpp` from
+the `Init_Commands` hook (0x533066, `src/Commands/Commands.cpp`); the actions they call are in
 `Replay/ReplayControls.{h,cpp}`. They show up in the in-game keyboard options under a `Replay`
 category and are bound from there, or by hand in `KEYBOARDMD.INI`:
 
 ```ini
 [Hotkey]
-ReplayTogglePause=48    ; '0'
-ReplaySpeedUp=187       ; VK_OEM_PLUS, the '='/'+' key
-ReplaySpeedDown=189     ; VK_OEM_MINUS, the '-' key
+ReplayTogglePause=48            ; '0'
+ReplaySpeedUp=187               ; VK_OEM_PLUS, the '='/'+' key
+ReplaySpeedDown=189             ; VK_OEM_MINUS, the '-' key
+ReplayStepFrame=190             ; VK_OEM_PERIOD, the '.' key
+ReplaySeekBack=219              ; VK_OEM_4, the '[' key
+ReplaySeekForward=221           ; VK_OEM_6, the ']' key
 ReplayToggleControlBar=72       ; 'H'
 ReplayToggleViewportLock=86     ; 'V'
 ReplayToggleSelection=85        ; 'U'
+ReplayTakeOver=84               ; 'T'
 ```
 
 They ship unbound on purpose. `Init_Commands` runs once per process rather than once per session, so
@@ -1270,24 +1302,25 @@ The first seven rungs are exactly the rates the game-speed slider produces (inde
 fastest position, so opening the options dialog and leaving it alone cannot silently slow playback
 back down.
 
-Nothing caps the engine at 60 FPS — `GetReplayFPSFromGameSpeed` simply topped out there.
-`Main_Loop` turns `Game::Network::RequestedFPS` into two timers: `FrameTimer.DelayTime =
-60 / RequestedFPS` in 60Hz ticks (0x55D501) and `NFTTimer.Accumulated = 1000 / RequestedFPS` in
-milliseconds (0x55D522). Past 60 FPS the first floors to zero and stops capping anything, and the
-second — the one `Sync_Delay` actually waits on, because a replayable session is never campaign or
-skirmish — carries the pacing the rest of the way. A speed change lands on the next iteration, since
-those timers are set before the hook that applies it (0x55D878).
+The engine's own pacing is not used. `Game::Network::RequestedFPS` stays at the 60 the spawner sets
+(`Spawner.cpp`) for every game, playback included, and nothing in the replay code writes it.
+Instead `Controls::ApplyFramePacing`, from the hook `SyncDelay_PaceReplayPlayback` (0x55E160), waits
+for the next frame on its own clock - `QueryPerformanceCounter` in fractional milliseconds, so a rung
+of 0.5 ms is as real as one of 100 ms - sleeping with `Sleep(1)` for the bulk and `Sleep(0)` for the
+last two milliseconds. It then zeroes `GameFrameTimer` and `NetFrameTimer`, so `Sync_Delay` finds
+no time left and adds no wait of its own. A frame that runs late does not build up a debt: once
+playback is more than a frame behind, the schedule restarts from now. This works the same in
+campaign, skirmish and multiplayer recordings, and a speed change takes effect at the next
+`Sync_Delay`.
 
-That millisecond division is what sets the spacing at the top of the ladder. `MSTimerClass` has no
-resolution below 1 ms, so above 240 FPS only rungs that divide to a different millisecond do
-anything — 300 → 3 ms, 500 → 2 ms, 1000 → 1 ms — and anything past 1000 divides to 0, which
-`Sync_Delay` treats as "expired, do not wait" and skips its wait loop entirely. 2000 is that
-uncapped rung. It does not deliver 2000 FPS: every iteration still simulates and draws a full frame,
-so what you get is whatever the machine manages, typically a few hundred. Adding rungs between these
-would cost a keypress and change nothing.
+The top rungs are limited by the machine, not the pacing. Above the monitor's refresh rate
+`ReplayRenderAtDisplayRate` draws only as often as the display refreshes (`MainLoop_Render_RenderSkip`,
+0x55D8F2), but every frame is still simulated, so 1000 and 2000 FPS mean "as fast as the simulation
+goes" on most maps.
 
 Playback speed does not reach the simulation. The only place `Game::Network::RequestedFPS` feeds
-anything deterministic is `HouseClass::Begin_Production` (0x4FA661), which sets a starting
+anything deterministic is `HouseClass::Begin_Production` (0x4FA661), and it is pinned to 60 in any
+case. That site sets a starting
 `FactoryClass::Production.Value` of `min(53, 54 * (RequestedFPS * MaxAhead / 60) / Time_To_Build)` —
 the head start compensating for the frames a live game takes to get a produce event executed. That
 write is gated on a per-category `HouseClass` flag (0x53D0-0x53D8) whose only setter is
@@ -1334,10 +1367,11 @@ back to back in that order — its own pause branch (0x55D835-0x55D854) and the 
 `Sync_Delay` makes (0x55E253-0x55E271) — which is why the hook sits at 0x55DE73, after `Main_Loop`'s
 own `Render` has come and gone, rather than at the skip itself.
 
-That `Sync_Delay` pass is also the whole reason this looked speed-dependent: it is what kept paused
-panning alive without any help at all, and `Sync_Delay` only makes it while more than 10 ms of the
-frame budget is left. `NFTTimer.Accumulated = 1000 / RequestedFPS` is 16 ms at 60 FPS against 8 ms
-at 120, so it quietly stops happening above 60.
+Paused panning cannot lean on that `Sync_Delay` pass. `Sync_Delay` only makes it while more than
+10 ms of the frame budget is left, and `ApplyFramePacing` zeroes the frame timers before `Sync_Delay`
+looks at them, so during playback the pass never happens at any speed. Before playback paced
+itself, the pass kept paused panning alive at 60 FPS and stopped above it, which is why this once
+looked speed-dependent.
 
 A paused frame reaches `Tactical::AI` with `LastAIFrame == Frame` already, so all that runs is the
 commit — not the waypoint animation or the `SpecialFlag` camera lerp ahead of it.
@@ -1351,7 +1385,7 @@ later frame would parse the wrong bytes. Held together, a paused iteration touch
 at all.
 
 Everything ahead of those three still runs — input, keyboard commands, rendering, arrow-key and edge
-scrolling, the message list — and `Sync_Delay` still paces the loop, so a paused replay does not spin
+scrolling, the message list — and `ApplyFramePacing` still paces the loop, so a paused replay does not spin
 the CPU.
 
 ### Cutscenes
