@@ -410,3 +410,11 @@ DEFINE_HOOK(0x55B4E1, LogicClass_Update_RepairFPState, 0x5)
 	FPStateGuard::Repair("LogicFrameBegin");
 	return 0;
 }
+
+// Execute_DoList skips the FRAMEINFO sync check while a timer started in Queue_AI_Multiplayer runs,
+// meant to cover the first 256 frames. The timer's start is the current frame and its time left is
+// set to the current frame + 256 (`lea eax, [ecx+100h]`), so after a save from frame F is loaded no
+// desync is detected until frame 2F + 256: for as long again as the game had run before the save.
+// In a new game F is 0, so it is 256 as meant.
+// 0x647849: `lea eax, [ecx+100h]` -> `mov eax, 100h` and a nop.
+DEFINE_PATCH(0x647849, 0xB8, 0x00, 0x01, 0x00, 0x00, 0x90);
