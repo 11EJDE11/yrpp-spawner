@@ -74,6 +74,8 @@
     <!-- Utilities -->
     <ClCompile Include="$(ThisDir)\src\Utilities\Debug.cpp" />
     <ClCompile Include="$(ThisDir)\src\Utilities\Patch.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.MapRevealer.cpp" />
   </ItemGroup>
   <!-- Header files -->
   <ItemGroup>
