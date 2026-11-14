@@ -152,12 +152,24 @@ DEFINE_HOOK(0x6C7989, SendStatisticsPacket_AddField_ALY, 0x6)
 	return 0;
 }
 
+// The game's duration (DURA, and AFPS from it) is EAX, the system timer now, minus ECX. Measure it
+// with the scenario's elapsed timer instead of GameTimer, which started before the map loaded.
+// ElapsedTimer is the engine's TTimerClass<SystemTimerClass>: Started at +0 and Accumulated at +8,
+// which YRpp names StartTime and TimeLeft. Do_Win stops it, adding the time so far to Accumulated,
+// and Resume_Game restarts a stopped one from now, so Started alone counts only from the restart:
+// a few seconds, and thousands of frames a second.
 DEFINE_HOOK(0x6C882A, RegisterGameEndTime_CorrectDuration, 0x6)
 {
 	if (IsStatisticsEnabled())
 	{
-		const int startTime = ScenarioClass::Instance->ElapsedTimer.StartTime;
-		R->ECX(startTime);
+		GET(const int, now, EAX);
+		const auto& timer = ScenarioClass::Instance->ElapsedTimer;
+
+		int elapsed = timer.TimeLeft;
+		if (timer.StartTime != -1)
+			elapsed += now - timer.StartTime;
+
+		R->ECX(now - elapsed);
 		return 0x6C882A + 0x6;
 	}
 
