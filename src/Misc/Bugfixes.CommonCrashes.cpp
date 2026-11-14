@@ -76,3 +76,19 @@ DEFINE_HOOK(0x65DC17, DoReinforcements_FixCrash, 0x6)
 
 	return 0;
 }
+
+// Fix crash at 705DEE on exit: Prog_End frees the colour schemes before destroying the
+// remaining objects.
+void DestroyGameObjectVectors()
+{
+	reinterpret_cast<void(__fastcall*)()>(0x534450)(); // Destroy_Vectors
+}
+
+DEFINE_HOOK(0x6BE222, ProgEnd_DestroyVectorsBeforeColorSchemes, 0x6)
+{
+	DestroyGameObjectVectors();
+	return 0;
+}
+
+// The call this replaces, now that the vectors are already empty.
+DEFINE_JUMP(LJMP, 0x6BE280, 0x6BE285); // Prog_End
