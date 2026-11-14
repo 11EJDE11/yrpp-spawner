@@ -21,7 +21,7 @@
 
 namespace FPStateGuard
 {
-	// Restores the SSE control register (MXCSR) to its default if a
-	// renderer/GPU driver corrupted it (see Bugfixes.Desyncs.cpp).
+	// Restores the SSE control register (MXCSR) and the x87 control word to
+	// the game's own if a renderer/GPU driver changed them (see Bugfixes.Desyncs.cpp).
 	void Repair(const char* pSite);
 }
