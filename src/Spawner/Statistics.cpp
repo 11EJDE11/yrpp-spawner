@@ -167,6 +167,17 @@ DEFINE_HOOK(0x448524, BuildingClass_Captured_SendStatistics, 0x7)
 		: DontSend;
 }
 
+// CellClass::Goodie_Check, before the crate count is incremented. Like captured buildings above,
+// the game only counts crates in Internet games, and spawner games are LAN games.
+DEFINE_HOOK(0x481D6B, CellClass_GoodieCheck_CountCrate, 0x7)
+{
+	enum { Count = 0x481D74, DontCount = 0x481D86 };
+
+	return IsStatisticsEnabled() || (SessionClass::Instance.GameMode == GameMode::Internet)
+		? Count
+		: DontCount;
+}
+
 DEFINE_HOOK(0x55D0FB, AuxLoop_SendStatistics_1, 0x5)
 {
 	enum { Send = 0x55D100, DontSend = 0x55D123 };
