@@ -146,6 +146,11 @@ int WINAPI Tunnel::RecvFrom(
 	if (ret < 5 || *BufTo != Tunnel::Id)
 		return -1;
 
+	// The datagram can be up to 1024 bytes, more than the caller's buffer holds (the game's is 640).
+	// Drop one that doesn't fit, as for any other bad packet, rather than write past the buffer.
+	if (static_cast<size_t>(ret - 4) > len)
+		return -1;
+
 	memcpy(buf, TempBuf + 4, ret - 4);
 
 	src_addr->sin_port = *BufFrom;
