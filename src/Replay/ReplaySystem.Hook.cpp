@@ -75,15 +75,16 @@ DEFINE_HOOK(0x6FBFD7, TechnoClass_Select_ReplaySelectionTrigger, 0x5)
 
 // FootClass::Active_Click_With makes a move flash animation where the player clicked. There is no
 // click on playback, so skip it while recording too, or the two diverge. Multiplayer does the same.
-DEFINE_HOOK(0x4D7EB5, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x5)
+// The game loads its MoveFeedback setting into AL (0x4D7EB5) and tests it here (test al, al / je); the
+// test is what is taken over, as newer Phobos builds hook the load.
+DEFINE_HOOK(0x4D7EBA, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x8)
 {
-	enum { SkipMoveFlashBlock = 0x4D8065 };
+	enum { MoveFlashBlock = 0x4D7EC2, SkipMoveFlashBlock = 0x4D8065 };
 
 	if (ReplayState.Recording || ReplayState.Playback)
 		return SkipMoveFlashBlock;
 
-	R->AL(static_cast<BYTE>(Unsorted::MoveFeedback));
-	return 0x4D7EBA;
+	return R->AL() ? MoveFlashBlock : SkipMoveFlashBlock;
 }
 
 // SidebarClass::StripClass::SelectClass::Action, a click on a sidebar cameo. Playback discards the
