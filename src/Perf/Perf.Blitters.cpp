@@ -36,6 +36,16 @@
 // is where the time actually went. A voxel image is mostly transparent, so the voxel blitter skips
 // transparent source pixels 16 at a time. Every pixel written, every pointer step and the returned
 // count are the original's.
+//
+// Measured. The Invasion replay (8 players, 109,527 frames, every frame drawn) at frame 86,400, one
+// change added after another: 8.56 -> 7.76 ms a frame with the alpha RLE blitter, 7.49 with the vehicle
+// blitter, 6.98 with the 8-bit RLE blitter, 6.61 with the row prefetch. Later additions, each on the
+// scene it was written for: translucent smoke 0.30 -> 0.13 ms a frame; decoding cached voxel bodies
+// 0.31 -> 0.065 ms; the building placement grid 0.31 -> 0.055 ms a redraw; the plain alpha blitter is
+// counted with the health pips. The Eclipsed Horizons survival game, frames 54,000-66,000 with drawing
+// on, all of these switched in and out every 250 frames: 29.8 -> 20.7 ms a frame (1.44x, where a run
+// with nothing switched reads 1.03x). 545 million calls compared with the game's own there, none
+// different.
 
 #include <Drawing.h>
 

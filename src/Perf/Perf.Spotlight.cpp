@@ -22,6 +22,9 @@
 // takes min(255, c + (c * light >> 8)) >> 2 back into 5:6:5. The original stores the light value to
 // the stack a byte at a time and reads it back as a qword for the multiply, which stalls on every
 // pixel. This does the same arithmetic on the same table in ordinary registers.
+//
+// Measured. A game with spotlights in view: drawing them 0.23 -> 0.085 ms a frame; 6,927 calls compared
+// with the game's own, none different.
 
 #include <Utilities/Macro.h>
 

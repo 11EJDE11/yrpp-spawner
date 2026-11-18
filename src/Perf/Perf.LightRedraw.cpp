@@ -32,6 +32,9 @@
 // Not pixel-exact: like every partial redraw in the game, a long building shadow cast across the
 // area's edge from a cell well outside it is not redrawn inside it until the next full redraw. It
 // only changes the picture, never the game.
+//
+// Measured. A recorded game with desolators and nuclear strikes, whole game: 3.77 ms a frame as the
+// game has it, 2.61 with the exact tile and blitter replacements, 1.43 with this as well.
 
 #include <CellClass.h>
 #include <MapClass.h>

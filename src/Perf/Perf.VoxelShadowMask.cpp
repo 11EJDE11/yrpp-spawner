@@ -27,6 +27,9 @@
 // pixels straight from the surface's buffer when the surface is a plain BSurface and the point is
 // inside it, the one case every Get_Pixel - the game's and Phobos' bounds-checked replacement alike -
 // answers with the pixel at Lock(x, y). Any other surface or point goes through Get_Pixel as before.
+//
+// Measured. A Mayflower game with Kirovs and dreadnoughts in view: one frozen frame 6.7 -> 4.1 ms (a
+// Kirov 64 -> 25 us a draw, a dreadnought 34 -> 18), played back 4.95 -> 3.42 ms a frame.
 
 #include <Surface.h>
 

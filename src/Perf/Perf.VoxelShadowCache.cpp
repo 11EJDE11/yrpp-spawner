@@ -26,6 +26,10 @@
 // This applies the rule Phobos meant at 0x73C459, which every path that drops the key goes through.
 // It is clear of the bytes Phobos' hook returns to, so it stays correct once Phobos is fixed.
 // Phobos #2484 fixes the hook; remove this with Phobos 0.5.
+//
+// Measured. A Kirov's shadow 26 -> 13 us a draw; two Mayflower games with Kirovs in view, played back:
+// 2.07 -> 1.65 and 2.31 -> 2.12 ms a frame. 420,476 shadows drawn both ways over hills and buildings,
+// none different.
 
 #include <UnitClass.h>
 #include <UnitTypeClass.h>

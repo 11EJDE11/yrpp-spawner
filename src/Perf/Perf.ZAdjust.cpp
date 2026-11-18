@@ -28,6 +28,9 @@
 // has not moved, turned or got on or off a bridge. Everything else it reads - the map's cells, the
 // locomotor, the unit's mission - is the simulation's, which does not run while the layers are drawn.
 // Outside that, every call computes the answer afresh, as the original does.
+//
+// Measured. A view full of robot tanks: one frozen frame 1.06 -> 0.99 ms, played back 1.31 -> 1.21 ms a
+// frame; a view of infantry or rocketeers, no change.
 
 #include <FootClass.h>
 #include <TechnoTypeClass.h>

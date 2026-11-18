@@ -26,6 +26,10 @@
 // CC_Draw_Shape picks (BlitTransXlat, 0x4912B0) copies them, through the game's own clipping
 // (0x7BBE20). Anything the shortcut does not cover - another blitter, a compressed frame, a shape not
 // yet loaded - runs the original loop instead.
+//
+// Measured, together with the plain alpha blitter in Perf.Blitters. 49 robot tanks selected, one frozen
+// frame: 1.29 -> 1.14 ms a redraw, the selection's own share 0.22 -> 0.09 ms. The same game played back
+// with the selection: 1.38 -> 1.24 ms a frame.
 
 #include <ConvertClass.h>
 #include <Drawing.h>

@@ -27,6 +27,10 @@
 // destination write, in the same order. Every global the loop leaves behind is left with the same
 // value, and the registers the original leaves at 0x54911E are set the same way, including EBX,
 // which the original reloads from 0xAA10F8 after each drawn pixel.
+//
+// Measured, together with the Z-writing blitter in Perf.Blitters. A recorded game with desolators and
+// nuclear strikes, whole game: 3.77 -> 2.61 ms a frame; a frame in which the whole view is redrawn 12.7
+// -> 7.4 ms. 6.4 million calls compared with the game's own, none different.
 
 #include <Utilities/Macro.h>
 

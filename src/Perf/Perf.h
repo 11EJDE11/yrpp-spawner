@@ -25,6 +25,12 @@
 // the tile drawer's row loop is a hook; the MapRevealer takeover has to wait for Syringe's hooks and
 // check which Ares it is replacing. The one exception is LightRedraw, which redraws less of the screen
 // when a light changes: it changes nothing the game computes, but its picture can differ slightly.
+//
+// Measured together (each file's head comment has its own figures). The Invasion replay, 8 players and
+// 109,527 frames, every frame drawn: played back in 634.6 s without any of the drawing and shroud
+// speed-ups and 443.3 s with them, drawing 3.06 -> 1.75 ms a frame and logic 2.21 -> 1.80 ms. Ten
+// ladder games with drawing on and the recorded camera, everything here switched in and out every 250
+// frames: 1.45x to 2.00x.
 
 namespace Perf
 {
