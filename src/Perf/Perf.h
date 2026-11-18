@@ -30,4 +30,5 @@ namespace Perf
 {
 	namespace MapRevealer { void Apply(); }
 	namespace EmptyCells { void Apply(); }
+	namespace Weapons { void Apply(); }
 }

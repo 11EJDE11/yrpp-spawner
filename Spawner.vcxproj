@@ -76,6 +76,7 @@
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.TileBlit.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.VoxelShadowCache.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.VoxelShadowMask.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Perf\Perf.Weapons.cpp" />
     <ClCompile Include="$(ThisDir)\src\Perf\Perf.ZAdjust.cpp" />
     <!-- Replay -->
     <ClCompile Include="$(ThisDir)\src\Replay\ReplayKeyframeState.Serialization.cpp" />
