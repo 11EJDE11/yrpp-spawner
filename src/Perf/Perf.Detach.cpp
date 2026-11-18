@@ -53,6 +53,12 @@
 // for many. There units and buildings are looked at only where a pointer to such an object can be
 // (see CaresOnLeaving).
 //
+// Newer Phobos builds hook FootClass::Detach at 0x4D9992, and that hook also lets go of two pointers
+// Phobos keeps for a unit outside the game's object, which nothing here can see, so a unit cannot
+// simply be passed over. With such a Phobos that one hook is run for every unit that is passed over,
+// handed the registers and the stack the game has at that address, so Phobos' own code does whatever
+// it does there; the rest of the unit's Detach, the larger part of the cost, is still left out.
+//
 // Measured. The Eclipsed Horizons survival game (8 players, 107,500 frames, logic only), this switched
 // in and out every 250 frames: 1.23x over the whole game, 1.40x through frames 72,000-84,000. With the
 // empty cell map (Perf.EmptyCells) as well: 1.28x over the game (1.38x at 72,000-84,000, 27.9 -> 20.2
@@ -376,6 +382,43 @@ namespace
 		return type && type[0x2EC] != 0;
 	}
 
+	// Phobos' hook at 0x4D9992 in FootClass::Detach, run for the units passed over; null when it is not there.
+	struct HookRegisters { DWORD Origin, Flags, EDI, ESI, EBP, ESP, EBX, EDX, ECX, EAX; };
+	using HookFn = DWORD(__cdecl*)(HookRegisters*);
+	HookFn FootHook = nullptr;
+	constexpr DWORD FootHookAt = 0x4D9992, FootHookSkipsTo = 0x4D99D3;
+
+	// Runs it for one unit whose Detach would do nothing: registers and stack as FootClass::Detach has
+	// them there (ESI the unit, EDI the target, EBX the flag, EBP zero, EAX the parasite on it - none,
+	// or the unit would have been asked). False when the hook answers in a way not allowed for, in which
+	// case the unit's Detach is called after all.
+	bool RunFootHook(void** pObject, void* pTarget, DWORD removedFlag)
+	{
+		Object const o = reinterpret_cast<Object>(pObject);
+		const DWORD target = reinterpret_cast<DWORD>(pTarget), unit = reinterpret_cast<DWORD>(pObject);
+		// Four saved registers, twelve bytes of locals, the return address, the two arguments.
+		DWORD frame[10] = { 0, 0, 0, 0, 0, 0, 0, 0, target, removedFlag };
+		HookRegisters registers { FootHookAt, 0, target, unit, 0, reinterpret_cast<DWORD>(frame), removedFlag, 0, 0, Field(o, 0x694) };
+		const DWORD parasite = registers.EAX;
+		const DWORD next = FootHook(&registers);
+		return (next == 0 || next == FootHookSkipsTo) && registers.ESI == unit && registers.EDI == target && registers.EBX == removedFlag
+			&& registers.EBP == 0 && registers.EAX == parasite && frame[8] == target && frame[9] == removedFlag && Field(o, 0x694) == parasite;
+	}
+
+	// An object whose Detach is not being called. True if it was called after all.
+	inline bool PassOver(void** pObject, void* pTarget, DWORD removedFlag)
+	{
+		if (!FootHook)
+			return false;
+
+		const DWORD vtable = Field(reinterpret_cast<Object>(pObject), 0);
+		if ((vtable != UnitVTable && vtable != InfantryVTable && vtable != AircraftVTable) || RunFootHook(pObject, pTarget, removedFlag))
+			return false;
+
+		Tell(pObject, pTarget, removedFlag);
+		return true;
+	}
+
 	// One object at a time: everything in the list is looked at for this target.
 	void NotifyEach(Vector* vector, void* pTarget, DWORD removedFlag, int from)
 	{
@@ -388,6 +431,8 @@ namespace
 			void** const pObject = vector->Items[i];
 			if (Cares(pObject, what, removed, bulletsAsked))
 				Tell(pObject, pTarget, removedFlag);
+			else
+				PassOver(pObject, pTarget, removedFlag);
 		}
 	}
 
@@ -450,6 +495,8 @@ namespace
 			void** const pObject = vector->Items[i];
 			if (CaresOnLeaving(pObject, what, anim, removed, bulletsAsked))
 				Tell(pObject, pTarget, removedFlag);
+			else
+				PassOver(pObject, pTarget, removedFlag);
 		}
 	}
 
@@ -553,15 +600,18 @@ namespace
 		{
 			void** const pObject = vector->Items[i];
 			auto const pointer = reinterpret_cast<DWORD>(pObject);
-			if (Notes.Find(pointer) == 1)
-				continue;
-
-			const int cares = Cares(pObject, what, true, bulletsAsked);
+			const int cares = Notes.Find(pointer) == 1 ? No : Cares(pObject, what, true, bulletsAsked);
 			if (!cares)
-				continue;
+			{
+				if (!PassOver(pObject, pTarget, removedFlag))
+					continue;
+			}
+			else
+			{
+				Tell(pObject, pTarget, removedFlag);
+			}
 
-			Tell(pObject, pTarget, removedFlag);
-			if (cares == Match)
+			if (cares != Ask)
 			{
 				// It let go of something, and did whatever follows from that: the notes are no longer
 				// to be relied on.
@@ -611,6 +661,59 @@ static void Notify(List list, void* pTarget, DWORD removedFlag)
 	NotifyEach(vector, pTarget, removedFlag, 0);
 }
 
+namespace
+{
+	// Whether the module lists a Syringe hook of that name at that address (its .syhks sections hold
+	// address, length and name, one after another).
+	bool HookListed(HMODULE module, DWORD address, DWORD length, const char* name)
+	{
+		auto const base = reinterpret_cast<const BYTE*>(module);
+		auto const dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+		auto const nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+		auto section = IMAGE_FIRST_SECTION(nt);
+		for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
+		{
+			if (memcmp(section->Name, ".syhks", 6) != 0 || section->VirtualAddress + section->Misc.VirtualSize > nt->OptionalHeader.SizeOfImage)
+				continue;
+
+			auto const words = reinterpret_cast<const DWORD*>(base + section->VirtualAddress);
+			const DWORD count = section->Misc.VirtualSize / 4;
+			for (DWORD at = 0; at + 2 < count; ++at)
+			{
+				if (words[at] != address || words[at + 1] != length)
+					continue;
+
+				auto const listed = reinterpret_cast<const BYTE*>(words[at + 2]);
+				const size_t size = strlen(name) + 1;
+				if (listed >= base && listed + size <= base + nt->OptionalHeader.SizeOfImage && memcmp(listed, name, size) == 0)
+					return true;
+			}
+		}
+
+		return false;
+	}
+
+	// The game's code at 0x4D9992, or Phobos' hook there, which is then run as described at the top.
+	bool FootHookAccepted()
+	{
+		static const BYTE game[] = { 0x3B, 0xC7, 0x75, 0x14, 0x39, 0x68, 0x6C };
+		if (memcmp(reinterpret_cast<const void*>(FootHookAt), game, sizeof(game)) == 0)
+			return true;
+
+		static const char name[] = "FootClass_PointerGotInvalid";
+		auto const phobos = GetModuleHandleA("Phobos.dll");
+		if (!phobos || !HookListed(phobos, FootHookAt, sizeof(game), name))
+			return false;
+
+		FootHook = reinterpret_cast<HookFn>(GetProcAddress(phobos, name));
+		if (!FootHook)
+			return false;
+
+		Debug::Log("[Perf] Detach: Phobos' hook at 004D9992 is run for the units passed over.\n");
+		return true;
+	}
+}
+
 // The comparisons above are a reading of fifteen of the game's functions as they stand with Ares 3.0p1's
 // and Phobos' hooks in them (each of which only narrows when a field the game already compares is
 // cleared). Should any of them have been changed in some other way - another hook, a patch, a
@@ -627,7 +730,7 @@ static bool Usable()
 		{ 0x65AAC0, 0x65AB0B, 0x98EA3E31, "RadioClass::Detach" },
 		{ 0x4734B0, 0x4734FA, 0x8DB55554, "CargoClass::Detach" },
 		{ 0x7077C0, 0x707CAE, 0x5A241C65, "TechnoClass::Detach" },
-		{ 0x4D9960, 0x4D9BF5, 0x6E486DD4, "FootClass::Detach" },
+		{ 0x4D9960, 0x4D9BF5, 0xCA9FDA72, "FootClass::Detach" },
 		{ 0x7446E0, 0x744718, 0xEFCEC6D6, "UnitClass::Detach" },
 		{ 0x51AA10, 0x51AA3A, 0x3378D3CF, "InfantryClass::Detach" },
 		{ 0x41B660, 0x41B698, 0x5403B093, "AircraftClass::Detach" },
@@ -640,10 +743,11 @@ static bool Usable()
 		{ 0x4CA580, 0x4CA595, 0x67460BF1, "FactoryClass::Detach" },
 	};
 	// The hooks known to be in them, by address and length. 0x707A2E is one newer Phobos builds add, where
-	// the object's target is the one going away: a case that is always handed to the game.
+	// the object's target is the one going away: a case that is always handed to the game. 0x4D9992 is
+	// Phobos' too, and is only accepted as looked into below.
 	static const DWORD hooks[][2] = {
 		{ 0x7077FD, 6 }, { 0x707A2E, 5 }, { 0x707A47, 10 }, { 0x707B09, 6 }, { 0x707B19, 6 }, { 0x707B23, 6 },
-		{ 0x4D99AA, 6 }, { 0x4D9A1B, 6 }, { 0x4D9A83, 6 }, { 0x44E910, 6 }, { 0x425174, 6 }, { 0x468503, 6 },
+		{ 0x4D9992, 7 }, { 0x4D99AA, 6 }, { 0x4D9A1B, 6 }, { 0x4D9A83, 6 }, { 0x44E910, 6 }, { 0x425174, 6 }, { 0x468503, 6 },
 	};
 	static const DWORD detachSlots[][2] = {
 		{ UnitVTable, 0x7446E0 }, { InfantryVTable, 0x51AA10 }, { AircraftVTable, 0x41B660 }, { BuildingVTable, 0x44E8F0 },
@@ -681,6 +785,12 @@ static bool Usable()
 			Debug::Log("[Perf] Detach: the Detach of the class at %08X has been replaced; the game's own loop is left in place.\n", slot[0]);
 			state = -1;
 		}
+	}
+
+	if (state > 0 && !FootHookAccepted())
+	{
+		Debug::Log("[Perf] Detach: the hook at 004D9992 is not one that is known; the game's own loop is left in place.\n");
+		state = -1;
 	}
 
 	return state > 0;
