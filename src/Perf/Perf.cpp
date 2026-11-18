@@ -21,9 +21,11 @@
 
 #include <Utilities/Macro.h>
 
-// After Syringe has written every hook, so the MapRevealer takeover replaces Ares' jumps.
+// After Syringe has written every hook, so the MapRevealer takeover replaces Ares' jumps and the
+// empty cell map can see the hooks that are in the function it takes over.
 DEFINE_HOOK(0x6BD7CB, WinMain_PerfPatches, 0x5)
 {
 	Perf::MapRevealer::Apply();
+	Perf::EmptyCells::Apply();
 	return 0;
 }
