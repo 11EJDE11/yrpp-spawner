@@ -284,20 +284,18 @@ DEFINE_HOOK(0x657FDB, RadarClass_Diplomacy_ForceDisabledChatVisualOff, 0x5)
 }
 
 // Continuously enforce DisableChat by resetting ChatMask every frame,
-// preventing re-enabling chat from the alliance menu.
-DEFINE_HOOK(0x55DDA5, MainLoop_AfterRender_DisableChat, 0x5)
+// preventing re-enabling chat from the alliance menu. Done just before the game's call to
+// MessageListClass::Manage and not in place of it: newer Phobos builds replace that call from a hook
+// here and skip past it.
+DEFINE_HOOK(0x55DDA0, MainLoop_AfterRender_DisableChat, 0x5)
 {
-	auto const Original = reinterpret_cast<int(__thiscall*)(void*)>(0x5D4430);
-	GET(void*, pThis, ECX);
-	Original(pThis);
-
 	if (IsDisableChatEnabled())
 	{
 		for (int i = 0; i < 8; ++i)
 			Game::ChatMask[i] = false;
 	}
 
-	return 0x55DDAA;
+	return 0;
 }
 
 DEFINE_HOOK(0x48D92B, NetworkCallBack_NetMessage_Print, 0x5)
