@@ -67,11 +67,9 @@ namespace ReplaySystem
 			enum ButtonID
 			{
 				Button_JumpStart = 0,
-				Button_JumpBack,
 				Button_Slower,
 				Button_PlayPause,
 				Button_Faster,
-				Button_JumpForward,
 				Button_JumpEnd,
 				Button_Hide,
 				ButtonCount
@@ -337,14 +335,6 @@ namespace ReplaySystem
 					Seek::RequestSeek(Seek::EarliestSeekableFrame());
 					break;
 
-				case Button_JumpBack:
-					Controls::SeekBySeconds(-Controls::JumpSeconds);
-					break;
-
-				case Button_JumpForward:
-					Controls::SeekBySeconds(Controls::JumpSeconds);
-					break;
-
 				case Button_Slower:
 					Controls::StepPlaybackSpeed(-1);
 					break;
@@ -395,19 +385,6 @@ namespace ReplaySystem
 					FillRect({ centreX - GlyphWidth - 2, glyphTop, 2, GlyphHeight }, glyph);
 					DrawTriangle(centreX - GlyphWidth + 2, glyphTop, GlyphWidth, GlyphHeight, false, glyph);
 					break;
-
-				case Button_JumpBack:
-				case Button_JumpForward:
-				{
-					wchar_t label[8] = { 0 };
-					swprintf_s(label, L"%c%d", index == Button_JumpBack ? L'-' : L'+', Controls::JumpSeconds);
-
-					RectangleStruct bounds = DSurface::Composite->GetRect();
-					Point2D location = { centreX, rect.Y + 4 };
-					DSurface::Composite->DrawText(label, &bounds, &location, glyph, 0,
-						TextPrintType::Point6 | TextPrintType::Center | TextPrintType::FullShadow);
-					break;
-				}
 
 				case Button_Slower:
 					DrawTriangle(centreX - GlyphWidth - 1, glyphTop, GlyphWidth, GlyphHeight, false, glyph);
@@ -712,7 +689,7 @@ namespace ReplaySystem
 			const bool canRewind = Seek::EarliestSeekableFrame() < Seek::CurrentFrame();
 			for (int i = 0; i < ButtonCount; ++i)
 			{
-				const bool needsRewind = (i == Button_JumpStart || i == Button_JumpBack);
+				const bool needsRewind = (i == Button_JumpStart);
 				DrawButton(layout.Buttons[i], i, !needsRewind || canRewind);
 			}
 

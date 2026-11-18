@@ -110,44 +110,6 @@ namespace Commands
 			virtual void Execute(WWKey) const override { ReplaySystem::Controls::RequestSingleStep(); }
 		};
 
-		class ReplaySeekBackCommandClass : public CommandClass
-		{
-		public:
-			virtual const char* GetName() const override { return "ReplaySeekBack"; }
-
-			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_BACK", L"Jump Back"); }
-
-			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
-
-			virtual const wchar_t* GetUIDescription() const override
-			{
-				return StringTable::TryFetchString("TXT_REPLAY_SEEK_BACK_DESC",
-					L"Jumps ten seconds back, restarting from the nearest keyframe.");
-			}
-
-			virtual void Execute(WWKey) const override { ReplaySystem::Controls::SeekBySeconds(-ReplaySystem::Controls::JumpSeconds); }
-		};
-
-		class ReplaySeekForwardCommandClass : public CommandClass
-		{
-		public:
-			virtual const char* GetName() const override { return "ReplaySeekForward"; }
-
-			virtual const wchar_t* GetUIName() const override
-				{ return StringTable::TryFetchString("TXT_REPLAY_SEEK_FORWARD", L"Jump Forward"); }
-
-			virtual const wchar_t* GetUICategory() const override { return ReplayCategory(); }
-
-			virtual const wchar_t* GetUIDescription() const override
-			{
-				return StringTable::TryFetchString("TXT_REPLAY_SEEK_FORWARD_DESC",
-					L"Jumps ten seconds forward, running the frames in between without drawing them.");
-			}
-
-			virtual void Execute(WWKey) const override { ReplaySystem::Controls::SeekBySeconds(ReplaySystem::Controls::JumpSeconds); }
-		};
-
 		class ReplayToggleControlBarCommandClass : public CommandClass
 		{
 		public:
@@ -231,8 +193,6 @@ namespace Commands
 		MakeCommand<ReplaySpeedUpCommandClass>();
 		MakeCommand<ReplaySpeedDownCommandClass>();
 		MakeCommand<ReplayStepFrameCommandClass>();
-		MakeCommand<ReplaySeekBackCommandClass>();
-		MakeCommand<ReplaySeekForwardCommandClass>();
 		MakeCommand<ReplayToggleControlBarCommandClass>();
 		MakeCommand<ReplayToggleViewportLockCommandClass>();
 		MakeCommand<ReplayToggleSelectionCommandClass>();

@@ -1244,8 +1244,6 @@ ReplayTogglePause=48            ; '0'
 ReplaySpeedUp=187               ; VK_OEM_PLUS, the '='/'+' key
 ReplaySpeedDown=189             ; VK_OEM_MINUS, the '-' key
 ReplayStepFrame=190             ; VK_OEM_PERIOD, the '.' key
-ReplaySeekBack=219              ; VK_OEM_4, the '[' key
-ReplaySeekForward=221           ; VK_OEM_6, the ']' key
 ReplayToggleControlBar=72       ; 'H'
 ReplayToggleViewportLock=86     ; 'V'
 ReplayToggleSelection=85        ; 'U'
@@ -1274,10 +1272,6 @@ and nothing breaks:
 | `TXT_REPLAY_SLOW_DOWN_DESC` | Plays the replay back slower. |
 | `TXT_REPLAY_STEP_FRAME` | Advance One Frame |
 | `TXT_REPLAY_STEP_FRAME_DESC` | Runs a single frame and freezes again. Pauses playback first if it is running. |
-| `TXT_REPLAY_SEEK_BACK` | Jump Back |
-| `TXT_REPLAY_SEEK_BACK_DESC` | Jumps ten seconds back, restarting from the nearest keyframe. |
-| `TXT_REPLAY_SEEK_FORWARD` | Jump Forward |
-| `TXT_REPLAY_SEEK_FORWARD_DESC` | Jumps ten seconds forward, running the frames in between without drawing them. |
 | `TXT_REPLAY_CONTROL_BAR` | Show/Hide Controls |
 | `TXT_REPLAY_CONTROL_BAR_DESC` | Shows or hides the on-screen playback controls. |
 | `TXT_REPLAY_VIEWPORT_LOCK` | Lock/Unlock Viewport |
