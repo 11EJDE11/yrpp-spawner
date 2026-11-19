@@ -19,9 +19,11 @@
 
 #include <Utilities/Macro.h>
 #include <ProgressScreenClass.h>
+#include <HouseClass.h>
 #include <SessionClass.h>
 #include <Unsorted.h>
 #include <WWMouseClass.h>
+#include <Utilities/Debug.h>
 
 // skip error "А mouse is required for playing Yurts Revenge" - remove the GetSystemMetrics check
 DEFINE_JUMP(LJMP, 0x6BD8A4, 0x6BD8C2); // WinMain
@@ -95,6 +97,16 @@ DEFINE_HOOK(0x48DAA3, NetworkCallBack_ProgressNeverBack, 0x6)
 // number needed changes too. Votes are cast again from a clean count.
 DEFINE_HOOK(0x5DA750, DestroyConnection_ClearKickVotes, 0x6)
 {
+	GET(int, house, ECX);
+	GET(int, error, EDX);
+
+	// The engine says so only on screen.
+	if (house >= 0 && house < HouseClass::Array.Count && HouseClass::Array[house])
+	{
+		Debug::Log("[Spawner] House %d (%ls) %s at frame %d.\n", house, HouseClass::Array[house]->UIName,
+			error ? "lost its connection" : "left the game", Unsorted::CurrentFrame);
+	}
+
 	memset(reinterpret_cast<void*>(0xA8BB40), 0, 8 * sizeof(int));
 	memset(reinterpret_cast<void*>(0xA8BB60), 0xFF, 64 * sizeof(int));
 	return 0;

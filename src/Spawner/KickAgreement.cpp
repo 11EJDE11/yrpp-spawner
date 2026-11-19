@@ -65,6 +65,7 @@
 #include <Unsorted.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <climits>
 #include <cstring>
 #include <vector>
@@ -145,6 +146,7 @@ namespace
 	// long, so their own waits may time out moments after it: those are not a reason to remove
 	// anyone else.
 	DWORD LastRemovalTick = 0;
+	DWORD LastFrameTick = 0;   // when the last frame was executed
 	constexpr DWORD AfterRemovalGraceMs = 15000;
 
 	// When this player last asked for the removal of a house the players voted out.
@@ -836,6 +838,42 @@ namespace
 		Try_Apply();
 	}
 
+	// What the wait that timed out was waiting for: how long this player has been stuck, and for each
+	// peer its frame, the orders it says it sent and those that arrived, and how long since anything
+	// came from it. One line per timeout.
+	void Log_Timeout(int connection_index)
+	{
+		const DWORD now = GetTickCount();
+		char peers[512] = "";
+		int length = 0;
+		auto& ipx = IPXManagerClass::Instance;
+		for (int i = 0; i < static_cast<int>(ipx.NumConnections) && length < static_cast<int>(sizeof(peers)) - 96; i++)
+		{
+			const IPXConnClass* const connection = ipx.Connection[i];
+			if (!connection)
+				continue;
+
+			const TheirSync& their = TheirSync::Array[i];
+			DWORD heard = 0;
+			int slot = -1;
+			for (int n = 1; n < NodeNameType::Array.Count; n++)
+			{
+				const NodeNameType* const node = NodeNameType::Array[n];
+				if (node && node->HouseIndex == connection->ID)
+					slot = static_cast<int>(node->Address.sin_addr.s_addr) - 1;
+			}
+			const DWORD last = PacketBundling::LastReceived(slot);
+			heard = last ? now - last : 0;
+
+			length += std::snprintf(peers + length, sizeof(peers) - length, " | house %d frame %d orders %d/%d heard %ums ago%s",
+				connection->ID, their.Frame, their.CommandsReceived, their.CommandsSent, static_cast<unsigned>(heard),
+				i == connection_index ? " (the one to remove)" : "");
+		}
+
+		Debug::Log("[KickAgreement] Wait timed out at frame %d after %u s without a frame%s\n", Unsorted::CurrentFrame,
+			LastFrameTick ? static_cast<unsigned>((now - LastFrameTick) / 1000) : 0u, peers);
+	}
+
 	bool Applicable()
 	{
 		return SessionClass::IsMultiplayer()
@@ -847,6 +885,8 @@ namespace
 
 TimeoutAction KickAgreement::On_Timeout(int connection_index)
 {
+	Log_Timeout(connection_index);
+
 	if (LastRemovalTick != 0 && GetTickCount() - LastRemovalTick < AfterRemovalGraceMs)
 	{
 		Debug::Log("[KickAgreement] Timed out just after a removal; waiting on.\n");
@@ -1184,6 +1224,8 @@ void KickAgreement::Reset()
 
 void KickAgreement::Before_Execute_DoList()
 {
+	LastFrameTick = GetTickCount();
+
 	const int frame = Unsorted::CurrentFrame;
 
 	// The engine's removals while cut off were queued in the wait just done, before Send_Packets

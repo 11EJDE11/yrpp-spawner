@@ -25,6 +25,7 @@
 #include "ProtocolZero.LatencyLevel.h"
 #include "FrameGate.h"
 #include "RenderSkip.h"
+#include "PendingSends.h"
 #include "Spawner.h"
 
 #include <windows.h>
@@ -33,6 +34,7 @@
 #include <IPXManagerClass.h>
 #include <ConnectionClass.h>
 #include <IPXConnClass.h>
+#include <IPXGlobalConnClass.h>
 #include <CommBufferClass.h>
 #include <HouseClass.h>
 #include <SessionClass.h>
@@ -83,6 +85,28 @@ namespace
 		return -1;
 	}
 	DWORD g_frameEnteredTick = 0;
+
+	// Fullest the send and receive queues have been this game: a private connection's hold 32
+	// packets and the global channel's 160, and the engine drops what doesn't fit.
+	int g_peakSendQueue = 0, g_peakReceiveQueue = 0, g_peakGlobalQueue = 0;
+
+	void Sample_Queues()
+	{
+		auto& ipx = IPXManagerClass::Instance;
+		for (int i = 0; i < static_cast<int>(ipx.NumConnections) && i < 7; ++i)
+		{
+			const auto* connection = ipx.Connection[i];
+			if (!connection || !connection->Queue)
+				continue;
+			if (connection->Queue->SendCount > g_peakSendQueue)
+				g_peakSendQueue = connection->Queue->SendCount;
+			if (connection->Queue->ReceiveCount > g_peakReceiveQueue)
+				g_peakReceiveQueue = connection->Queue->ReceiveCount;
+		}
+		const auto* global = ipx.__GlobalChannel;
+		if (global && global->Queue && global->Queue->SendCount > g_peakGlobalQueue)
+			g_peakGlobalQueue = global->Queue->SendCount;
+	}
 	// Only stalls a player would notice.
 	const DWORD StallReportMs = 2000;
 
@@ -339,6 +363,8 @@ void NetDiagnostics::Tick()
 	if (nconn <= 0)
 		return;
 
+	Sample_Queues();
+
 	if (!g_headerLogged)
 	{
 		g_headerLogged = true;
@@ -566,6 +592,14 @@ void NetDiagnostics::LogSummary(const char* reason)
 
 	int bundles = 0, copiesSent = 0, recovered = 0, redundant = 0;
 	PacketBundling::GetStats(bundles, copiesSent, recovered, redundant);
+	int sentLate = 0, waiting = 0, droppedNoAck = 0;
+	PendingSends::GetStats(sentLate, waiting, droppedNoAck);
+	Debug::Log("[Audit] queues %s frame=%d | peak send=%d receive=%d global=%d | engine overflows send=%u receive=%u"
+		" | orders held for a full queue: sent late=%d waiting=%d | unreliable dropped=%d\n",
+		reason, frame, g_peakSendQueue, g_peakReceiveQueue, g_peakGlobalQueue,
+		(unsigned)IPXManagerClass::Instance.SendOverflows, (unsigned)IPXManagerClass::Instance.ReceiveOverflows,
+		sentLate, waiting, droppedNoAck);
+
 	Debug::Log("[Audit] bundling %s frame=%d enabled=%d bundles=%d copies_sent=%d"
 		" | copies_received recovered=%d already_had=%d\n",
 		reason, frame, (int)PacketBundling::Enabled, bundles, copiesSent, recovered, redundant);
