@@ -99,3 +99,18 @@ DEFINE_HOOK(0x5DA750, DestroyConnection_ClearKickVotes, 0x6)
 	memset(reinterpret_cast<void*>(0xA8BB60), 0xFF, 64 * sizeof(int));
 	return 0;
 }
+
+// The wait dialog's "Player %s voted to kick %s" line (TXT_RECONNECT_KICK_RECEIVED, Packet_64AD10) names
+// the target with IPXManagerClass::Connection_Name, which has no connection, and so no name, for the
+// local player: a vote against this player showed as "(null)". The voter's name next to it already
+// falls back to the local player (0x64AD7E). 0x64ADAB is just after the target's lookup; EAX holds it.
+DEFINE_HOOK(0x64ADAB, KickVoteReceived_NameLocalTarget, 0x7)
+{
+	GET(const void*, name, EAX);
+
+	auto& players = NodeNameType::Array;
+	if (!name && players.Count > 0 && players[0])
+		R->EAX(players[0]->Name);
+
+	return 0;
+}
