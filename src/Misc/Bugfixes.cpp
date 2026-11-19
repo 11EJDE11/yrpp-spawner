@@ -88,3 +88,14 @@ DEFINE_HOOK(0x48DAA3, NetworkCallBack_ProgressNeverBack, 0x6)
 
 	return 0;
 }
+
+// Destroy_Connection, whenever a player leaves or is removed. The engine counts kick votes by house
+// (KickVotes, 0xA8BB40, and who cast them, 0xA8BB60), but Kick_Player_Now shifts both as if they were
+// by connection, which moves the votes cast for one player onto another; and with a player gone the
+// number needed changes too. Votes are cast again from a clean count.
+DEFINE_HOOK(0x5DA750, DestroyConnection_ClearKickVotes, 0x6)
+{
+	memset(reinterpret_cast<void*>(0xA8BB40), 0, 8 * sizeof(int));
+	memset(reinterpret_cast<void*>(0xA8BB60), 0xFF, 64 * sizeof(int));
+	return 0;
+}
