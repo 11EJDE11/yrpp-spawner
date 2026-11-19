@@ -43,12 +43,15 @@ namespace
 	// UDPInterfaceClass::Message_Handler reads each datagram into a 640-byte buffer (0x7B3EEC), so no
 	// engine datagram is longer.
 	constexpr size_t MaxDatagram = 640;
-	// The CnCNet tunnel receives into 1024 bytes (TunnelV3), of which Tunnel::SendTo's header takes 4;
-	// the hardened build's Tunnel::SendTo also adds a checksum, 8 bytes in all.
+	// A CnCNet tunnel server receives into 1024 bytes (cncnet-server TunnelV2/V3), and a datagram that
+	// doesn't fit is lost. Tunnel::SendTo's header takes 4 bytes, and the hardened build adds a checksum
+	// (8 in all). With V3 tunnels the game sends to a local relay that adds the tunnel's own header on
+	// top: the client's V3 bridge puts 8 bytes in front of the game's datagram, and the quick match
+	// client widens the 4-byte header to 8. So up to 16 bytes (hardened) or 12 come on top of a bundle.
 #ifdef IS_HARDENED_VER
-	constexpr size_t MaxBundleBytes = 1016;
+	constexpr size_t MaxBundleBytes = 1024 - 16;
 #else
-	constexpr size_t MaxBundleBytes = 1020;
+	constexpr size_t MaxBundleBytes = 1024 - 12;
 #endif
 
 	// An engine datagram: uint32 CRC, then CommHeaderType.
