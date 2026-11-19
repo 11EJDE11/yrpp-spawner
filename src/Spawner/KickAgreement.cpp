@@ -103,6 +103,9 @@ namespace
 		int TimeoutsWhileActive = 0;
 		DWORD HoldStarted = 0;   // when frames started waiting for this decision
 		bool HoldGivenUp = false;
+		// The players voted the target out from the wait dialog. Then it goes whether or not anyone
+		// still hears it, so the master being there doesn't call it off.
+		bool ByVote = false;
 
 		// The master only.
 		int Requester = -1;      // the player that asked for it, if anyone did
@@ -143,6 +146,12 @@ namespace
 	// anyone else.
 	DWORD LastRemovalTick = 0;
 	constexpr DWORD AfterRemovalGraceMs = 15000;
+
+	// When this player last asked for the removal of a house the players voted out.
+	DWORD VoteRequestedAt[MaxPlayers] = {};
+	bool VotedOutLogged = false;
+	int VotedOutTimeouts = 0;
+	constexpr DWORD VoteRequestEveryMs = 5000;
 
 	std::vector<unsigned long long> Seen; // packets already handled and passed on
 	std::vector<int> Cancelled;           // decisions called off, as Decision_Key gives them
@@ -368,6 +377,7 @@ namespace
 		packet.Kick.DecisionID = Decision.ID;
 		packet.Kick.MasterID = static_cast<char>(Decision.Master);
 		packet.Kick.TargetID = static_cast<char>(Decision.Target);
+		packet.Kick.ByVote = Decision.ByVote ? 1 : 0;
 		return packet;
 	}
 
@@ -606,7 +616,7 @@ namespace
 	// asking and then removes it.
 	bool Master_Still_Heard()
 	{
-		if (!By_Deputy(Decision.Master))
+		if (!By_Deputy(Decision.Master) || Decision.ByVote)
 			return false;
 
 		for (int house = 0; house < MaxPlayers; house++)
@@ -628,7 +638,7 @@ namespace
 	bool Requester_Cut_Off()
 	{
 		const int requester = Decision.Requester;
-		if (By_Deputy(Decision.Master) || !Valid_House(requester) || Decision.HaveState[requester])
+		if (By_Deputy(Decision.Master) || Decision.ByVote || !Valid_House(requester) || Decision.HaveState[requester])
 			return false;
 
 		for (int house = 0; house < MaxPlayers; house++)
@@ -640,7 +650,7 @@ namespace
 	}
 
 	// The master starts removing a player.
-	void Start_Decision(int target, int requester = -1)
+	void Start_Decision(int target, int requester = -1, bool by_vote = false)
 	{
 		Reset_Decision();
 		Decision.Active = true;
@@ -648,6 +658,7 @@ namespace
 		Decision.Master = Me();
 		Decision.Target = target;
 		Decision.Requester = requester;
+		Decision.ByVote = by_vote;
 		Decision.MyExecuted = Unsorted::CurrentFrame - 1;
 		Decision.Gathering = true;
 		Decision.GatherStarted = GetTickCount();
@@ -690,7 +701,7 @@ namespace
 
 		// The master is heard by someone, so a deputy removing it is the one cut off: the master's
 		// decision wins, and the deputy calls its own off.
-		if (!by_deputy && Decision.Active && By_Deputy(Decision.Master) && !Decision.Committed)
+		if (!by_deputy && Decision.Active && By_Deputy(Decision.Master) && !Decision.Committed && !Decision.ByVote)
 		{
 			if (Decision.Master == Me())
 				Cancel();
@@ -700,8 +711,12 @@ namespace
 
 		if (kick.TargetID == Me())
 		{
+			// Voted out, though maybe not by this player's own count: it starts no removals of its own.
+			if (kick.ByVote)
+				VotedOutLogged = true;
+
 			// A deputy that can't hear this master asks whether anyone does; On_Prepare answers.
-			if (by_deputy && Me() == Master() && packet.Command == EXT_NET_KICK_PREPARE)
+			if (by_deputy && Me() == Master() && packet.Command == EXT_NET_KICK_PREPARE && !kick.ByVote)
 				return false;
 
 			// Only the decision removes this player: a master that hears nobody asks too, but then
@@ -746,6 +761,7 @@ namespace
 		Decision.ID = kick.DecisionID;
 		Decision.Master = kick.MasterID;
 		Decision.Target = kick.TargetID;
+		Decision.ByVote = kick.ByVote != 0;
 		Decision.MyExecuted = Unsorted::CurrentFrame - 1;
 
 		Debug::Log("[KickAgreement] Decision %d: house %d is removing house %d; this player executed frame %d.\n",
@@ -762,7 +778,8 @@ namespace
 		if (!Connected(kick.MasterID))
 			return;
 
-		if (kick.TargetID == Me() && Me() == Master() && By_Deputy(kick.MasterID))
+		// A master that was voted out goes even though it is here; it takes part as the one removed.
+		if (kick.TargetID == Me() && Me() == Master() && By_Deputy(kick.MasterID) && !kick.ByVote)
 		{
 			// This master is still here: telling the deputy so calls its decision off.
 			Debug::Log("[KickAgreement] Decision %d: house %d can't hear this game master; telling it this one is here.\n",
@@ -852,6 +869,16 @@ TimeoutAction KickAgreement::On_Timeout(int connection_index)
 	{
 		Debug::Log(RemovingMe ? "[KickAgreement] Leaving the game: the game master is removing this player.\n"
 			: "[KickAgreement] Leaving the game: couldn't get the removed player's orders.\n");
+		return TimeoutAction::GiveUp;
+	}
+
+	// Voted out: the others remove this player by agreement. It asks for nothing meanwhile, and if no
+	// decision comes it leaves, as it was voted to.
+	if (VotedOutLogged)
+	{
+		if (++VotedOutTimeouts < 2)
+			return TimeoutAction::KeepWaiting;
+		Debug::Log("[KickAgreement] Leaving the game: voted out, and no removal came.\n");
 		return TimeoutAction::GiveUp;
 	}
 
@@ -957,13 +984,13 @@ bool KickAgreement::Handle_Global_Packet(const ExtGlobalPacketType* packet, cons
 	switch (packet->Command)
 	{
 	case EXT_NET_KICK_REQUEST:
-		if (!Decision.Active && Valid_House(kick.TargetID) && Valid_House(kick.FromID) && kick.TargetID != Me()
+		if (!Decision.Active && !VotedOutLogged && Valid_House(kick.TargetID) && Valid_House(kick.FromID) && kick.TargetID != Me()
 			&& (kick.TargetID == Master() ? Deputy() : Master()) == Me()
 			&& Connected(kick.TargetID) && Connected(kick.FromID)
 			&& CutoffFrame[kick.TargetID] < 0 && CutoffFrame[kick.FromID] < 0)
 		{
 			Debug::Log("[KickAgreement] House %d asks to remove house %d.\n", kick.FromID, kick.TargetID);
-			Start_Decision(kick.TargetID, kick.FromID);
+			Start_Decision(kick.TargetID, kick.FromID, kick.ByVote != 0);
 		}
 		break;
 
@@ -978,7 +1005,7 @@ bool KickAgreement::Handle_Global_Packet(const ExtGlobalPacketType* packet, cons
 			// The master itself, answering a deputy that can't hear it.
 			if (kick.FromID == Decision.Target)
 			{
-				if (By_Deputy(Decision.Master))
+				if (By_Deputy(Decision.Master) && !Decision.ByVote)
 					Cancel();
 				break;
 			}
@@ -1126,6 +1153,9 @@ bool KickAgreement::Hold_Frames()
 
 void KickAgreement::Reset()
 {
+	std::fill(std::begin(VoteRequestedAt), std::end(VoteRequestedAt), 0);
+	VotedOutLogged = false;
+	VotedOutTimeouts = 0;
 	for (auto& orders : History)
 		orders.clear();
 	std::fill(std::begin(CutoffFrame), std::end(CutoffFrame), -1);
@@ -1246,4 +1276,75 @@ DEFINE_HOOK(0x64C380, Execute_DoList_KickAgreement, 0xA)
 {
 	KickAgreement::Before_Execute_DoList();
 	return 0;
+}
+
+bool KickAgreement::Handle_Votes()
+{
+	if (!Applicable())
+		return false;
+
+	// KickVotes (0xA8BB40): votes counted here for each house since this wait dialog opened, this
+	// player's own included. The engine removes a house once every other player has voted, each machine
+	// at its own frame and without telling the others; the one voted out removes everyone else. Here the
+	// same count asks for a removal everyone agrees on instead.
+	const int* const votes = reinterpret_cast<const int*>(0xA8BB40);
+	auto& players = NodeNameType::Array;
+	const int needed = players.Count - 1;
+	const DWORD now = GetTickCount();
+
+	for (int i = 0; i < players.Count; i++)
+	{
+		const NodeNameType* const node = players[i];
+		const int house = node ? node->HouseIndex : -1;
+		if (!Valid_House(house) || votes[house] < needed || CutoffFrame[house] >= 0)
+			continue;
+
+		if (house == Me())
+		{
+			// Removed by the decision the others ask for; until then this player waits like the rest,
+			// and asks for no removals of its own.
+			if (!VotedOutLogged)
+				Debug::Log("[KickAgreement] The other players voted this player out.\n");
+			VotedOutLogged = true;
+			return true;
+		}
+
+		if (Decision.Active && Decision.Target == house)
+			continue;
+		if (VoteRequestedAt[house] != 0 && now - VoteRequestedAt[house] < VoteRequestEveryMs)
+			continue;
+		VoteRequestedAt[house] = now;
+
+		const int decider = house == Master() ? Deputy() : Master();
+		if (decider == Me())
+		{
+			if (Decision.Active)
+				continue; // another removal is being settled; asked again in a moment
+
+			Debug::Log("[KickAgreement] House %d was voted out (%d votes).\n", house, votes[house]);
+			Start_Decision(house, -1, true);
+			continue;
+		}
+
+		Debug::Log("[KickAgreement] House %d was voted out (%d votes); asking house %d to remove it.\n", house, votes[house], decider);
+		ExtGlobalPacketType packet {};
+		packet.Command = EXT_NET_KICK_REQUEST;
+		packet.Kick.DecisionID = NextRequestID++;
+		packet.Kick.MasterID = static_cast<char>(decider);
+		packet.Kick.TargetID = static_cast<char>(house);
+		packet.Kick.ByVote = 1;
+		Send(packet);
+	}
+
+	return true;
+}
+
+// Wait_For_Players, where it counts the kick votes (0x649148 is `mov edx, Players.ActiveCount`; the loop
+// ends at 0x6491F9). With three players or more the votes go to the agreement rather than removing
+// players straight away.
+DEFINE_HOOK(0x649148, WaitForPlayers_VotesByAgreement, 0x6)
+{
+	enum { SkipVoteLoop = 0x6491F9 };
+
+	return KickAgreement::Handle_Votes() ? SkipVoteLoop : 0;
 }

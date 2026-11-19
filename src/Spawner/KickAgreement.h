@@ -54,4 +54,8 @@ namespace KickAgreement
 
 	// Forgets everything: after a save is loaded mid-game, the frames it knows are of another timeline.
 	void Reset();
+
+	// The wait dialog's kick votes (Wait_For_Players, 0x649148). Returns false when the engine should count
+	// them itself (two players), true when a player voted out is removed by agreement here instead.
+	bool Handle_Votes();
 }

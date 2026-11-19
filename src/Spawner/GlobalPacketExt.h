@@ -97,6 +97,7 @@ struct ExtGlobalPacketType
 			int Frame;        // KICK_STATE: last frame executed; KICK_COMMIT/EVENTS: the cutoff (-2 on a COMMIT: called off).
 			int FirstFrame;   // KICK_COMMIT/EVENTS: the first frame whose orders are sent.
 			char Events[3][111]; // KICK_EVENTS: EventClass copies.
+			char ByVote;         // KICK_REQUEST/PREPARE/COMMIT: the players voted this one out from the wait dialog.
 		} Kick;
 
 		// Forces the whole struct to the engine's GlobalPacketType size so the
