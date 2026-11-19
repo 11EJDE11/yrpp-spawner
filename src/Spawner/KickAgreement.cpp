@@ -151,6 +151,7 @@ namespace
 	DWORD VoteRequestedAt[MaxPlayers] = {};
 	bool VotedOutLogged = false;
 	int VotedOutTimeouts = 0;
+	bool HasLeft = false;      // this player gave up its wait and is leaving: it takes no further part
 	constexpr DWORD VoteRequestEveryMs = 5000;
 
 	std::vector<unsigned long long> Seen; // packets already handled and passed on
@@ -869,6 +870,7 @@ TimeoutAction KickAgreement::On_Timeout(int connection_index)
 	{
 		Debug::Log(RemovingMe ? "[KickAgreement] Leaving the game: the game master is removing this player.\n"
 			: "[KickAgreement] Leaving the game: couldn't get the removed player's orders.\n");
+		HasLeft = true;
 		return TimeoutAction::GiveUp;
 	}
 
@@ -879,6 +881,7 @@ TimeoutAction KickAgreement::On_Timeout(int connection_index)
 		if (++VotedOutTimeouts < 2)
 			return TimeoutAction::KeepWaiting;
 		Debug::Log("[KickAgreement] Leaving the game: voted out, and no removal came.\n");
+		HasLeft = true;
 		return TimeoutAction::GiveUp;
 	}
 
@@ -961,6 +964,10 @@ bool KickAgreement::Handle_Global_Packet(const ExtGlobalPacketType* packet, cons
 {
 	if (packet == nullptr || packet->Command < EXT_NET_KICK_REQUEST || packet->Command > EXT_NET_KICK_EVENTS)
 		return false;
+
+	// Leaving: the others settle without this player.
+	if (HasLeft)
+		return true;
 
 	// Only a player still in the game here takes part, or passes packets on: one from anyone else,
 	// or from a player removed here, is dropped. Whose decision a packet carries is not checked
@@ -1046,6 +1053,9 @@ bool KickAgreement::Handle_Global_Packet(const ExtGlobalPacketType* packet, cons
 
 void KickAgreement::Update()
 {
+	if (HasLeft)
+		return;
+
 	const DWORD now = GetTickCount();
 
 	// The host's announcement before the load can arrive before a player listens, and that player
@@ -1156,6 +1166,7 @@ void KickAgreement::Reset()
 	std::fill(std::begin(VoteRequestedAt), std::end(VoteRequestedAt), 0);
 	VotedOutLogged = false;
 	VotedOutTimeouts = 0;
+	HasLeft = false;
 	for (auto& orders : History)
 		orders.clear();
 	std::fill(std::begin(CutoffFrame), std::end(CutoffFrame), -1);
