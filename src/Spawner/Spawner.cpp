@@ -28,6 +28,7 @@
 #include "RenderSkip.h"
 #include "PacketRedundancy.h"
 #include "PacketBundling.h"
+#include "PendingSends.h"
 #include <Replay/ReplaySystem.h>
 #include <Utilities/Debug.h>
 #include <Utilities/DumperTypes.h>
@@ -507,6 +508,7 @@ void Spawner::InitNetwork()
 	PacketRedundancy::Reset();
 	PacketBundling::Reset();
 	FrameGate::Reset();
+	PendingSends::Reset();
 	RenderSkip::Reset();
 	NetDiagnostics::Reset();
 	if (ProtocolZero::Enable)

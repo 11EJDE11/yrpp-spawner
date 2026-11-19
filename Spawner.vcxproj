@@ -116,6 +116,7 @@
     <ClCompile Include="$(ThisDir)\src\Spawner\NetHack.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\PacketRedundancy.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\PacketBundling.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Spawner\PendingSends.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\ProductionQueue.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\RenderSkip.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\ProtocolZero.cpp" />
@@ -187,6 +188,7 @@
     <ClInclude Include="$(ThisDir)\src\Spawner\NetHack.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\PacketRedundancy.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\PacketBundling.h" />
+    <ClInclude Include="$(ThisDir)\src\Spawner\PendingSends.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\ProductionQueue.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\RenderSkip.h" />
     <ClInclude Include="$(ThisDir)\src\Spawner\ProtocolZero.h" />

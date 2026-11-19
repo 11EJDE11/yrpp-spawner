@@ -70,6 +70,10 @@
 #include <Spawner/PacketBundling.h>
 #define DESYNC_RELOAD_BUNDLING
 #endif
+#if __has_include(<Spawner/PendingSends.h>)
+#include <Spawner/PendingSends.h>
+#define DESYNC_RELOAD_PENDINGSENDS
+#endif
 #if __has_include(<Spawner/PacketRedundancy.h>)
 #include <Spawner/PacketRedundancy.h>
 #define DESYNC_RELOAD_REDUNDANCY
@@ -262,6 +266,10 @@ namespace
 #endif
 #ifdef DESYNC_RELOAD_REDUNDANCY
 			PacketRedundancy::Reset();
+#endif
+#ifdef DESYNC_RELOAD_PENDINGSENDS
+			// Orders of the timeline left behind.
+			PendingSends::Reset();
 #endif
 #ifdef DESYNC_RELOAD_KICKAGREEMENT
 			// Its order history and cutoffs are frames of the timeline left behind.
