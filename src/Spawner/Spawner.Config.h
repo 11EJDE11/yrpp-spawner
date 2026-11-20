@@ -192,6 +192,14 @@ public:
 	bool ContinueWithoutHumans;
 	bool DefeatedBecomesObserver;
 	bool Observer_ShowAIOnSidebar;
+	// What a selected factory is building - both queues of a construction yard, with progress,
+	// hold, funds, ready and cancel states and the queue behind it - and what a selected
+	// transport, garrison or bunker holds. See Misc/Observers.SelectionInfo.cpp.
+	bool Observer_ShowProduction;
+	bool Observer_ShowPassengers;
+	// The same for a player's allies' factories and transports (never their own).
+	bool Allies_ShowProduction;
+	bool Allies_ShowPassengers;
 	bool DisableChat;
 	// A defeated player, spawned spectators included, can no longer send chat, and their messages are
 	// dropped on arrival. For ladder games, against ghosting.
@@ -322,6 +330,10 @@ public:
 		, ContinueWithoutHumans { false }
 		, DefeatedBecomesObserver { false }
 		, Observer_ShowAIOnSidebar { false }
+		, Observer_ShowProduction { true }
+		, Observer_ShowPassengers { true }
+		, Allies_ShowProduction { false }
+		, Allies_ShowPassengers { false }
 		, DisableChat { false }
 		, DisableChatWhenDefeated { false }
 	{ }

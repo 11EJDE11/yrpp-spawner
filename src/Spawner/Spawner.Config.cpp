@@ -150,6 +150,10 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		ContinueWithoutHumans    = pINI->ReadBool(pSettingsSection, "ContinueWithoutHumans", ContinueWithoutHumans);
 		DefeatedBecomesObserver  = pINI->ReadBool(pSettingsSection, "DefeatedBecomesObserver", DefeatedBecomesObserver);
 		Observer_ShowAIOnSidebar = pINI->ReadBool(pSettingsSection, "Observer.ShowAIOnSidebar", Observer_ShowAIOnSidebar);
+		Observer_ShowProduction  = pINI->ReadBool(pSettingsSection, "Observer.ShowProduction", Observer_ShowProduction);
+		Observer_ShowPassengers  = pINI->ReadBool(pSettingsSection, "Observer.ShowPassengers", Observer_ShowPassengers);
+		Allies_ShowProduction    = pINI->ReadBool(pSettingsSection, "Allies.ShowProduction", Allies_ShowProduction);
+		Allies_ShowPassengers    = pINI->ReadBool(pSettingsSection, "Allies.ShowPassengers", Allies_ShowPassengers);
 		DisableChat              = pINI->ReadBool(pSettingsSection, "DisableChat", DisableChat);
 		DisableChatWhenDefeated  = pINI->ReadBool(pSettingsSection, "DisableChatWhenDefeated", DisableChatWhenDefeated);
 	}
