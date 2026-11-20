@@ -152,6 +152,7 @@ void SpawnerConfig::LoadFromINIFile(CCINIClass* pINI)
 		Observer_ShowAIOnSidebar = pINI->ReadBool(pSettingsSection, "Observer.ShowAIOnSidebar", Observer_ShowAIOnSidebar);
 		Observer_ShowProduction  = pINI->ReadBool(pSettingsSection, "Observer.ShowProduction", Observer_ShowProduction);
 		Observer_ShowPassengers  = pINI->ReadBool(pSettingsSection, "Observer.ShowPassengers", Observer_ShowPassengers);
+		Observer_SidebarPages    = pINI->ReadBool(pSettingsSection, "Observer.SidebarPages", Observer_SidebarPages);
 		Allies_ShowProduction    = pINI->ReadBool(pSettingsSection, "Allies.ShowProduction", Allies_ShowProduction);
 		Allies_ShowPassengers    = pINI->ReadBool(pSettingsSection, "Allies.ShowPassengers", Allies_ShowPassengers);
 		DisableChat              = pINI->ReadBool(pSettingsSection, "DisableChat", DisableChat);

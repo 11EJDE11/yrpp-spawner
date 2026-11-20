@@ -197,6 +197,9 @@ public:
 	// transport, garrison or bunker holds. See Misc/Observers.SelectionInfo.cpp.
 	bool Observer_ShowProduction;
 	bool Observer_ShowPassengers;
+	// The four sidebar tabs become spectator pages - players, production, army and stats - in place
+	// of the one list of players. See Misc/Observers.Sidebar.cpp.
+	bool Observer_SidebarPages;
 	// The same for a player's allies' factories and transports (never their own).
 	bool Allies_ShowProduction;
 	bool Allies_ShowPassengers;
@@ -332,6 +335,7 @@ public:
 		, Observer_ShowAIOnSidebar { false }
 		, Observer_ShowProduction { true }
 		, Observer_ShowPassengers { true }
+		, Observer_SidebarPages { true }
 		, Allies_ShowProduction { false }
 		, Allies_ShowPassengers { false }
 		, DisableChat { false }

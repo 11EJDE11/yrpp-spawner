@@ -53,7 +53,9 @@
     <ClCompile Include="$(ThisDir)\src\Misc\MPDebug.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\NoCD.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Observers.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\Observers.Production.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Observers.SelectionInfo.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\Observers.Sidebar.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Observers.Visibility.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\QuickExit.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Radar.CameraDrag.cpp" />
@@ -157,6 +159,7 @@
     <ClInclude Include="$(ThisDir)\src\UI\DesyncDialog.h" />
     <ClInclude Include="$(ThisDir)\src\UI\DesyncDialog.Resource.h" />
     <ClInclude Include="$(ThisDir)\src\Misc\Bugfixes.Desyncs.h" />
+    <ClInclude Include="$(ThisDir)\src\Misc\Observers.Production.h" />
     <!-- Perf -->
     <ClInclude Include="$(ThisDir)\src\Perf\Perf.h" />
     <!-- Replay -->

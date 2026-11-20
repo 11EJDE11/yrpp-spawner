@@ -41,6 +41,8 @@
 //
 // All of this only reads the simulation, and only to draw it.
 
+#include "Observers.Production.h"
+
 #include <Spawner/Spawner.h>
 #include <Utilities/Macro.h>
 
@@ -139,214 +141,7 @@ namespace SelectionInfo
 			return settings.AlliesPassengers && pOwner != pPlayer && pOwner->IsMutualAlly(pPlayer);
 		}
 
-#pragma region Production state
-
-		// The house-wide queues a human player's sidebar feeds.
-		enum class Slot : int
-		{
-			Building,
-			Defense,
-			Infantry,
-			Vehicle,
-			Ship,
-			Aircraft
-		};
-
-		bool SlotOf(const TechnoTypeClass* pType, Slot& slot)
-		{
-			if (!pType)
-				return false;
-
-			switch (pType->WhatAmI())
-			{
-			case AbstractType::BuildingType:
-				slot = static_cast<const BuildingTypeClass*>(pType)->BuildCat == BuildCat::Combat
-					? Slot::Defense : Slot::Building;
-				return true;
-			case AbstractType::InfantryType:
-				slot = Slot::Infantry;
-				return true;
-			case AbstractType::UnitType:
-				slot = pType->Naval ? Slot::Ship : Slot::Vehicle;
-				return true;
-			case AbstractType::AircraftType:
-				slot = Slot::Aircraft;
-				return true;
-			default:
-				return false;
-			}
-		}
-
-		// The queues a factory building of this type serves: a construction yard both of its own.
-		int SlotsOf(const BuildingTypeClass* pType, Slot (&slots)[2])
-		{
-			switch (pType->Factory)
-			{
-			case AbstractType::BuildingType:
-				slots[0] = Slot::Building;
-				slots[1] = Slot::Defense;
-				return 2;
-			case AbstractType::InfantryType:
-				slots[0] = Slot::Infantry;
-				return 1;
-			case AbstractType::UnitType:
-				slots[0] = pType->Naval ? Slot::Ship : Slot::Vehicle;
-				return 1;
-			case AbstractType::AircraftType:
-				slots[0] = Slot::Aircraft;
-				return 1;
-			default:
-				return 0;
-			}
-		}
-
-		// A human house builds through one factory per queue, shared by every building that serves it
-		// (what Ares shows too). The AI builds one object at a time in the building's own factory
-		// (BuildingClass::Factory_AI, 0x4500F0).
-		FactoryClass* FactoryFor(const BuildingClass* pBuilding, Slot slot)
-		{
-			const auto pOwner = pBuilding->Owner;
-
-			if (!pOwner->IsControlledByHuman())
-			{
-				const auto pFactory = pBuilding->Factory;
-				Slot productSlot;
-				if (pFactory && pFactory->Object && SlotOf(pFactory->Object->GetTechnoType(), productSlot)
-					&& productSlot == slot)
-				{
-					return pFactory;
-				}
-
-				return nullptr;
-			}
-
-			switch (slot)
-			{
-			case Slot::Building: return pOwner->Primary_ForBuildings;
-			case Slot::Defense:  return pOwner->Primary_ForDefenses;
-			case Slot::Infantry: return pOwner->Primary_ForInfantry;
-			case Slot::Vehicle:  return pOwner->Primary_ForVehicles;
-			case Slot::Ship:     return pOwner->Primary_ForShips;
-			case Slot::Aircraft: return pOwner->Primary_ForAircraft;
-			default:             return nullptr;
-			}
-		}
-
-		// Production that was cancelled leaves nothing behind in the factory, so the abandon is
-		// remembered for a few seconds to show it.
-		struct CancelRecord
-		{
-			const HouseClass* House;
-			Slot QueueSlot;
-			const TechnoTypeClass* Type;
-			int Stage;
-			DWORD Tick;
-		};
-
-		std::vector<CancelRecord> Cancels;
-		constexpr DWORD CancelShownForMs = 3000;
-		constexpr size_t CancelsKept = 64;
-
-		const CancelRecord* RecentCancel(const HouseClass* pHouse, Slot slot)
-		{
-			const DWORD now = GetTickCount();
-			for (auto it = Cancels.rbegin(); it != Cancels.rend(); ++it)
-			{
-				if (now - it->Tick > CancelShownForMs)
-					break;
-
-				if (it->House == pHouse && it->QueueSlot == slot)
-					return &*it;
-			}
-
-			return nullptr;
-		}
-
-		constexpr int FullStage = 54; // FactoryClass production always runs 54 steps
-
-		enum class RowState
-		{
-			Building,
-			OnHold,
-			NoFunds,
-			Ready,
-			Cancelled
-		};
-
-		struct TypeCount
-		{
-			const TechnoTypeClass* Type;
-			int Count;
-		};
-
-		void AddToGroups(std::vector<TypeCount>& groups, const TechnoTypeClass* pType)
-		{
-			if (!pType)
-				return;
-
-			for (auto& group : groups)
-			{
-				if (group.Type == pType)
-				{
-					++group.Count;
-					return;
-				}
-			}
-
-			groups.push_back({ pType, 1 });
-		}
-
-		struct ProductionRow
-		{
-			const TechnoTypeClass* Type;
-			RowState State;
-			int Stage;
-			std::vector<TypeCount> Queue;
-		};
-
-		bool GetRow(const BuildingClass* pBuilding, Slot slot, ProductionRow& row)
-		{
-			const auto pFactory = FactoryFor(pBuilding, slot);
-			if (pFactory && pFactory->Object)
-			{
-				row.Type = pFactory->Object->GetTechnoType();
-				if (!row.Type)
-					return false;
-
-				row.Stage = std::clamp(pFactory->Production.Value, 0, FullStage);
-
-				// FactoryClass::Has_Completed (0x4CA130) / Suspend (0x4C9E60) / AI (0x4C9B20): a finished
-				// product suspends the factory; a hold suspends it before; OnHold is set by AI when a
-				// production step could not be paid for.
-				if (row.Stage >= FullStage)
-					row.State = RowState::Ready;
-				else if (pFactory->IsSuspended)
-					row.State = RowState::OnHold;
-				else if (pFactory->OnHold)
-					row.State = RowState::NoFunds;
-				else
-					row.State = RowState::Building;
-
-				row.Queue.clear();
-				for (const auto pQueued : pFactory->QueuedObjects)
-					AddToGroups(row.Queue, pQueued);
-
-				return true;
-			}
-
-			if (const auto pCancel = RecentCancel(pBuilding->Owner, slot))
-			{
-				row.Type = pCancel->Type;
-				row.Stage = pCancel->Stage;
-				row.State = RowState::Cancelled;
-				row.Queue.clear();
-				return true;
-			}
-
-			return false;
-		}
-
-#pragma endregion Production state
+using namespace ObserverProduction;
 
 #pragma region Drawing
 
@@ -465,7 +260,7 @@ namespace SelectionInfo
 			int rowCount = 0;
 			for (int i = 0; i < slotCount; ++i)
 			{
-				if (GetRow(pBuilding, slots[i], rows[rowCount]))
+				if (GetRow(FactoryFor(pBuilding, slots[i]), pBuilding->Owner, slots[i], rows[rowCount]))
 					++rowCount;
 			}
 
@@ -485,9 +280,7 @@ namespace SelectionInfo
 
 				Cameo(row.Type, x, cameoTop);
 
-				int queued = 0;
-				for (const auto& group : row.Queue)
-					queued += group.Count;
+				const int queued = row.QueuedCount();
 
 				if (queued > 0)
 				{
@@ -646,23 +439,6 @@ namespace SelectionInfo
 			&& ViewerSeesProduction(pBuilding->Owner);
 	}
 
-	void RememberCancel(const FactoryClass* pFactory)
-	{
-		if (!pFactory->Object || !pFactory->Owner)
-			return;
-
-		const auto pType = pFactory->Object->GetTechnoType();
-		Slot slot;
-		if (!SlotOf(pType, slot))
-			return;
-
-		if (Cancels.size() >= CancelsKept)
-			Cancels.erase(Cancels.begin());
-
-		Cancels.push_back({ pFactory->Owner, slot, pType,
-			std::clamp(pFactory->Production.Value, 0, FullStage), GetTickCount() });
-	}
-
 	void Draw()
 	{
 		constexpr int MaxContentPanels = 8;
@@ -748,19 +524,5 @@ DEFINE_HOOK(0x6D9781, Tactical_RenderLayers_TakeOverSpiedSelection, 0x5)
 DEFINE_HOOK(0x6D4684, Tactical_Render_DrawSelectionInfo, 0x6)
 {
 	SelectionInfo::Draw();
-	return 0;
-}
-
-// FactoryClass::Abandon, called by HouseClass::Abandon_Production for a player's cancel and by
-// HouseClass::AI_Raise_Money when the AI cancels to free money. Its other callers replace or tear
-// down the factory and are not cancels.
-DEFINE_HOOK(0x4C9FF0, FactoryClass_Abandon_RememberCancel, 0x6)
-{
-	GET(FactoryClass*, pFactory, ECX);
-	GET_STACK(DWORD, returnAddress, 0x0);
-
-	if (returnAddress == 0x4FABAB || returnAddress == 0x4FE07F)
-		SelectionInfo::RememberCancel(pFactory);
-
 	return 0;
 }
