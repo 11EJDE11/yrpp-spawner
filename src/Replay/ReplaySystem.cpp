@@ -704,21 +704,22 @@ namespace ReplaySystem
 			}
 		}
 
-		void ApplyPlaybackSelection(const PlaybackFrameRecord& frameRecord)
+		// True when it changed what is selected.
+		bool ApplyPlaybackSelection(const PlaybackFrameRecord& frameRecord)
 		{
 			if (!ReplayState.SelectUnits)
-				return;
+				return false;
 
 			const int maxSelectionCount = std::max(AbstractClass::Array.Count, 0);
 			if (frameRecord.SelectedObjectCount < 0 || frameRecord.SelectedObjectCount > maxSelectionCount)
 			{
 				Debug::Log("[Replay] Skipping a recorded selection of %d objects; %d objects exist.\n",
 					frameRecord.SelectedObjectCount, maxSelectionCount);
-				return;
+				return false;
 			}
 
 			if (IsCurrentSelection(frameRecord.SelectedObjectIDs))
-				return;
+				return false;
 
 			const std::unordered_set<uint32_t> recordedIDs(
 				frameRecord.SelectedObjectIDs.begin(), frameRecord.SelectedObjectIDs.end());
@@ -750,6 +751,8 @@ namespace ReplaySystem
 				if (it != objectByUniqueID.end())
 					it->second->Select();
 			}
+
+			return true;
 		}
 
 		void SpringRecordedSelectionTriggers(const PlaybackFrameRecord& frameRecord)
@@ -1095,7 +1098,11 @@ namespace ReplaySystem
 			{
 				ReplayState.LockedSelectionIDs = frameRecord.SelectedObjectIDs;
 				ReplayState.HasLockedSelection = true;
-				ApplyPlaybackSelection(frameRecord);
+
+				// A band-box or click selection restarts the action line timer (Mouse_Left_Release,
+				// 0x4ABCF0 and 0x4ABE83), so the newly selected units briefly show their orders.
+				if (ApplyPlaybackSelection(frameRecord) && !Seek::IsSeeking())
+					TacticalClass::StartDrawActionLineTimer();
 			}
 
 			// After the selection, whose own springs are suppressed, and before this frame's
@@ -1219,6 +1226,13 @@ namespace ReplaySystem
 			const int eventsToReplay = ReplayState.ExpectedEventsThisFrame;
 			ReplayState.ExpectedEventsThisFrame = 0;
 
+			// A unit order the watched player gave. Playing, the click that sent it restarted the
+			// action line timer (Mouse_Left_Release, 0x4ABFAE); there is no click on playback, so the
+			// order restarts it instead, as it runs - the units have their new destination by the
+			// time the lines are drawn. An observer seat gives no orders, so it never shows any.
+			const HouseClass* const pWatched = HouseClass::CurrentPlayer;
+			bool watchedPlayerOrdered = false;
+
 			for (int i = 0; i < eventsToReplay; ++i)
 			{
 				// EventClass has no default constructor, so read into raw storage.
@@ -1242,7 +1256,16 @@ namespace ReplaySystem
 					StopReplaySystem();
 					return;
 				}
+
+				if (pWatched && replayEvent->HouseIndex == pWatched->ArrayIndex
+					&& (replayEvent->Type == EventType::MegaMission || replayEvent->Type == EventType::MegaMissionF))
+				{
+					watchedPlayerOrdered = true;
+				}
 			}
+
+			if (watchedPlayerOrdered && !Seek::IsSeeking())
+				TacticalClass::StartDrawActionLineTimer();
 		}
 
 		void FinishRecordingAtMissionEnd()

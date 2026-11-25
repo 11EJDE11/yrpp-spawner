@@ -1406,6 +1406,37 @@ game (`Pause_Game_For`, 0x684060), `Main_Loop` takes its short path and runs no 
 A take over during a cutscene sets the global again from the scenario's flag and hides the cursor, as
 `Lock_Input` would have, so the viewer waits for the cutscene to end like the player did.
 
+## Order feedback
+
+When a player gives an order, some of what they see and hear comes from the click itself rather
+than from the order, and a replay has the orders but not the clicks.
+
+**Action lines** are reproduced. `Tactical::Render` (0x6D473F) draws `Draw_Action_Lines` for every
+selected unit the local player controls while the option is on (`ActionLinesEnabled`, 0x843108),
+but only for 25 frames after the global timer at 0xB0EA80 was last restarted
+(`TechnoClass::Reset_Action_Line_Timer`, 0x70D150, `TacticalClass::StartDrawActionLineTimer` in
+YRpp). Live, the restart comes from `Mouse_Left_Release` - after an order (0x4ABFAE) and after a
+band-box or click selection (0x4ABCF0, 0x4ABE83) - and from the team-select hotkey (0x731385).
+Playback restarts it when the watched house's `MEGAMISSION` or `MEGAMISSION_F` is injected
+(`PlaybackFrameEvents`) and when a recorded selection changes what is selected. An order restarts it
+on the frame it runs rather than the frame it was clicked, so the lines show the new destination
+instead of the old one for the length of the latency. Neither restarts it while seeking.
+
+Not reproduced:
+
+- The move flash. `FootClass::Active_Click_With` creates it as an `AnimClass`, which would advance
+  the object ID counter off the recording's, so it is skipped while recording and playing (hook
+  0x4D7EBA). Multiplayer already skips it.
+- The order acknowledgements: `Player_Assign_Mission` (0x6FFBE0) plays `Response_Move`,
+  `Response_Attack` and the rest for the first unit of a click, through `AllowVoice`. The recorded
+  event goes straight to `Execute`, which never calls it.
+- The sidebar EVA lines - Building, Training, On hold, Select target - which
+  `StripClass::SelectClass::Action` (0x6AAD00) speaks on the click. Playback ignores cameo clicks
+  (0x6AAD0D), and the recorded production events say nothing when they run.
+
+The target flash needs nothing: `EventClass::Execute` flashes the target itself (0x4C739F) when the
+ordering unit is allied to `PlayerPtr`.
+
 ## Taking over
 
 `ReplayTakeOver` hands the viewer the house on screen and ends playback: from the next frame the
