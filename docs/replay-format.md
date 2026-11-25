@@ -1417,25 +1417,53 @@ but only for 25 frames after the global timer at 0xB0EA80 was last restarted
 (`TechnoClass::Reset_Action_Line_Timer`, 0x70D150, `TacticalClass::StartDrawActionLineTimer` in
 YRpp). Live, the restart comes from `Mouse_Left_Release` - after an order (0x4ABFAE) and after a
 band-box or click selection (0x4ABCF0, 0x4ABE83) - and from the team-select hotkey (0x731385).
-Playback restarts it when the watched house's `MEGAMISSION` or `MEGAMISSION_F` is injected
-(`PlaybackFrameEvents`) and when a recorded selection changes what is selected. An order restarts it
-on the frame it runs rather than the frame it was clicked, so the lines show the new destination
-instead of the old one for the length of the latency. Neither restarts it while seeking.
+Playback restarts it when the watched house's `MEGAMISSION` or `MEGAMISSION_F` is injected and when
+a recorded selection changes what is selected. An order restarts it on the frame it runs rather than
+the frame it was clicked, so the lines show the new destination instead of the old one for the
+length of the latency.
 
-Not reproduced:
+**Order acknowledgements** are reproduced. `Player_Assign_Mission` (0x6FFBE0) plays the clicked
+unit's response from a switch on the mission it sends - `Response_Move` for a move or attack move,
+`Response_Attack` with the target, `Response_Enter`, `Response_Capture`, `Response_Harvest`,
+`Response_Deploy` for an unload, and a random `VoiceSpecialAttack` for anything else - and
+`AllowVoice` (0x822CF2) lets only the first unit of a click answer. Nothing else sends a
+`MEGAMISSION`, so every ordinary one in a recording was a click that spoke. Playback runs the same
+switch on the recorded mission, which is the one the click sent after its own conversion to attack
+move, for the first of the watched house's orders on a frame. Planned orders are left silent, both
+the ones added to a route and the ones carried out from it: the function stores them before it
+reaches the voices. The responses only pick a voice with `NonCriticalRandomNumber` and store it in
+`TechnoClass::QueuedVoice`, through `Queue_Voice`'s own check that the house is the local player's,
+which is why multiplayer only ever plays them on the machine that clicked.
 
-- The move flash. `FootClass::Active_Click_With` creates it as an `AnimClass`, which would advance
-  the object ID counter off the recording's, so it is skipped while recording and playing (hook
-  0x4D7EBA). Multiplayer already skips it.
-- The order acknowledgements: `Player_Assign_Mission` (0x6FFBE0) plays `Response_Move`,
-  `Response_Attack` and the rest for the first unit of a click, through `AllowVoice`. The recorded
-  event goes straight to `Execute`, which never calls it.
-- The sidebar EVA lines - Building, Training, On hold, Select target - which
-  `StripClass::SelectClass::Action` (0x6AAD00) speaks on the click. Playback ignores cameo clicks
-  (0x6AAD0D), and the recorded production events say nothing when they run.
+**Sidebar EVA lines** are reproduced where an order says what the click spoke.
+`StripClass::SelectClass::Action` (0x6AAD00) speaks before it sends its event, and decides from the
+house's factories as they stand then, which is also how they stand when the recorded event is
+injected - before any of the frame's events run. Playback applies its tests to the factory
+`HouseClass::Fetch_Factory` (0x500510, `GetPrimaryFactory`) returns for the order's type:
 
-The target flash needs nothing: `EventClass::Execute` flashes the target itself (0x4C739F) when the
-ordering unit is allied to `PlayerPtr`.
+| Order | Line | When |
+|---|---|---|
+| `PRODUCE` | Training for infantry, Building for anything else | the factory is idle - none, or stopped with nothing on it or queued - or it is stopped on this type, which the click resumes |
+| `SUSPEND` | On hold | always: every suspend the click sends is a running item put on hold |
+| `ABANDON`, `ABANDON_ALL` | Cancelled | the factory is stopped on this type - paused, or finished and waiting to be placed |
+
+Adding to a queue that is already running, or taking an item off it, only plays the click sound,
+and so does nothing here. At most one line is spoken a frame. Select target is not reproduced, as it
+sends no event, and nor is Unable to comply, which mostly sends none either. The one case that does -
+a left click on a finished item nothing can build any more, which abandons it - speaks Cancelled
+here.
+
+None of this plays while seeking, or for the spectator seat, which watches the recording player's
+house as an observer and shows their lines but does not speak for them. It all lives in
+`ReplayOrderFeedback.cpp`, fed each event as `PlaybackFrameEvents` injects it.
+
+Not reproduced: the move flash. `FootClass::Active_Click_With` creates it as an `AnimClass`, which
+would advance the object ID counter off the recording's, so it is skipped while recording and
+playing (hook 0x4D7EBA). Multiplayer already skips it.
+
+The select voices and the target flash need nothing. `TechnoClass::Select` speaks when playback
+reproduces a recorded selection, and `EventClass::Execute` flashes the target itself (0x4C739F) when
+the ordering unit is allied to `PlayerPtr`.
 
 ## Taking over
 

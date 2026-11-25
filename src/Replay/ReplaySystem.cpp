@@ -21,6 +21,7 @@
 #include "ReplayFile.h"
 #include "ReplayFrameCodec.h"
 #include "ReplayCanonical.h"
+#include "ReplayOrderFeedback.h"
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplaySideChannels.h"
@@ -1226,13 +1227,6 @@ namespace ReplaySystem
 			const int eventsToReplay = ReplayState.ExpectedEventsThisFrame;
 			ReplayState.ExpectedEventsThisFrame = 0;
 
-			// A unit order the watched player gave. Playing, the click that sent it restarted the
-			// action line timer (Mouse_Left_Release, 0x4ABFAE); there is no click on playback, so the
-			// order restarts it instead, as it runs - the units have their new destination by the
-			// time the lines are drawn. An observer seat gives no orders, so it never shows any.
-			const HouseClass* const pWatched = HouseClass::CurrentPlayer;
-			bool watchedPlayerOrdered = false;
-
 			for (int i = 0; i < eventsToReplay; ++i)
 			{
 				// EventClass has no default constructor, so read into raw storage.
@@ -1257,15 +1251,10 @@ namespace ReplaySystem
 					return;
 				}
 
-				if (pWatched && replayEvent->HouseIndex == pWatched->ArrayIndex
-					&& (replayEvent->Type == EventType::MegaMission || replayEvent->Type == EventType::MegaMissionF))
-				{
-					watchedPlayerOrdered = true;
-				}
+				OrderFeedback::OnEventInjected(*replayEvent);
 			}
 
-			if (watchedPlayerOrdered && !Seek::IsSeeking())
-				TacticalClass::StartDrawActionLineTimer();
+			OrderFeedback::OnFrameInjected();
 		}
 
 		void FinishRecordingAtMissionEnd()
