@@ -46,6 +46,7 @@
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.PlanningMode.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.SaveLoad.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.TypeSelect.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.ClickDestination.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\CopyProtection.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\DisableEdgeScrolling.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\GameSpeed.cpp" />
