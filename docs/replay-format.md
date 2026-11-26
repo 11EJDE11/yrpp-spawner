@@ -291,8 +291,28 @@ recordings made before it:
 | 7 | MoneyIn | varint count (1-1024), then that many `MoneyInRecord` (12 bytes) |
 | 8 | Seal | a `SealRecord` (36 bytes); see [Canonical hash](#canonical-hash). One block per seal |
 | 9 | DroppedHouses | varint count (1-32), then per house varint house index and varint the `Frame` it was flagged on; see [Players dropped outside the event stream](#players-dropped-outside-the-event-stream) |
+| 10 | SidebarTab | uint8 `SidebarClass::ActiveTabIndex` (0-3), on the frames it changes; see [The sidebar tab](#the-sidebar-tab) |
 
-Playback reads the first five and DroppedHouses, and skips the rest, which are for readers outside the game.
+Playback reads the first five, DroppedHouses and SidebarTab, and skips the rest, which are for readers outside the game.
+
+### The sidebar tab
+
+Which tab the sidebar shows is the player's own screen, like the camera and the selection: no event
+carries it. Each frame's capture reads `SidebarClass::ActiveTabIndex`, and the writer puts a block in
+only when it differs from the last one written - which, from -1, includes the first frame - so it
+costs nothing while the player leaves the tab alone. The comparison is the writer's, not the
+capture's: captures run a frame or two ahead of the writes, so a capture comparing against the last
+written tab sees a change again until it has been written. Any tab change the game makes itself is
+recorded the same way, as the player saw it.
+
+Playback calls `SidebarClass::SetTab` (`Change_Tab`, 0x6A7590: buttons and a redraw, nothing more)
+on each recorded change, and once more after a seek with the last tab the skipped records carried.
+Only from the recording player's own seat: from another seat the sidebar is that player's build
+options, and the spectator seat's is the observer's. A tab the viewer clicks stays until the
+recording's next change.
+
+The block was added without a version bump, as an additive change is: a recording made before it has
+none and playback leaves the tab alone, and a reader that predates it skips it by its length.
 
 ### Players dropped outside the event stream
 
@@ -1453,9 +1473,37 @@ sends no event, and nor is Unable to comply, which mostly sends none either. The
 a left click on a finished item nothing can build any more, which abandons it - speaks Cancelled
 here.
 
+**Planned routes** are reproduced. Planning mode is local: holding the key calls
+`Start_Planning_Mode` (0x6379C0), which sets `InPlanningMode` (0xAC4CF4) and plays
+`StartPlanningModeSound` but sends nothing, and releasing it calls `End_Planning_Mode` (0x637A10),
+which sends `PLANCOMMIT` and plays `EndPlanningModeSound`. Each click in between sends a
+`MEGAMISSION` with `PlanningState` Adding, which every machine runs, so the route's nodes are in the
+simulation and in a replay. Only drawing them depends on the key: `Tactical::Render` asks
+`Is_In_Planning_Mode` once (0x6D46DD) and, when the answer is yes, draws the routes and nodes of every
+house allied to `PlayerPtr` (0x6D46EA, 0x6D46EF, 0x6D491A) in place of the selected units' action
+lines.
+
+Playback takes the watched player to be planning from their first Adding order until their
+`PLANCOMMIT`, playing the two sounds at those points, and a hook on that one call in render answers
+yes for that time as well as when the viewer's own key is down. `InPlanningMode` itself is not
+touched. The nodes only appear as the Adding orders run, so this draws what the player saw, ending a
+latency later than they released the key; a plan begun with the key and given no clicks draws nothing
+here, where live it would show allies' existing routes for that time. Orders carried out along a
+route (`PlanningState` Executing) arrive without a commit and do not open the window. Render's
+planning branch is only ever taken on the one machine whose player holds the key, so nothing in it
+reaches the simulation; it does rebuild `PlanningNodeClass::Unknown2` (0xAC4C18), the display list
+the planning keyframe state carries. A seek that repositions the stream skips the events in between,
+so the window is closed then and opens again with the next Adding order.
+
 None of this plays while seeking, or for the spectator seat, which watches the recording player's
-house as an observer and shows their lines but does not speak for them. It all lives in
-`ReplayOrderFeedback.cpp`, fed each event as `PlaybackFrameEvents` injects it.
+house as an observer and shows their lines but neither speaks for them nor shows their planned
+routes - an observer has no planning mode. The engine's own planning feedback is kept from it too:
+`PlanningManager_638120`, which runs each Adding order, plays `AddPlanningModeCommandSound` (0x6385AE)
+and shows the reason an order was refused, with `ScoldSound`, when the order's house is `PlayerPtr`
+(the `setz` at 0x63814C). The spectator seat keeps the recording player's house as `PlayerPtr`, so a
+hook there answers no for it, as every other machine in the game would. It all lives in
+`ReplayOrderFeedback.cpp`, fed each event as `PlaybackFrameEvents` injects it, apart from the render
+hook in `ReplaySystem.Hook.cpp`.
 
 Not reproduced: the move flash. `FootClass::Active_Click_With` creates it as an `AnimClass`, which
 would advance the object ID counter off the recording's, so it is skipped while recording and
@@ -1738,7 +1786,10 @@ The viewport lock is forced off (`ReplayFreeCamera` forced to `true`) and `Repla
 forced off whenever the view player is not the recording player. Both reproduce the recording
 player's own screen, and neither means anything from someone else's seat: the camera would be
 pinned to a base you are not watching, and the selection would be units the house you are watching
-does not own and mostly cannot see.
+does not own and mostly cannot see. The recorded sidebar tab is not applied either, for the same
+reason (see [The sidebar tab](#the-sidebar-tab)). What comes from the orders - action lines,
+acknowledgements, EVA lines and planned routes - follows the house being watched, since every house's
+orders are in the file.
 
 `Game::PlayerColor` and `Game::ObserverMode` follow the view slot rather than slot 0, so chat
 colouring and the observer loading screen match who is being watched.

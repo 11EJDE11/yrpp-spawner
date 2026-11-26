@@ -43,6 +43,7 @@ namespace Replay
 		// The low 16 bits of the recorded hash; only those are stored.
 		uint16_t GameCRC = 0;
 		int32_t GameSpeed = 0;
+		int32_t SidebarTab = 0;
 		bool EndOfStream = false;
 	};
 
@@ -62,6 +63,9 @@ namespace Replay
 		bool HasGameCRC = false;
 		int32_t GameSpeed = 0;
 		bool HasGameSpeed = false;
+		int32_t SidebarTab = 0;
+		// Whether a tab could be read; the writer only stores it when it differs from the last one written.
+		bool HasSidebarTab = false;
 		// Every HouseStatsIntervalFrames, taken at the same point in the frame as GameCRC.
 		std::vector<HouseStatsSample> HouseStats;
 		bool HasHouseStats = false;
@@ -96,6 +100,8 @@ namespace Replay
 		std::vector<uint32_t> LastRecordedSelectionIDs;
 		// -1 makes the first capture establish the recorded speed.
 		int LastRecordedGameSpeed = -1;
+		// -1 likewise makes the first capture record the tab the game starts on.
+		int LastRecordedSidebarTab = -1;
 		// Reused for each record and block so writing does not allocate on the game thread.
 		std::vector<uint8_t> Record;
 		std::vector<uint8_t> Block;

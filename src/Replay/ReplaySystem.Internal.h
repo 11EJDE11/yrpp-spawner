@@ -106,6 +106,8 @@ namespace ReplaySystem
 			bool HasLockedViewportPos = false;
 			std::vector<uint32_t> LockedSelectionIDs;
 			bool HasLockedSelection = false;
+			// Last recorded sidebar tab, or -1 for a recording that carries none.
+			int LockedSidebarTab = -1;
 			PlaybackFrameRecord PendingPlaybackFrame = {};
 
 			// Scratch buffers reused every frame so recording does not allocate on the game thread.

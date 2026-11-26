@@ -22,6 +22,7 @@
 
 #include "ReplayControls.h"
 #include "ReplayFile.h"
+#include "ReplayOrderFeedback.h"
 #include "ReplayOverlay.h"
 #include "ReplaySeek.h"
 #include "ReplayStatistics.h"
@@ -85,6 +86,43 @@ DEFINE_HOOK(0x4D7EBA, FootClass_ActiveClickWith_SkipMoveFlashDuringReplay, 0x8)
 		return SkipMoveFlashBlock;
 
 	return R->AL() ? MoveFlashBlock : SkipMoveFlashBlock;
+}
+
+// Tactical::Render draws planned routes - the nodes and the lines from the units through them - only
+// while the local player is in planning mode, and keeps the answer for the rest of the frame: it also
+// stands in the units' action lines and adds draw_63B2F0 at the end. Playback never is, so ask as
+// well whether the watched player was, from their orders. Only render is told: InPlanningMode itself
+// is left alone. The call is replaced rather than followed, as it is a relative call, and the real
+// function is still asked so the viewer's own key and anything hooked on it keep working.
+DEFINE_HOOK(0x6D46DD, TacticalRender_ShowWatchedPlayerPlanning, 0x5)
+{
+	enum { AfterCall = 0x6D46E2 };
+
+	bool planning = reinterpret_cast<bool(__fastcall*)()>(0x637AA0)();
+	if (!planning && ReplayState.Playback)
+		planning = ReplaySystem::OrderFeedback::IsWatchedPlayerPlanning();
+
+	R->AL(planning);
+	return AfterCall;
+}
+
+// PlanningManager_638120, which Networking_RespondTo_PlanningEvent (0x637E00) runs for an order added
+// to a planned route, notes whether the order is the local player's (cmp against PlayerPtr->ID, setz).
+// For the local player's it plays AddPlanningModeCommandSound (0x6385AE), and when the order is refused
+// it shows the reason with ScoldSound, itself or through handletag for Main_Loop (0x637270). The
+// spectator seat keeps the recording player's house as PlayerPtr, so it heard and saw all of that.
+// Answer no there, as every other machine in the game does: the flag differs per machine in a live
+// game, so nothing in the simulation can depend on it.
+DEFINE_HOOK(0x63814C, PlanningEvent_LocalPlayerFeedback_NotForSpectator, 0x5)
+{
+	enum { AfterSetZ = 0x638151 };
+
+	GET(const int, eventHouse, EAX);
+	GET(const int, playerID, EBP);
+
+	const bool isLocalPlayer = eventHouse == playerID && !ReplaySystem::IsSpectatorPlayback();
+	R->Stack8(0x13, isLocalPlayer ? 1 : 0);
+	return AfterSetZ;
 }
 
 // SidebarClass::StripClass::SelectClass::Action, a click on a sidebar cameo. Playback discards the

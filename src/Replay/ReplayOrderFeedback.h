@@ -35,5 +35,13 @@ namespace ReplaySystem
 
 		// Once the frame's events are all injected.
 		void OnFrameInjected();
+
+		// Whether the watched player is in planning mode - holding the key that plans waypoints - as
+		// far as their orders show: from the first order they add to a route until the commit that
+		// releasing the key sends.
+		bool IsWatchedPlayerPlanning();
+
+		// Forgets everything, for a new playback or a stream repositioned by a seek.
+		void Reset();
 	}
 }

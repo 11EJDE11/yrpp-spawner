@@ -54,6 +54,7 @@ namespace Replay
 		FrameRecordFlag_GameSpeed = 1u << 4,
 		FrameRecordFlag_SelectionTriggers = 1u << 5,
 		FrameRecordFlag_DroppedHouses = 1u << 6,
+		FrameRecordFlag_SidebarTab = 1u << 7,
 	};
 
 	// A frame record's blocks. Each is written as varint tag, varint length, then that many bytes, and
@@ -75,9 +76,14 @@ namespace Replay
 		// player dropped while the game loads, or leaving a tournament game. Not canonical: only the
 		// machines that dropped the player have it.
 		FrameBlock_DroppedHouses = 9,
+		// uint8 SidebarClass::ActiveTabIndex, on the frames it changes. Viewer state, like the camera.
+		FrameBlock_SidebarTab = 10,
 	};
 
 	constexpr int32_t MaxDroppedHousesPerFrame = 32;
+
+	// SidebarClass::Tabs[4].
+	constexpr int32_t SidebarTabCount = 4;
 
 	// A house Destroy_Connection flagged to die outside the event stream; see FrameBlock_DroppedHouses.
 	struct DroppedHouseRecord

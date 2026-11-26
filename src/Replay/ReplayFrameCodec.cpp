@@ -205,6 +205,7 @@ namespace Replay
 		this->LastRecordedTacticalPos = { 0, 0 };
 		this->LastRecordedSelectionIDs.clear();
 		this->LastRecordedGameSpeed = -1;
+		this->LastRecordedSidebarTab = -1;
 	}
 
 	bool FrameWriter::WriteFrame(File& file, const RecordedFrameCapture& capture, int eventsThisFrame,
@@ -225,9 +226,13 @@ namespace Replay
 		const bool hasSeals = !capture.Seals.empty();
 		const bool hasDroppedHouses = !capture.DroppedHouses.empty();
 
+		// Compared here, not when the capture is made: captures run ahead of the writes, so one made
+		// before the last change was written would see the change again.
+		const bool sidebarTabChanged = capture.HasSidebarTab && capture.SidebarTab != this->LastRecordedSidebarTab;
+
 		if (eventsThisFrame == 0 && !tacticalPosChanged && !selectionChanged && !hasSideChannelEvents
 			&& !hasGameCRC && !capture.HasGameSpeed && !hasSelectionTriggers && !hasHouseStats && !hasMoneyIn
-			&& !hasSeals && !hasDroppedHouses)
+			&& !hasSeals && !hasDroppedHouses && !sidebarTabChanged)
 		{
 			return true;
 		}
@@ -359,6 +364,13 @@ namespace Replay
 			writeBlock(FrameBlock_DroppedHouses);
 		}
 
+		if (sidebarTabChanged)
+		{
+			block.clear();
+			AppendValue(block, static_cast<uint8_t>(capture.SidebarTab));
+			writeBlock(FrameBlock_SidebarTab);
+		}
+
 		AppendVarint(record, FrameBlock_End);
 
 		// One call for the whole record: each file write is a tdefl_compress call.
@@ -367,6 +379,9 @@ namespace Replay
 
 		if (capture.HasGameSpeed)
 			this->LastRecordedGameSpeed = capture.GameSpeed;
+
+		if (sidebarTabChanged)
+			this->LastRecordedSidebarTab = capture.SidebarTab;
 
 		this->HasLastWrittenFrameState = true;
 		this->LastWrittenFrameNumber = capture.FrameNumber;
@@ -546,6 +561,15 @@ namespace Replay
 						record.DroppedHouses.push_back({ static_cast<int32_t>(house), static_cast<int32_t>(frame) });
 				}
 				record.Flags |= FrameRecordFlag_DroppedHouses;
+				break;
+			}
+
+			case FrameBlock_SidebarTab:
+			{
+				uint8_t tab = 0;
+				ok = cursor.Value(tab) && tab < SidebarTabCount;
+				record.SidebarTab = tab;
+				record.Flags |= FrameRecordFlag_SidebarTab;
 				break;
 			}
 

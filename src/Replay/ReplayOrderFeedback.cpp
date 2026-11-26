@@ -27,10 +27,12 @@
 #include <HouseClass.h>
 #include <ObjectTypeClass.h>
 #include <Randomizer.h>
+#include <RulesClass.h>
 #include <TacticalClass.h>
 #include <TechnoClass.h>
 #include <TechnoTypeClass.h>
 #include <Unsorted.h>
+#include <VocClass.h>
 #include <VoxClass.h>
 
 namespace ReplaySystem
@@ -50,6 +52,18 @@ namespace ReplaySystem
 			};
 
 			FrameFeedback Pending;
+
+			// Planning mode is local - Start_Planning_Mode (0x6379C0) on the key, End_Planning_Mode
+			// (0x637A10) on its release - and only the release sends anything, a PLANCOMMIT. The first
+			// order added to a route is the earliest the recording shows of it; the route's nodes only
+			// appear as those orders run, so that is also when the player first had anything drawn.
+			bool WatchedPlayerPlanning = false;
+
+			void PlaySound(int sound)
+			{
+				if (sound >= 0)
+					VocClass::PlayGlobal(sound, 0x2000, 1.0f);
+			}
 
 			FrameFeedback& ForThisFrame()
 			{
@@ -189,14 +203,34 @@ namespace ReplaySystem
 		void OnEventInjected(const EventClass& event)
 		{
 			const HouseClass* const pWatched = HouseClass::CurrentPlayer;
-			if (!pWatched || event.HouseIndex != pWatched->ArrayIndex || Seek::IsSeeking())
+			if (!pWatched || event.HouseIndex != pWatched->ArrayIndex)
+				return;
+
+			// The spectator seat watches the recording player's house as an observer, so it shows
+			// their lines but neither speaks for them nor shows their planning.
+			const bool seeking = Seek::IsSeeking();
+			const bool speaks = !seeking && !ReplaySystem::IsSpectatorPlayback();
+
+			// Followed through a seek as well, which runs every frame's events on the way.
+			if (event.Type == EventType::MegaMission
+				&& event.MegaMission.PlanningState == PlanningOrderState::Adding
+				&& !WatchedPlayerPlanning)
+			{
+				WatchedPlayerPlanning = true;
+				if (speaks)
+					PlaySound(RulesClass::Instance->StartPlanningModeSound);
+			}
+			else if (event.Type == EventType::PlanCommit && WatchedPlayerPlanning)
+			{
+				WatchedPlayerPlanning = false;
+				if (speaks)
+					PlaySound(RulesClass::Instance->EndPlanningModeSound);
+			}
+
+			if (seeking)
 				return;
 
 			auto& feedback = ForThisFrame();
-
-			// The spectator seat watches the recording player's house as an observer, so it shows
-			// their lines but does not speak for them.
-			const bool speaks = !ReplaySystem::IsSpectatorPlayback();
 
 			switch (event.Type)
 			{
@@ -256,6 +290,18 @@ namespace ReplaySystem
 			}
 
 			Pending = FrameFeedback {};
+		}
+
+		bool IsWatchedPlayerPlanning()
+		{
+			// Asked as render draws, so switching to the spectator seat mid-playback takes effect at once.
+			return WatchedPlayerPlanning && ReplaySystem::IsPlaybackActive() && !ReplaySystem::IsSpectatorPlayback();
+		}
+
+		void Reset()
+		{
+			Pending = FrameFeedback {};
+			WatchedPlayerPlanning = false;
 		}
 	}
 }

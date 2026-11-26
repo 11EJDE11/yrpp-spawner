@@ -126,7 +126,9 @@ namespace ReplaySystem
 			ReplayState.HasLockedViewportPos = false;
 			ReplayState.LockedSelectionIDs.clear();
 			ReplayState.HasLockedSelection = false;
+			ReplayState.LockedSidebarTab = -1;
 			ReplayState.FrameWriter.Reset();
+			OrderFeedback::Reset();
 		}
 
 		void AbortReplaySystem()
@@ -603,6 +605,26 @@ namespace ReplaySystem
 
 			capture.GameSpeed = static_cast<int32_t>(GameOptionsClass::Instance.GameSpeed);
 			capture.HasGameSpeed = capture.GameSpeed != ReplayState.FrameWriter.LastGameSpeed();
+
+			// The writer decides whether it changed; see FrameWriter::WriteFrame.
+			const int sidebarTab = SidebarClass::Instance.ActiveTabIndex;
+			capture.SidebarTab = sidebarTab;
+			capture.HasSidebarTab = sidebarTab >= 0 && sidebarTab < SidebarTabCount;
+		}
+
+		// The sidebar is the recording player's screen, like the camera and the selection: from
+		// another seat it would show a tab of somebody else's build options, and the spectator seat
+		// has the observer's sidebar. The viewer can still click a tab; the recording's next change
+		// takes it back.
+		void ApplyRecordedSidebarTab()
+		{
+			const int tab = ReplayState.LockedSidebarTab;
+			if (tab < 0 || tab >= SidebarTabCount || ResolveViewPlayerIndex() > 0 || ReplayState.SpectatorView)
+				return;
+
+			auto& sidebar = SidebarClass::Instance;
+			if (sidebar.ActiveTabIndex != tab)
+				sidebar.SetTab(tab);
 		}
 
 		bool RepositionPlaybackStreamToFrame(int targetFrame)
@@ -624,6 +646,10 @@ namespace ReplaySystem
 			ReplayState.ExpectedEventsThisFrame = 0;
 			ReplayState.HasExpectedGameCRC = false;
 
+			// The events skipped below may open or close a plan, so the watched player's planning
+			// mode is not known until the next one arrives.
+			OrderFeedback::Reset();
+
 			for (;;)
 			{
 				PlaybackFrameRecord record {};
@@ -637,6 +663,7 @@ namespace ReplaySystem
 				if (record.EndOfStream)
 				{
 					ReplayState.PlaybackStreamEnded = true;
+					ApplyRecordedSidebarTab();
 					return true;
 				}
 
@@ -644,6 +671,7 @@ namespace ReplaySystem
 				{
 					ReplayState.PendingPlaybackFrame = std::move(record);
 					ReplayState.HasPendingPlaybackFrame = true;
+					ApplyRecordedSidebarTab();
 					return true;
 				}
 
@@ -665,6 +693,9 @@ namespace ReplaySystem
 					GameOptionsClass::Instance.GameSpeed = gameSpeed;
 					GameModeOptionsClass::Instance.GameSpeed = gameSpeed;
 				}
+
+				if ((record.Flags & FrameRecordFlag_SidebarTab) != 0u)
+					ReplayState.LockedSidebarTab = record.SidebarTab;
 
 				// The frame's events sit in the stream immediately after its record.
 				if (!ReplayState.FrameReader.SkipEvents(ReplayState.File, record.EventCountThisFrame))
@@ -1135,6 +1166,12 @@ namespace ReplaySystem
 				const int gameSpeed = std::clamp(static_cast<int>(frameRecord.GameSpeed), 0, MaxGameSpeedIndex);
 				GameOptionsClass::Instance.GameSpeed = gameSpeed;
 				GameModeOptionsClass::Instance.GameSpeed = gameSpeed;
+			}
+
+			if ((frameRecord.Flags & FrameRecordFlag_SidebarTab) != 0u)
+			{
+				ReplayState.LockedSidebarTab = frameRecord.SidebarTab;
+				ApplyRecordedSidebarTab();
 			}
 
 			ReplayState.HasPendingPlaybackFrame = false;
