@@ -33,6 +33,12 @@
 // Ion storm, nuke and dominator tints (tint true) and the restore after them (red -1) are unchanged.
 //
 // Draw-only: the drawers and a cell's pointer to one are not part of the game state.
+//
+// Measured. The test map from CnCNet/cncnet-yr-client-package issue 647 (a retint every second and
+// desolator radiation; 24,093 frames, every frame drawn at the fastest playback speed, two runs each):
+// 65.4 s -> 22.2 s for the whole replay. Without this the tile drawers grew to 4,986 by the end, about
+// 400 more every 1,000 frames and still climbing; with it they stop at 364 from frame 11,000 on. Every
+// frame's CRC as recorded in all four runs.
 
 #include <CellClass.h>
 #include <ConvertClass.h>
