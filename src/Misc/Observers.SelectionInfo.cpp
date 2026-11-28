@@ -53,6 +53,7 @@
 #include <HouseClass.h>
 #include <InfantryClass.h>
 #include <ObjectClass.h>
+#include <StringTable.h>
 #include <Surface.h>
 #include <TacticalClass.h>
 #include <TechnoClass.h>
@@ -496,28 +497,35 @@ namespace SelectionInfo
 					CameoBadge(badge, x, cameoTop);
 				}
 
+				// Ready and On Hold are the sidebar's own strings, so they come in the player's language.
+				static const wchar_t* const ReadyText = StringTable::TryFetchString("TXT_READY", L"Ready");
+				static const wchar_t* const OnHoldText = StringTable::TryFetchString("TXT_HOLD", L"On Hold");
+				static const wchar_t* const NoFundsText = StringTable::TryFetchString("GUI:ObserverNoFunds", L"No funds");
+				static const wchar_t* const CancelledText = StringTable::TryFetchString("GUI:ObserverCancelled", L"Cancelled");
+
 				const int percent = row.Stage * 100 / FullStage;
 				int barColor = Rgb(40, 200, 40);
-				wchar_t progress[16];
+				wchar_t percentText[16];
+				swprintf_s(percentText, L"%d%%", percent);
+				const wchar_t* pProgress = percentText;
 				const wchar_t* pReason = nullptr;
-				swprintf_s(progress, L"%d%%", percent);
 				switch (row.State)
 				{
 				case RowState::Ready:
 					barColor = Rgb(90, 170, 255);
-					swprintf_s(progress, L"Ready");
+					pProgress = ReadyText;
 					break;
 				case RowState::OnHold:
 					barColor = Rgb(230, 200, 30);
-					pReason = L"On hold";
+					pReason = OnHoldText;
 					break;
 				case RowState::NoFunds:
 					barColor = Rgb(240, 130, 20);
-					pReason = L"No funds";
+					pReason = NoFundsText;
 					break;
 				case RowState::Cancelled:
 					barColor = Rgb(220, 40, 40);
-					swprintf_s(progress, L"Cancelled");
+					pProgress = CancelledText;
 					break;
 				default:
 					break;
@@ -536,7 +544,7 @@ namespace SelectionInfo
 
 				// The font draws a couple of pixels below its top.
 				const int y = textTop - 1;
-				Text(progress, centreX, y, Rgb(255, 255, 255));
+				Text(pProgress, centreX, y, Rgb(255, 255, 255));
 				if (pReason)
 					Text(pReason, centreX, y + LineHeight, barColor);
 			}
