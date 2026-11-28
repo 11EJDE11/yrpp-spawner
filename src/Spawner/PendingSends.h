@@ -38,7 +38,8 @@ public:
 	// Sends what is waiting to connections that now have room. Each IPXManagerClass::Service.
 	static void Flush();
 
-	// Packets sent late, waiting now, and refused a connection with no room (with no acknowledgement
-	// needed, so dropped for that connection alone).
-	static void GetStats(int& deferred, int& waiting, int& droppedNoAck);
+	// Packets sent late, waiting now, refused a connection with no room (with no acknowledgement
+	// needed, so dropped for that connection alone), and order packets dropped because the waiting
+	// list was full.
+	static void GetStats(int& deferred, int& waiting, int& droppedNoAck, int& droppedFull);
 };

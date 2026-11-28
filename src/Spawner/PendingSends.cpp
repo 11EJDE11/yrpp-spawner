@@ -27,6 +27,7 @@
 #include <Utilities/Debug.h>
 
 #include <deque>
+#include <iterator>
 #include <vector>
 
 namespace
@@ -42,7 +43,9 @@ namespace
 
 	int Deferred = 0;
 	int DroppedNoAck = 0;
+	int DroppedFull = 0;
 	DWORD LastLog = 0;
+	DWORD LastDropLog = 0;
 
 	constexpr size_t MaxWaiting = 512;
 
@@ -82,6 +85,18 @@ namespace
 		Debug::Log("[PendingSends] %s house %d: %d waiting, %d sent late so far.\n",
 			what, house, static_cast<int>(Waiting.size()), Deferred);
 	}
+
+	// An order packet that a peer will never get: that peer will wait for it. Logged on its own, so the
+	// holding messages never hide it.
+	void Log_Dropped(int house)
+	{
+		++DroppedFull;
+		const DWORD now = GetTickCount();
+		if (now - LastDropLog < 1000)
+			return;
+		LastDropLog = now;
+		Debug::Log("[PendingSends] No room left to keep orders for house %d: %d dropped so far.\n", house, DroppedFull);
+	}
 }
 
 void PendingSends::Reset()
@@ -89,13 +104,35 @@ void PendingSends::Reset()
 	Waiting.clear();
 	Deferred = 0;
 	DroppedNoAck = 0;
+	DroppedFull = 0;
 	LastLog = 0;
+	LastDropLog = 0;
 }
 
 void PendingSends::Flush()
 {
+	// A house's packets go out in order: once one of them stays, the rest of that house's wait too.
+	// One entry per connection at most.
+	int blocked[std::size(IPXManagerClass::Instance.Connection)];
+	int blockedCount = 0;
+	const auto isBlocked = [&](int house)
+	{
+		for (int i = 0; i < blockedCount; i++)
+		{
+			if (blocked[i] == house)
+				return true;
+		}
+		return false;
+	};
+
 	for (auto it = Waiting.begin(); it != Waiting.end();)
 	{
+		if (isBlocked(it->House))
+		{
+			++it;
+			continue;
+		}
+
 		IPXConnClass* const connection = Connection_Of(it->House);
 		if (!connection)
 		{
@@ -104,34 +141,25 @@ void PendingSends::Flush()
 			continue;
 		}
 
-		// A house's packets go out in order: once one can't, the rest of its packets wait too.
-		bool earlier_waits = false;
-		for (auto prior = Waiting.begin(); prior != it; ++prior)
-			earlier_waits |= prior->House == it->House;
-
-		if (earlier_waits || !Has_Room(connection))
-		{
-			++it;
-			continue;
-		}
-
-		if (connection->Send_Packet(it->Data.data(), static_cast<int>(it->Data.size()), 1, 0))
+		if (Has_Room(connection) && connection->Send_Packet(it->Data.data(), static_cast<int>(it->Data.size()), 1, 0))
 		{
 			++Deferred;
 			it = Waiting.erase(it);
+			continue;
 		}
-		else
-		{
-			++it;
-		}
+
+		if (blockedCount < static_cast<int>(std::size(blocked)))
+			blocked[blockedCount++] = it->House;
+		++it;
 	}
 }
 
-void PendingSends::GetStats(int& deferred, int& waiting, int& droppedNoAck)
+void PendingSends::GetStats(int& deferred, int& waiting, int& droppedNoAck, int& droppedFull)
 {
 	deferred = Deferred;
 	waiting = static_cast<int>(Waiting.size());
 	droppedNoAck = DroppedNoAck;
+	droppedFull = DroppedFull;
 }
 
 // IPXManagerClass::Send_Private_Message (0x5414C0) to every connection, outside the packet-router
@@ -173,7 +201,7 @@ DEFINE_HOOK(0x54153A, IPXManagerClass_SendToAll_PerConnection, 0x6)
 
 		if (Waiting.size() >= MaxWaiting)
 		{
-			Log_Throttled("No room left to keep orders for", house);
+			Log_Dropped(house);
 			continue;
 		}
 

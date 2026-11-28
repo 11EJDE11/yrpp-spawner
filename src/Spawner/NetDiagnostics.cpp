@@ -592,13 +592,13 @@ void NetDiagnostics::LogSummary(const char* reason)
 
 	int bundles = 0, copiesSent = 0, recovered = 0, redundant = 0;
 	PacketBundling::GetStats(bundles, copiesSent, recovered, redundant);
-	int sentLate = 0, waiting = 0, droppedNoAck = 0;
-	PendingSends::GetStats(sentLate, waiting, droppedNoAck);
+	int sentLate = 0, waiting = 0, droppedNoAck = 0, droppedFull = 0;
+	PendingSends::GetStats(sentLate, waiting, droppedNoAck, droppedFull);
 	Debug::Log("[Audit] queues %s frame=%d | peak send=%d receive=%d global=%d | engine overflows send=%u receive=%u"
 		" | orders held for a full queue: sent late=%d waiting=%d | unreliable dropped=%d\n",
 		reason, frame, g_peakSendQueue, g_peakReceiveQueue, g_peakGlobalQueue,
 		(unsigned)IPXManagerClass::Instance.SendOverflows, (unsigned)IPXManagerClass::Instance.ReceiveOverflows,
-		sentLate, waiting, droppedNoAck);
+		sentLate, waiting, droppedFull, droppedNoAck);
 
 	Debug::Log("[Audit] bundling %s frame=%d enabled=%d bundles=%d copies_sent=%d"
 		" | copies_received recovered=%d already_had=%d\n",
