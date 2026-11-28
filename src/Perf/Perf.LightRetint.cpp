@@ -45,10 +45,14 @@ namespace
 {
 	void DropCellDrawers()
 	{
-		auto& map = MapClass::Instance;
-		map.CellIteratorReset();
-		for (CellClass* pCell = map.CellIteratorNext(); pCell; pCell = map.CellIteratorNext())
+		// The cell array directly, not MapClass's shared cell iterator, which a caller may be walking.
+		auto const& cells = MapClass::Instance.Cells;
+		for (int i = 0; i < cells.Capacity; ++i)
 		{
+			CellClass* const pCell = cells.Items[i];
+			if (!pCell)
+				continue;
+
 			if (auto const pDrawer = pCell->LightConvert)
 			{
 				if (Game::IsActive)
@@ -58,7 +62,7 @@ namespace
 		}
 
 		// The scratch cell drawing uses for cells outside the map.
-		reinterpret_cast<CellClass*>(0xABDC50)->LightConvert = nullptr;
+		MapClass::InvalidCell.LightConvert = nullptr;
 	}
 }
 

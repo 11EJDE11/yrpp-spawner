@@ -35,91 +35,80 @@
 #include <Utilities/Patch.h>
 
 #include <FootClass.h>
+#include <TechnoClass.h>
+#include <TechnoTypeClass.h>
 
 namespace
 {
-	constexpr int OwnSlots = 18;            // TechnoTypeClass::MaxWeapons: below this the Ares hooks do nothing
-	constexpr size_t SlotSize = 28;
-	constexpr size_t WeaponsAt = 0x898;     // TechnoTypeClass::Get_Weapon, 0x7177C0
-	constexpr size_t EliteWeaponsAt = 0xA94; // TechnoTypeClass::Get_Elite_Weapon, 0x7177E0
+	static_assert(sizeof(WeaponStruct) == 28);
 
-	using TypeWeaponFn = void*(__thiscall*)(void* pType, int slot);
-
-	// VeterancyStruct::IsElite (0x750010): at or above the constant at 0x7E37B4.
-	inline bool IsElite(const BYTE* pTechno)
-	{
-		return *reinterpret_cast<const float*>(pTechno + 0x150) >= *reinterpret_cast<const float*>(0x7E37B4);
-	}
-
-	inline void* TypeOf(BYTE* pTechno)
-	{
-		return (*reinterpret_cast<void*(__thiscall***)(void*)>(pTechno))[0x84 / 4](pTechno);
-	}
-
-	// The game's function, line for line: the way for Ares' extra slots.
-	void* GameWay(BYTE* pThis, int slot)
+	// The game's function, line for line: the way for Ares' extra slots. VeterancyStruct::IsElite
+	// (0x750010) compares with the game's 2.0f at 0x7E37B4, as YRpp's IsElite does.
+	WeaponStruct* GameWay(TechnoClass* pThis, int slot)
 	{
 		if (slot == -1)
 			return nullptr;
 
-		if (IsElite(pThis))
+		if (pThis->Veterancy.IsElite())
 		{
-			auto const pWeapon = reinterpret_cast<TypeWeaponFn>(0x7177E0)(TypeOf(pThis), slot);
-			if (pWeapon && *reinterpret_cast<void**>(pWeapon))
+			auto const pWeapon = pThis->GetTechnoType()->GetEliteWeapon(slot);
+			if (pWeapon && pWeapon->WeaponType)
 				return pWeapon;
 		}
 
-		return reinterpret_cast<TypeWeaponFn>(0x7177C0)(TypeOf(pThis), slot);
+		return pThis->GetTechnoType()->GetWeapon(slot);
 	}
 
-	void* __fastcall GetWeapon(BYTE* pThis, void*, int slot)
+	WeaponStruct* __fastcall GetWeapon(TechnoClass* pThis, void*, int slot)
 	{
-		if (slot >= OwnSlots)
+		// Ares' hooks only act from slot 18 (TechnoTypeClass::MaxWeapons) up.
+		if (slot >= TechnoTypeClass::MaxWeapons)
 			return GameWay(pThis, slot);
 
 		if (slot == -1)
 			return nullptr;
 
-		if (IsElite(pThis))
-		{
-			auto const pWeapon = reinterpret_cast<BYTE*>(TypeOf(pThis)) + EliteWeaponsAt + slot * static_cast<int>(SlotSize);
-			if (*reinterpret_cast<void**>(pWeapon))
-				return pWeapon;
-		}
+		auto const pType = pThis->GetTechnoType();
+		if (pThis->Veterancy.IsElite() && pType->EliteWeapon[slot].WeaponType)
+			return &pType->EliteWeapon[slot];
 
-		return reinterpret_cast<BYTE*>(TypeOf(pThis)) + WeaponsAt + slot * static_cast<int>(SlotSize);
+		return &pType->Weapon[slot];
 	}
-}
 
-namespace
-{
-	// FNV-1a over a stretch of the game's code, with the places of known hooks left out.
-	DWORD HashOf(DWORD start, DWORD end, DWORD hookAt = 0, DWORD hookLength = 0)
+	// FNV-1a over a stretch of the game's code.
+	DWORD HashOf(DWORD start, DWORD end)
 	{
 		DWORD hash = 0x811C9DC5;
 		for (DWORD address = start; address < end; ++address)
-		{
-			const BYTE value = address >= hookAt && address < hookAt + hookLength ? 0 : *reinterpret_cast<const BYTE*>(address);
-			hash = (hash ^ value) * 0x01000193;
-		}
+			hash = (hash ^ *reinterpret_cast<const BYTE*>(address)) * 0x01000193;
 
 		return hash;
 	}
+
+	// Ares 3.0p1's hooks on the two type functions, which serve its extra slots and hand the game's own
+	// straight back.
+	const Perf::KnownHook AresWeaponHooks[] = {
+		{ 0x7177C0, 11, L"Ares.dll", "TechnoTypeClass_GetWeapon" },
+		{ 0x7177E0, 11, L"Ares.dll", "TechnoTypeClass_GetEliteWeapon" },
+	};
 }
 
 void Perf::Weapons::Apply()
 {
-	// The whole of TechnoClass::Get_Weapon and of the elite test it calls must be the game's code, and
-	// the two type functions must read the tables this reads (their first bytes are Ares' hooks at run
-	// time, so only the table offset after the hook is compared).
+	// The whole of TechnoClass::Get_Weapon and of the elite test it calls must be the game's code. The
+	// two type functions must read the tables read here (their first bytes are Ares' hooks at run time,
+	// so only the table offset after the hook is compared), and be hooked by Ares alone.
 	if (HashOf(0x70E140, 0x70E195) != 0xA8FFDF62
 		|| HashOf(0x750010, 0x750028) != 0x55DC1300
-		|| *reinterpret_cast<const DWORD*>(0x7177D0) != WeaponsAt
-		|| *reinterpret_cast<const DWORD*>(0x7177F0) != EliteWeaponsAt)
+		|| *reinterpret_cast<const DWORD*>(0x7177D0) != offsetof(TechnoTypeClass, Weapon)
+		|| *reinterpret_cast<const DWORD*>(0x7177F0) != offsetof(TechnoTypeClass, EliteWeapon))
 	{
 		Debug::Log("[Perf] Weapons: TechnoClass::Get_Weapon is not as expected; leaving it alone.\n");
 		return;
 	}
+
+	if (!Perf::OnlyKnownHooks(0x7177C0, 0x7177F8, AresWeaponHooks, "Weapons"))
+		return;
 
 	Patch::Apply_LJMP(0x70E140, &GetWeapon);
 }

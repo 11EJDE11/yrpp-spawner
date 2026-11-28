@@ -78,15 +78,17 @@ namespace
 		Stale = false;
 	}
 
-	// The game's own, entered past the jumps placed on their first instructions.
+	// The game's own, entered past the jumps placed on their first instructions. Both are __thiscall,
+	// so EDX holds nothing on entry; a jump through it, unlike push and ret, leaves the CPU's return
+	// prediction intact for the game's own returns.
 	__declspec(naked) void OriginalEvaluateCell()
 	{
 		__asm
 		{
 			mov eax, [esp + 0x14]
 			push ebx
-			push 0x6F8965
-			ret
+			mov edx, 0x6F8965
+			jmp edx
 		}
 	}
 
@@ -96,8 +98,8 @@ namespace
 		{
 			mov al, [esp + 8]
 			sub esp, 0x14
-			push 0x47E8A7
-			ret
+			mov edx, 0x47E8A7
+			jmp edx
 		}
 	}
 
@@ -153,10 +155,14 @@ namespace
 
 namespace
 {
-	// The hooks Phobos has in Evaluate_Cell, by address and length: one that notes who owns the transport
-	// the scanner rides in, and two that newer builds add to the handling of an object found on the
-	// cell. None of them is reached, or changes anything, for a cell with nothing on it.
-	constexpr DWORD KnownHooks[][2] = { { 0x6F89F4, 6 }, { 0x6F8A92, 10 }, { 0x6F8BBC, 10 } };
+	// The hooks Phobos has in Evaluate_Cell: one that notes who owns the transport the scanner rides in,
+	// and two that newer builds add to the handling of an object found on the cell. None of them is
+	// reached, or changes anything, for a cell with nothing on it.
+	const Perf::KnownHook KnownHooks[] = {
+		{ 0x6F89F4, 6, L"Phobos.dll", "TechnoClass_ThreatEvals_OpenToppedOwner" },
+		{ 0x6F8A92, 10, L"Phobos.dll", "TechnoClass_CheckAutoTarget_AttackFriendlies" },
+		{ 0x6F8BBC, 10, L"Phobos.dll", "TechnoClass_CheckAutoTarget_AttackFriendlies" },
+	};
 
 	// FNV-1a over a stretch of the game's code, with the places of those hooks left out, so that it
 	// comes out the same whether or not they are there.
@@ -165,13 +171,7 @@ namespace
 		DWORD hash = 0x811C9DC5;
 		for (DWORD address = start; address < end; ++address)
 		{
-			BYTE value = *reinterpret_cast<const BYTE*>(address);
-			for (auto const& hook : KnownHooks)
-			{
-				if (address >= hook[0] && address < hook[0] + hook[1])
-					value = 0;
-			}
-
+			const BYTE value = Perf::InKnownHook(address, KnownHooks) ? 0 : *reinterpret_cast<const BYTE*>(address);
 			hash = (hash ^ value) * 0x01000193;
 		}
 
@@ -202,7 +202,7 @@ void Perf::EmptyCells::Apply()
 	static const BYTE evaluateCell[] = { 0x8B, 0x44, 0x24, 0x14, 0x53, 0x55, 0x56, 0x8B, 0xF1, 0x57 };
 	static const BYTE overlapDown[] = { 0x8A, 0x44, 0x24, 0x08, 0x83, 0xEC, 0x14, 0x84, 0xC0, 0x53 };
 	// For a cell with nothing on it the whole of Evaluate_Cell is passed over, so the whole of it has to
-	// be what was read: the game's code, with nothing in it but the hooks listed above. Overlap_Down is
+	// be what was read: the game's code, with nothing in it but the hooks listed above, placed by Phobos. Overlap_Down is
 	// still run in full after the bit is set, so only its first bytes, which the jump replaces, matter.
 	if (memcmp(reinterpret_cast<const void*>(0x6F8960), evaluateCell, sizeof(evaluateCell)) != 0
 		|| memcmp(reinterpret_cast<const void*>(0x47E8A0), overlapDown, sizeof(overlapDown)) != 0
@@ -211,6 +211,9 @@ void Perf::EmptyCells::Apply()
 		Debug::Log("[Perf] EmptyCells: Evaluate_Cell or Overlap_Down is not as expected; leaving them alone.\n");
 		return;
 	}
+
+	if (!Perf::OnlyKnownHooks(0x6F8960, 0x6F8C10, KnownHooks, "EmptyCells"))
+		return;
 
 	Patch::Apply_LJMP(0x47E8A0, &OverlapDown);
 	Patch::Apply_LJMP(0x6F8960, &EvaluateCell);

@@ -66,8 +66,13 @@
 // median 1.055x, the larger the game the more. A run with nothing switched reads 1.005x without drawing
 // and 1.03x with. Every frame's CRC as recorded in all of them.
 
+#include "Perf.h"
+
 #include <Utilities/Debug.h>
 #include <Utilities/Macro.h>
+
+#include <AbstractClass.h>
+#include <Notifications.h>
 
 #include <Windows.h>
 #include <emmintrin.h>
@@ -77,17 +82,20 @@ namespace
 {
 	// The lists Detach_This_From_All walks: every object that wants to hear when an object goes away,
 	// and the ones that want to hear about animations.
-	enum class List { Objects, Anims };
+	enum class Listeners { Objects, Anims };
 
 	// Set for the call in hand: Detach_This_From_All was called as an object left the map.
 	bool FromLimbo = false;
 
-	struct Vector { void* VTable; void*** Items; int Capacity; bool IsInitialized; bool IsAllocated; int Count; int Increment; };
+	using Vector = DynamicVectorClass<AbstractClass*>;
 
-	Vector* ListOf(List list)
+	Vector* ListOf(Listeners list)
 	{
-		return reinterpret_cast<Vector*>(list == List::Objects ? 0xB0F720 : 0xB0F5B8);
+		return &(list == Listeners::Objects ? PointerExpiredNotification::NotifyInvalidObject : PointerExpiredNotification::NotifyInvalidAnim).Array;
 	}
+
+	// An object as the code here reads it: its first word is its vtable.
+	inline void** At(const Vector* vector, int i) { return reinterpret_cast<void**>(vector->Items[i]); }
 
 	// The flag is handed on exactly as the game's loop pushes it, a whole register of which only
 	// the low byte is the flag.
@@ -180,7 +188,8 @@ namespace
 		void Clear() { memset(Bits, 0, sizeof(Bits)); }
 		void Set(DWORD pointer) { const unsigned slot = Slot(pointer); Bits[slot >> 3] |= static_cast<BYTE>(1u << (slot & 7)); }
 		void Reset(DWORD pointer) { const unsigned slot = Slot(pointer); Bits[slot >> 3] &= static_cast<BYTE>(~(1u << (slot & 7))); }
-		bool Has(DWORD pointer) const { const unsigned slot = Slot(pointer); return (Bits[slot >> 3] >> (slot & 7)) & 1; }
+		// Never for a null field, whose slot a waiting pointer may share.
+		bool Has(DWORD pointer) const { const unsigned slot = Slot(pointer); return ((Bits[slot >> 3] >> (slot & 7)) & 1) & static_cast<unsigned>(pointer != 0); }
 	};
 
 	struct Many
@@ -428,7 +437,7 @@ namespace
 		// The list is read afresh each time round, as the game does: a Detach may change it.
 		for (int i = from; i < vector->Count; ++i)
 		{
-			void** const pObject = vector->Items[i];
+			void** const pObject = At(vector, i);
 			if (Cares(pObject, what, removed, bulletsAsked))
 				Tell(pObject, pTarget, removedFlag);
 			else
@@ -492,7 +501,7 @@ namespace
 		const One what(reinterpret_cast<DWORD>(pTarget));
 		for (int i = 0; i < vector->Count; ++i)
 		{
-			void** const pObject = vector->Items[i];
+			void** const pObject = At(vector, i);
 			if (CaresOnLeaving(pObject, what, anim, removed, bulletsAsked))
 				Tell(pObject, pTarget, removedFlag);
 			else
@@ -518,7 +527,7 @@ namespace
 		return vtable == BulletVTable || vtable == AnimVTable;
 	}
 
-	Vector* const Pending = reinterpret_cast<Vector*>(0xB0F698);
+	Vector* const Pending = &AbstractClass::PendingDelete;
 
 	// How many shells and animations the sweep about to start will delete: with only a couple, reading
 	// the lists once per deletion is the cheaper way.
@@ -555,7 +564,7 @@ namespace
 		++Rebuilds;
 		WaitingCount = 0;
 		NotesValid = false;
-		if (ListOf(List::Objects)->Count + ListOf(List::Anims)->Count > static_cast<int>(NoteTable::Size / 2))
+		if (ListOf(Listeners::Objects)->Count + ListOf(Listeners::Anims)->Count > static_cast<int>(NoteTable::Size / 2))
 			return;
 
 		Waiting.Clear();
@@ -576,12 +585,12 @@ namespace
 		}
 
 		const Many what { &Waiting };
-		for (auto const list : { List::Objects, List::Anims })
+		for (auto const list : { Listeners::Objects, Listeners::Anims })
 		{
 			Vector* const vector = ListOf(list);
 			for (int i = 0; i < vector->Count; ++i)
 			{
-				void** const pObject = vector->Items[i];
+				void** const pObject = At(vector, i);
 				// Gone for good is what the sweep's targets are, and scaled shells are few enough to
 				// have every shell asked about them.
 				Notes.Add(reinterpret_cast<DWORD>(pObject), Cares(pObject, what, true, true) != No);
@@ -598,7 +607,7 @@ namespace
 		const unsigned generation = Generation;
 		for (int i = 0; i < vector->Count; ++i)
 		{
-			void** const pObject = vector->Items[i];
+			void** const pObject = At(vector, i);
 			auto const pointer = reinterpret_cast<DWORD>(pObject);
 			const int cares = Notes.Find(pointer) == 1 ? No : Cares(pObject, what, true, bulletsAsked);
 			if (!cares)
@@ -630,7 +639,7 @@ namespace
 }
 
 // The game's loop, asking only the objects that hold the pointer somewhere their Detach looks.
-static void Notify(List list, void* pTarget, DWORD removedFlag)
+static void Notify(Listeners list, void* pTarget, DWORD removedFlag)
 {
 	Vector* const vector = ListOf(list);
 	const bool removed = static_cast<BYTE>(removedFlag) != 0;
@@ -663,35 +672,25 @@ static void Notify(List list, void* pTarget, DWORD removedFlag)
 
 namespace
 {
-	// Whether the module lists a Syringe hook of that name at that address (its .syhks sections hold
-	// address, length and name, one after another).
-	bool HookListed(HMODULE module, DWORD address, DWORD length, const char* name)
-	{
-		auto const base = reinterpret_cast<const BYTE*>(module);
-		auto const dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-		auto const nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-		auto section = IMAGE_FIRST_SECTION(nt);
-		for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
-		{
-			if (memcmp(section->Name, ".syhks", 6) != 0 || section->VirtualAddress + section->Misc.VirtualSize > nt->OptionalHeader.SizeOfImage)
-				continue;
-
-			auto const words = reinterpret_cast<const DWORD*>(base + section->VirtualAddress);
-			const DWORD count = section->Misc.VirtualSize / 4;
-			for (DWORD at = 0; at + 2 < count; ++at)
-			{
-				if (words[at] != address || words[at + 1] != length)
-					continue;
-
-				auto const listed = reinterpret_cast<const BYTE*>(words[at + 2]);
-				const size_t size = strlen(name) + 1;
-				if (listed >= base && listed + size <= base + nt->OptionalHeader.SizeOfImage && memcmp(listed, name, size) == 0)
-					return true;
-			}
-		}
-
-		return false;
-	}
+	// The hooks known to be in the functions read above, by address, length, DLL and name: Ares 3.0p1's,
+	// the Phobos we ship, and three that newer Phobos builds add. Each only narrows when a field the game
+	// already compares is cleared, except two newer Phobos ones: 0x707A2E is where the object's target is
+	// the one going away, a case always handed to the game, and 0x4D9992 is run as described at the top.
+	const Perf::KnownHook KnownHooks[] = {
+		{ 0x707A47, 10, L"Ares.dll", "TechnoClass_PointerGotInvalid_LastTarget" },
+		{ 0x707B09, 6, L"Ares.dll", "TechnoClass_PointerGotInvalid_ResetMindControl" },
+		{ 0x707B19, 6, L"Ares.dll", "TechnoClass_PointerGotInvalid_SpawnCloakOwner" },
+		{ 0x4D99AA, 6, L"Ares.dll", "FootClass_PointerGotInvalid_Parasite" },
+		{ 0x4D9A83, 6, L"Ares.dll", "FootClass_PointerGotInvalid_OccupierVehicleThief" },
+		{ 0x7077FD, 6, L"Phobos.dll", "TechnoClass_PointerExpired_SpawnOwnerFix" },
+		{ 0x707B23, 6, L"Phobos.dll", "TechnoClass_PointerExpired_RemoveSpawnee" },
+		{ 0x4D9A1B, 6, L"Phobos.dll", "FootClass_PointerExpired_RemoveDestination" },
+		{ 0x44E910, 6, L"Phobos.dll", "BuildingClass_PointerExpired_C4ExpFix" },
+		{ 0x425174, 6, L"Phobos.dll", "AnimClass_Detach_Cloak" },
+		{ 0x468503, 6, L"Phobos.dll", "BulletClass_PointerExpired_OwnerFix" },
+		{ 0x707A2E, 5, L"Phobos.dll", "TechnoClass_PointerExpired_TargetExpired" },
+		{ 0x4D9992, 7, L"Phobos.dll", "FootClass_PointerGotInvalid" },
+	};
 
 	// The game's code at 0x4D9992, or Phobos' hook there, which is then run as described at the top.
 	bool FootHookAccepted()
@@ -701,11 +700,10 @@ namespace
 			return true;
 
 		static const char name[] = "FootClass_PointerGotInvalid";
-		auto const phobos = GetModuleHandleA("Phobos.dll");
-		if (!phobos || !HookListed(phobos, FootHookAt, sizeof(game), name))
+		if (!Perf::HookListed(L"Phobos.dll", FootHookAt, sizeof(game), name))
 			return false;
 
-		FootHook = reinterpret_cast<HookFn>(GetProcAddress(phobos, name));
+		FootHook = reinterpret_cast<HookFn>(GetProcAddress(GetModuleHandleA("Phobos.dll"), name));
 		if (!FootHook)
 			return false;
 
@@ -714,9 +712,8 @@ namespace
 	}
 }
 
-// The comparisons above are a reading of fifteen of the game's functions as they stand with Ares 3.0p1's
-// and Phobos' hooks in them (each of which only narrows when a field the game already compares is
-// cleared). Should any of them have been changed in some other way - another hook, a patch, a
+// The comparisons above are a reading of fifteen of the game's functions as they stand with the known
+// hooks in them. Should any of them have been changed in some other way - another hook, a patch, a
 // replaced virtual - the reading may no longer hold, and the game's loop is left to run as it is.
 static bool Usable()
 {
@@ -742,13 +739,6 @@ static bool Usable()
 		{ 0x62FE90, 0x62FF1F, 0x06EC2FF3, "ParticleSystemClass::Detach" },
 		{ 0x4CA580, 0x4CA595, 0x67460BF1, "FactoryClass::Detach" },
 	};
-	// The hooks known to be in them, by address and length. 0x707A2E is one newer Phobos builds add, where
-	// the object's target is the one going away: a case that is always handed to the game. 0x4D9992 is
-	// Phobos' too, and is only accepted as looked into below.
-	static const DWORD hooks[][2] = {
-		{ 0x7077FD, 6 }, { 0x707A2E, 5 }, { 0x707A47, 10 }, { 0x707B09, 6 }, { 0x707B19, 6 }, { 0x707B23, 6 },
-		{ 0x4D9992, 7 }, { 0x4D99AA, 6 }, { 0x4D9A1B, 6 }, { 0x4D9A83, 6 }, { 0x44E910, 6 }, { 0x425174, 6 }, { 0x468503, 6 },
-	};
 	static const DWORD detachSlots[][2] = {
 		{ UnitVTable, 0x7446E0 }, { InfantryVTable, 0x51AA10 }, { AircraftVTable, 0x41B660 }, { BuildingVTable, 0x44E8F0 },
 		{ TerrainVTable, 0x71CFD0 }, { AnimVTable, 0x425150 }, { BulletVTable, 0x4684E0 }, { ParticleSystemVTable, 0x62FE90 },
@@ -761,19 +751,17 @@ static bool Usable()
 		DWORD hash = 0x811C9DC5;
 		for (DWORD address = function.Start; address < function.End; ++address)
 		{
-			BYTE value = *reinterpret_cast<const BYTE*>(address);
-			for (auto const& hook : hooks)
-			{
-				if (address >= hook[0] && address < hook[0] + hook[1])
-					value = 0;
-			}
-
+			const BYTE value = Perf::InKnownHook(address, KnownHooks) ? 0 : *reinterpret_cast<const BYTE*>(address);
 			hash = (hash ^ value) * 0x01000193;
 		}
 
 		if (hash != function.Hash)
 		{
 			Debug::Log("[Perf] Detach: %s is not as expected; the game's own loop is left in place.\n", function.Name);
+			state = -1;
+		}
+		else if (!Perf::OnlyKnownHooks(function.Start, function.End, KnownHooks, "Detach"))
+		{
 			state = -1;
 		}
 	}
@@ -801,7 +789,7 @@ namespace
 	// Detach_This_From_All's caller: ObjectClass::Detach_All, as an object leaves the map.
 	constexpr DWORD CalledFromLimbo = 0x5F5316;
 
-	bool Run_(List list, void* pTarget, DWORD removed, DWORD caller)
+	bool Run_(Listeners list, void* pTarget, DWORD removed, DWORD caller)
 	{
 		FromLimbo = caller == CalledFromLimbo;
 		if (!Usable())
@@ -809,6 +797,17 @@ namespace
 
 		Notify(list, pTarget, removed);
 		return true;
+	}
+
+	// Nothing but this DLL's own hook in the anim loop (0x725A2E-0x725A47), so that the game's loop can
+	// be run from here, call for call, when the shortcut stands down.
+	bool AnimLoopPlain()
+	{
+		static int state = 0;
+		if (!state)
+			state = Perf::OnlyKnownHooks(0x725A33, 0x725A47, KnownHooks, "Detach (animation loop)") ? 1 : -1;
+
+		return state > 0;
 	}
 
 	// The game's Remove_All_Inactive, entered past the jump placed on its first two instructions.
@@ -843,14 +842,35 @@ DEFINE_HOOK(0x72593E, DetachThisFromAll_TellObjects, 0x5)
 	GET(void*, pTarget, ESI);
 	GET(DWORD, removed, EDI);
 	GET_STACK(DWORD, caller, 0x14);
-	return Run_(List::Objects, pTarget, removed, caller) ? 0x725961 : 0;
+	return Run_(Listeners::Objects, pTarget, removed, caller) ? 0x725961 : 0;
 }
 
-// Its loop over the objects told about animations.
+// Its loop over the objects told about animations. The hook is on the loop's first instruction, which
+// every pass jumps back to (the one before the loop, 0x725A1F, is Ares' hook), so when the shortcut
+// stands down the game's loop is run from here, call for call, rather than through the hook each pass.
 DEFINE_HOOK(0x725A2E, DetachThisFromAll_TellAboutAnim, 0x5)
 {
+	enum { LoopDone = 0x725A47 };
+
 	GET(void*, pTarget, ESI);
 	GET(DWORD, removed, EDI);
 	GET_STACK(DWORD, caller, 0x14);
-	return Run_(List::Anims, pTarget, removed, caller) ? 0x725A47 : 0;
+	if (Run_(Listeners::Anims, pTarget, removed, caller))
+		return LoopDone;
+
+	if (!AnimLoopPlain())
+		return 0;
+
+	GET(int, from, EBX);
+	Vector* const vector = ListOf(Listeners::Anims);
+	for (int i = from; i < vector->Count; ++i)
+		Tell(At(vector, i), pTarget, removed);
+
+	return LoopDone;
+}
+
+void Perf::Detach::Check()
+{
+	Usable();
+	AnimLoopPlain();
 }
