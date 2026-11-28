@@ -25,6 +25,9 @@
 #include <WWMouseClass.h>
 #include <Utilities/Debug.h>
 
+#include <algorithm>
+#include <iterator>
+
 // skip error "А mouse is required for playing Yurts Revenge" - remove the GetSystemMetrics check
 DEFINE_JUMP(LJMP, 0x6BD8A4, 0x6BD8C2); // WinMain
 
@@ -121,7 +124,7 @@ DEFINE_HOOK(0x48DAA3, NetworkCallBack_ProgressNeverBack, 0x6)
 }
 
 // Destroy_Connection, whenever a player leaves or is removed. The engine counts kick votes by house
-// (KickVotes, 0xA8BB40, and who cast them, 0xA8BB60), but Kick_Player_Now shifts both as if they were
+// (SessionClass::KickVotes, and who cast them, KickVoters), but Kick_Player_Now shifts both as if they were
 // by connection, which moves the votes cast for one player onto another; and with a player gone the
 // number needed changes too. Votes are cast again from a clean count.
 DEFINE_HOOK(0x5DA750, DestroyConnection_ClearKickVotes, 0x6)
@@ -136,8 +139,9 @@ DEFINE_HOOK(0x5DA750, DestroyConnection_ClearKickVotes, 0x6)
 			error ? "lost its connection" : "left the game", Unsorted::CurrentFrame);
 	}
 
-	memset(reinterpret_cast<void*>(0xA8BB40), 0, 8 * sizeof(int));
-	memset(reinterpret_cast<void*>(0xA8BB60), 0xFF, 64 * sizeof(int));
+	auto& session = SessionClass::Instance;
+	std::fill(std::begin(session.KickVotes), std::end(session.KickVotes), 0);
+	std::fill(std::begin(session.KickVoters), std::end(session.KickVoters), -1);
 	return 0;
 }
 

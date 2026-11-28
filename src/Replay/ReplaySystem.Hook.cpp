@@ -35,6 +35,7 @@
 #include <EventClass.h>
 #include <Helpers/Cast.h>
 #include <HouseClass.h>
+#include <PlanningTokenClass.h>
 #include <PowerClass.h>
 #include <ProgressScreenClass.h>
 #include <ScenarioClass.h>
@@ -98,7 +99,7 @@ DEFINE_HOOK(0x6D46DD, TacticalRender_ShowWatchedPlayerPlanning, 0x5)
 {
 	enum { AfterCall = 0x6D46E2 };
 
-	bool planning = reinterpret_cast<bool(__fastcall*)()>(0x637AA0)();
+	bool planning = PlanningNodeClass::IsPlanningModeActive();
 	if (!planning && ReplayState.Playback)
 		planning = ReplaySystem::OrderFeedback::IsWatchedPlayerPlanning();
 

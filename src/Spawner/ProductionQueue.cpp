@@ -49,6 +49,7 @@
 #include <TechnoClass.h>
 #include <TechnoTypeClass.h>
 #include <EventClass.h>
+#include <Unsorted.h>
 
 bool ProductionQueue::IsActive()
 {
@@ -62,9 +63,7 @@ namespace
 	// whichever factory can build it.
 	bool PlaceCompletedObject(HouseClass* pHouse, AbstractType rtti, bool naval)
 	{
-		using PlaceObject = bool(__thiscall*)(HouseClass*, AbstractType, int, int, CellStruct*);
-		auto* const pCellNone = reinterpret_cast<CellStruct*>(0xB07DD8); // the CELL_NONE the sidebar passes
-		return reinterpret_cast<PlaceObject>(0x4FB0E0)(pHouse, rtti, -1, naval ? 1 : 0, pCellNone);
+		return pHouse->PlaceObject(rtti, -1, naval ? 1 : 0, &Unsorted::CellNone);
 	}
 
 	// Exit every completed non-building product of a house's sidebar factories. Runs on every

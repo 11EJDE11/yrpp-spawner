@@ -1336,11 +1336,11 @@ bool KickAgreement::Handle_Votes()
 	if (!Applicable())
 		return false;
 
-	// KickVotes (0xA8BB40): votes counted here for each house since this wait dialog opened, this
+	// SessionClass::KickVotes: votes counted here for each house since this wait dialog opened, this
 	// player's own included. The engine removes a house once every other player has voted, each machine
 	// at its own frame and without telling the others; the one voted out removes everyone else. Here the
 	// same count asks for a removal everyone agrees on instead.
-	const int* const votes = reinterpret_cast<const int*>(0xA8BB40);
+	const int* const votes = SessionClass::Instance.KickVotes;
 	auto& players = NodeNameType::Array;
 	const int needed = players.Count - 1;
 	const DWORD now = GetTickCount();
