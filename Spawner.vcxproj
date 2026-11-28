@@ -132,6 +132,7 @@
     <ClCompile Include="$(ThisDir)\src\Spawner\Spawner.Hook.cpp" />
     <ClCompile Include="$(ThisDir)\src\Spawner\Statistics.cpp" />
     <!-- UI -->
+    <ClCompile Include="$(ThisDir)\src\UI\Hooks.DialogsEscape.cpp" />
     <ClCompile Include="$(ThisDir)\src\UI\Hooks.SaveButton.cpp" />
     <ClCompile Include="$(ThisDir)\src\UI\DesyncDialog.cpp" />
     <ClCompile Include="$(ThisDir)\src\UI\DesyncDialog.Hook.cpp" />
