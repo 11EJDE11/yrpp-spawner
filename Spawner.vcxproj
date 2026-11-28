@@ -38,6 +38,7 @@
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.AIDifficultyRules.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.ClampTacticalPos.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.ClickDestination.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.CommonCrashes.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.Desyncs.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.ExceptionCatch.cpp" />
@@ -46,7 +47,6 @@
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.PlanningMode.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.SaveLoad.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.TypeSelect.cpp" />
-    <ClCompile Include="$(ThisDir)\src\Misc\Bugfixes.ClickDestination.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\CopyProtection.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\DisableEdgeScrolling.cpp" />
     <ClCompile Include="$(ThisDir)\src\Misc\GameSpeed.cpp" />

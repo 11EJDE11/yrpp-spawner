@@ -151,7 +151,9 @@ namespace
 
 	// When this player last asked for the removal of a house the players voted out.
 	DWORD VoteRequestedAt[MaxPlayers] = {};
-	bool VotedOutLogged = false;
+	// This player was voted out: it starts no removals of its own and leaves after two wait timeouts
+	// if no removal comes.
+	bool VotedOut = false;
 	int VotedOutTimeouts = 0;
 	bool HasLeft = false;      // this player gave up its wait and is leaving: it takes no further part
 	constexpr DWORD VoteRequestEveryMs = 5000;
@@ -716,7 +718,7 @@ namespace
 		{
 			// Voted out, though maybe not by this player's own count: it starts no removals of its own.
 			if (kick.ByVote)
-				VotedOutLogged = true;
+				VotedOut = true;
 
 			// A deputy that can't hear this master asks whether anyone does; On_Prepare answers.
 			if (by_deputy && Me() == Master() && packet.Command == EXT_NET_KICK_PREPARE && !kick.ByVote)
@@ -854,16 +856,18 @@ namespace
 				continue;
 
 			const TheirSync& their = TheirSync::Array[i];
-			DWORD heard = 0;
 			int slot = -1;
 			for (int n = 1; n < NodeNameType::Array.Count; n++)
 			{
 				const NodeNameType* const node = NodeNameType::Array[n];
 				if (node && node->HouseIndex == connection->ID)
+				{
 					slot = static_cast<int>(node->Address.sin_addr.s_addr) - 1;
+					break;
+				}
 			}
 			const DWORD last = PacketBundling::LastReceived(slot);
-			heard = last ? now - last : 0;
+			const DWORD heard = last ? now - last : 0;
 
 			length += std::snprintf(peers + length, sizeof(peers) - length, " | house %d frame %d orders %d/%d heard %ums ago%s",
 				connection->ID, their.Frame, their.CommandsReceived, their.CommandsSent, static_cast<unsigned>(heard),
@@ -916,7 +920,7 @@ TimeoutAction KickAgreement::On_Timeout(int connection_index)
 
 	// Voted out: the others remove this player by agreement. It asks for nothing meanwhile, and if no
 	// decision comes it leaves, as it was voted to.
-	if (VotedOutLogged)
+	if (VotedOut)
 	{
 		if (++VotedOutTimeouts < 2)
 			return TimeoutAction::KeepWaiting;
@@ -1031,7 +1035,7 @@ bool KickAgreement::Handle_Global_Packet(const ExtGlobalPacketType* packet, cons
 	switch (packet->Command)
 	{
 	case EXT_NET_KICK_REQUEST:
-		if (!Decision.Active && !VotedOutLogged && Valid_House(kick.TargetID) && Valid_House(kick.FromID) && kick.TargetID != Me()
+		if (!Decision.Active && !VotedOut && Valid_House(kick.TargetID) && Valid_House(kick.FromID) && kick.TargetID != Me()
 			&& (kick.TargetID == Master() ? Deputy() : Master()) == Me()
 			&& Connected(kick.TargetID) && Connected(kick.FromID)
 			&& CutoffFrame[kick.TargetID] < 0 && CutoffFrame[kick.FromID] < 0)
@@ -1204,7 +1208,7 @@ bool KickAgreement::Hold_Frames()
 void KickAgreement::Reset()
 {
 	std::fill(std::begin(VoteRequestedAt), std::end(VoteRequestedAt), 0);
-	VotedOutLogged = false;
+	VotedOut = false;
 	VotedOutTimeouts = 0;
 	HasLeft = false;
 	for (auto& orders : History)
@@ -1356,9 +1360,9 @@ bool KickAgreement::Handle_Votes()
 		{
 			// Removed by the decision the others ask for; until then this player waits like the rest,
 			// and asks for no removals of its own.
-			if (!VotedOutLogged)
+			if (!VotedOut)
 				Debug::Log("[KickAgreement] The other players voted this player out.\n");
-			VotedOutLogged = true;
+			VotedOut = true;
 			return true;
 		}
 

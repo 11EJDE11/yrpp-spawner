@@ -42,6 +42,7 @@
 #include <Utilities/Debug.h>
 
 #include <cstdio>
+#include <iterator>
 
 bool NetDiagnostics::Enabled = true;
 
@@ -93,7 +94,7 @@ namespace
 	void Sample_Queues()
 	{
 		auto& ipx = IPXManagerClass::Instance;
-		for (int i = 0; i < static_cast<int>(ipx.NumConnections) && i < 7; ++i)
+		for (int i = 0; i < static_cast<int>(ipx.NumConnections) && i < static_cast<int>(std::size(ipx.Connection)); ++i)
 		{
 			const auto* connection = ipx.Connection[i];
 			if (!connection || !connection->Queue)
@@ -595,7 +596,7 @@ void NetDiagnostics::LogSummary(const char* reason)
 	int sentLate = 0, waiting = 0, droppedNoAck = 0, droppedFull = 0;
 	PendingSends::GetStats(sentLate, waiting, droppedNoAck, droppedFull);
 	Debug::Log("[Audit] queues %s frame=%d | peak send=%d receive=%d global=%d | engine overflows send=%u receive=%u"
-		" | orders held for a full queue: sent late=%d waiting=%d | unreliable dropped=%d\n",
+		" | orders held for a full queue: sent late=%d waiting=%d dropped=%d | unreliable dropped=%d\n",
 		reason, frame, g_peakSendQueue, g_peakReceiveQueue, g_peakGlobalQueue,
 		(unsigned)IPXManagerClass::Instance.SendOverflows, (unsigned)IPXManagerClass::Instance.ReceiveOverflows,
 		sentLate, waiting, droppedFull, droppedNoAck);

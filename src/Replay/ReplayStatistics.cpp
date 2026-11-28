@@ -56,6 +56,8 @@ namespace ReplaySystem::Statistics
 		// UnitTrackerClass::UnitTotals.
 		constexpr int TrackerCapacity = 0x200;
 		constexpr size_t MaxTypeNameLength = 128;
+		// Far above any type list's length: a bad index can't make a counter list grow without end.
+		constexpr int MaxTypeIndex = 0x1000;
 		// The statistics packet is built in a 0x8000-byte stack buffer (Send_Statistics_Packet).
 		constexpr int MaxStatsPacketBytes = 0x8000;
 		// Globals Send_Statistics_Packet reads for OOSY and FINI.
@@ -731,7 +733,7 @@ void ReplaySystem::RecordObjectLost(TechnoClass* pTechno, bool scoringTypesOnly)
 	}
 
 	const int index = pType->GetArrayIndex();
-	if (index < 0 || index >= 0x1000)
+	if (index < 0 || index >= Statistics::MaxTypeIndex)
 		return;
 
 	auto& lost = Statistics::CountersFor(pTechno->Owner->ArrayIndex).Lost[static_cast<size_t>(kind)];
@@ -766,7 +768,7 @@ void ReplaySystem::RecordTechBuildingKilled(TechnoClass* pTechno, HouseClass* pK
 		return;
 
 	const int index = pType->GetArrayIndex();
-	if (index < 0 || index >= 0x1000)
+	if (index < 0 || index >= Statistics::MaxTypeIndex)
 		return;
 
 	auto& killed = Statistics::CountersFor(pKillerHouse->ArrayIndex).KilledTechBuildings;
